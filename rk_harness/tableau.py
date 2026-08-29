@@ -50,7 +50,9 @@ def is_explicit(t: Tableau) -> bool:
 
 def _q15_entry(x: Fraction) -> tuple[int, bool]:
     v = x * _Q15_ONE
-    exact = v.denominator == 1
+    # exact: an integer number of LSBs and |x| <= 1 (the value 1 itself is representable
+    # only as the clamped 32767, but counts as exact — orchestrator ruling on B9).
+    exact = v.denominator == 1 and _Q15_MIN <= v <= _Q15_ONE
     q = round(v)
     if q > _Q15_MAX:
         q = _Q15_MAX

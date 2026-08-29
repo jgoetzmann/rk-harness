@@ -53,7 +53,13 @@ def to_q15_state(y: tuple[float, ...], scale: float) -> tuple[Q15, ...]:
     return tuple(q15_from_float(v * scale) for v in y)
 
 
-def make_q15_rhs(phys: Callable, scale: float) -> Callable[[float, tuple[Q15, ...]], tuple[Q15, ...]]:
+# Derivative scale (power of two <= 1). rc_thermal's derivative at t=0 is (-11, 5, 0); times
+# scale 0.25 that is -2.75, outside Q15. Its derivative is stored scaled by 1/8 and the step
+# undoes it through h_q = q15(h / DERIV_SCALE) — see simulate.solve_q15.
+DERIV_SCALE: dict[str, float] = {name: (0.125 if name == "rc_thermal" else 1.0) for name in _NAMES}
+
+
+def make_q15_rhs(phys: Callable, scale: float, deriv_scale: float = 1.0) -> Callable[[float, tuple[Q15, ...]], tuple[Q15, ...]]:
     """Wrap a physical-units float64 derivative as a Q15 derivative.
 
     Q15 state -> physical (q/32768/scale) -> phys(t, y) -> times scale -> q15_from_float
@@ -61,7 +67,7 @@ def make_q15_rhs(phys: Callable, scale: float) -> Callable[[float, tuple[Q15, ..
     def f(t: float, yq: tuple[Q15, ...]) -> tuple[Q15, ...]:
         y = to_physical(yq, scale)
         d = phys(t, y)
-        return tuple(q15_from_float(v * scale) for v in d)
+        return tuple(q15_from_float(v * scale * deriv_scale) for v in d)
     return f
 
 
@@ -233,7 +239,7 @@ def _make(name: str, reference: Callable[[float], tuple[float, ...]]) -> Problem
     return Problem(
         name=name,
         n_states=int(d["n_states"]),
-        f=make_q15_rhs(FLOAT_RHS[name], scale),
+        f=make_q15_rhs(FLOAT_RHS[name], scale, DERIV_SCALE[name]),
         y0=to_q15_state(y0_phys, scale),
         t_end=float(d["t_end"]),
         scale=scale,

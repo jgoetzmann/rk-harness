@@ -370,7 +370,10 @@ def build_layout(arch: ArchiveState, st: RunState) -> Layout:
 
 
 def render(arch: ArchiveState, st: RunState) -> None:
-    Console().print(build_layout(arch, st))
+    console = Console()
+    # A Layout is clipped to the console height; under capture that is 25 lines, which hides
+    # panels. Render at a height that fits every panel.
+    console.print(build_layout(arch, st), height=max(console.height, 60))
 
 
 def main() -> int:

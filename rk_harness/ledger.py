@@ -58,11 +58,11 @@ OPS = ("<", ">", "<=", ">=", "==")
 CONNECTIVES = ("AND", "OR")
 MAX_PREDICATE_CHARS = 2000
 
-_FIELD_RE = re.compile(r"^(fast|slow|avr_approx)\.p([0-9])s([0-9])\.(heldout|search|cycles|order)$")
-_NUMBER_RE = re.compile(r"^-?(?:[0-9]+\.[0-9]*|[0-9]+|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$")
+_FIELD_PATTERN = r"^(fast|slow|avr_approx)\.p([0-9])s([0-9])\.(heldout|search|cycles|order)$"
+_NUMBER_PATTERN = r"^-?(?:[0-9]+\.[0-9]*|[0-9]+|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$"
 # Tokens: two-char ops first, then one-char ops, then bare words/numbers. Anything else is a
 # single "junk" character token which the parser rejects.
-_TOKEN_RE = re.compile(r"<=|>=|==|<|>|[A-Za-z_][A-Za-z0-9_.]*|-?[0-9.]+(?:[eE][-+]?[0-9]+)?|\S")
+_TOKEN_PATTERN = r"<=|>=|==|<|>|[A-Za-z_][A-Za-z0-9_.]*|-?[0-9.]+(?:[eE][-+]?[0-9]+)?|\S"
 
 # Required hypothesis keys and their accepted types (HANDOFF §6 example).
 _HYP_REQUIRED = {
@@ -71,7 +71,7 @@ _HYP_REQUIRED = {
 }
 _HYP_OPTIONAL = ("verdict", "n_samples", "effect_size", "resolved_cycle")
 _RESOLUTION_KEYS = ("id", "verdict", "n_samples", "effect_size", "resolved_cycle")
-_ID_RE = re.compile(r"^H-[0-9]+$")
+_ID_PATTERN = r"^H-[0-9]+$"
 
 
 # --------------------------------------------------------------------------- parsing
@@ -83,23 +83,23 @@ def _tokenize(src: str) -> list[str]:
         raise PredicateSyntaxError("predicate too long")
     if any(ord(ch) < 32 and ch not in " \t" for ch in src):
         raise PredicateSyntaxError("control character in predicate")
-    tokens = _TOKEN_RE.findall(src)
+    tokens = re.findall(_TOKEN_PATTERN, src)
     if not tokens:
         raise PredicateSyntaxError("empty predicate")
     return tokens
 
 
 def _parse_field(tok: str) -> Field:
-    m = _FIELD_RE.match(tok)
+    m = re.match(_FIELD_PATTERN, tok)
     if m is None:
         raise PredicateSyntaxError(f"expected field, got {tok!r}")
     return Field(m.group(1), int(m.group(2)), int(m.group(3)), m.group(4))
 
 
 def _parse_operand(tok: str) -> Field | float:
-    if _FIELD_RE.match(tok):
+    if re.match(_FIELD_PATTERN, tok):
         return _parse_field(tok)
-    if _NUMBER_RE.match(tok):
+    if re.match(_NUMBER_PATTERN, tok):
         value = float(tok)
         if not math.isfinite(value):
             raise PredicateSyntaxError("non-finite number")
@@ -242,7 +242,7 @@ def _validate_hypothesis(h: dict) -> dict:
             raise ValueError(f"missing hypothesis key: {key}")
         if not isinstance(h[key], typ) or isinstance(h[key], bool):
             raise ValueError(f"hypothesis key {key} must be {typ.__name__}")
-    if not _ID_RE.match(h["id"]):
+    if not re.match(_ID_PATTERN, h["id"]):
         raise ValueError("hypothesis id must match H-<digits>")
     if h["min_samples"] < 1:
         raise ValueError("min_samples must be >= 1")

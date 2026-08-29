@@ -19,7 +19,7 @@ import math
 from rk_harness.coeffrep import to_rep
 from rk_harness.costmodel import cycle_count
 from rk_harness.fixedpoint import q15_add, q15_apply, q15_from_float, q15_mul
-from rk_harness.problems import PROBLEMS, error_metric, to_physical
+from rk_harness.problems import DERIV_SCALE, PROBLEMS, error_metric, to_physical
 from rk_harness.types import CostModel, Problem, Q15, Tableau
 
 
@@ -91,7 +91,7 @@ def solve_q15(t: Tableau, problem: Problem, n: int) -> tuple[tuple[Q15, ...], in
     Raises Q15OverflowError from any primitive, including h >= 1 (h_q unrepresentable).
     """
     h = problem.t_end / n
-    h_q = q15_from_float(h)
+    h_q = q15_from_float(h / DERIV_SCALE.get(problem.name, 1.0))
     s = len(t.b)
     reps_A = [[(to_rep(x) if x != 0 else None) for x in row] for row in t.A]
     reps_b = [(to_rep(x) if x != 0 else None) for x in t.b]

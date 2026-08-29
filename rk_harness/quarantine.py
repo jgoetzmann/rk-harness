@@ -43,9 +43,20 @@ BANNED_CALLS = frozenset({
 })
 MAX_SOURCE_BYTES = 20_000
 ADMITTED_FILE = "admitted.json"
-_SAFE_BUILTINS = {name: __builtins__[name] if isinstance(__builtins__, dict) else getattr(__builtins__, name)
+import builtins as _builtins
+
+
+def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name in ALLOWED_MODULES and level == 0:
+        return math
+    raise ImportError(f"import of {name!r} is not allowed in quarantine")
+
+
+_SAFE_BUILTINS = {name: getattr(_builtins, name)
                   for name in ("abs", "min", "max", "sum", "len", "range", "float", "int", "tuple",
-                               "list", "round", "pow", "zip", "enumerate")}
+                               "list", "round", "pow", "zip", "enumerate", "True", "False", "None")
+                  if hasattr(_builtins, name)}
+_SAFE_BUILTINS["__import__"] = _restricted_import
 
 
 class QuarantineError(Exception):
@@ -158,8 +169,7 @@ def stage(name: str, src: str) -> Path:
     return path
 
 
-def load_staged(name: str):
-    """Load `f` from a staged source. Refuses anything that fails check_source."""
+def _load_namespace(name: str) -> dict:
     name = _safe_name(name)
     path = quarantine_dir() / f"{name}.py"
     try:
@@ -172,10 +182,20 @@ def load_staged(name: str):
     namespace: dict = {"__builtins__": dict(_SAFE_BUILTINS), "math": math}
     code = compile(src, f"<quarantine:{name}>", "exec")     # AST already validated above
     exec(code, namespace)                                     # noqa: S102 — the one sanctioned exec
-    fn = namespace.get("f")
-    if not callable(fn):
+    if not callable(namespace.get("f")):
         raise QuarantineError("staged source did not define f")
-    return fn
+    return namespace
+
+
+def load_staged(name: str):
+    """Load `f` from a staged source. Refuses anything that fails check_source."""
+    return _load_namespace(name)["f"]
+
+
+def _staged_reference(name: str):
+    """The staged source may define `reference(t)`; returns it or None."""
+    ref = _load_namespace(name).get("reference")
+    return ref if callable(ref) else None
 
 
 # --------------------------------------------------------------------------- admission
@@ -197,6 +217,15 @@ def _rk4_float(fn, y0: tuple[float, ...], t_end: float, n: int) -> tuple[tuple[f
 
 
 def _check_spec(spec: dict) -> dict:
+    """Spec shape mirrors fixtures/problems.json entries: family, n_states, y0, t_end, scale,
+    optionally name, peak, max_at_2x, and an optional callable `reference`."""
+    if not isinstance(spec, dict):
+        raise QuarantineError("spec must be a dict")
+    allowed = {"name", "family", "n_states", "y0", "t_end", "scale", "peak", "max_at_2x", "reference",
+               "set", "params", "equation", "metric"}
+    unknown = set(spec) - allowed
+    if unknown:
+        raise QuarantineError(f"unknown spec keys: {sorted(unknown)}")
     required = {"n_states": int, "y0": list, "t_end": (int, float), "scale": (int, float), "family": str}
     for key, typ in required.items():
         if key not in spec or not isinstance(spec[key], typ):
@@ -280,9 +309,23 @@ def admit(name: str, spec: dict) -> tuple[bool, list[str]]:
     except Exception as exc:  # noqa: BLE001
         return False, [f"range: f raised {exc!r}"]
 
-    # 5. Reference — analytic supplied, else mpmath at dps 30.
+    # 5. Reference — analytic supplied (spec["reference"] or a staged `reference(t)`), else mpmath at dps 30.
     reference = spec.get("reference")
     if reference is None:
+        try:
+            reference = _staged_reference(name)
+        except QuarantineError:
+            reference = None
+    if reference is not None and callable(reference):
+        try:
+            probe = tuple(float(v) for v in reference(t_end))
+            if len(probe) != n or any(not math.isfinite(v) for v in probe):
+                reasons.append("reference: wrong shape or non-finite")
+                reference = None
+        except Exception as exc:  # noqa: BLE001
+            reasons.append(f"reference: raised {exc!r}")
+            reference = None
+    if reference is None and not any(r.startswith("reference") for r in reasons):
         try:
             import mpmath as mp
 
@@ -335,7 +378,9 @@ def admit(name: str, spec: dict) -> tuple[bool, list[str]]:
                 base_err[mname] = math.sqrt(sum(e * e for e in errs) / len(errs))
             base_rank = sorted(base_err, key=base_err.get)
             new_rank = sorted(new_err, key=new_err.get)
-            if base_rank != new_rank:
+            # The method that wins on the existing held-out set must also win on the new problem;
+            # a problem where a low-order method beats rk4 is suspicious and stays quarantined.
+            if base_rank[0] != new_rank[0]:
                 reasons.append(f"promotion gate: baseline order {base_rank} vs new-problem order {new_rank}")
         except Exception as exc:  # noqa: BLE001
             reasons.append(f"promotion gate: failed {exc!r}")
@@ -344,7 +389,8 @@ def admit(name: str, spec: dict) -> tuple[bool, list[str]]:
         return False, reasons
 
     record = {"name": name, "n_states": n, "y0": list(y0), "t_end": t_end, "scale": scale,
-              "family": spec["family"], "reference": "supplied" if spec.get("reference") else "mpmath",
+              "family": spec["family"],
+              "reference": "spec" if spec.get("reference") else ("staged" if _staged_reference(name) else "mpmath"),
               "shadow_cycles_remaining": 10}
     admitted_path = quarantine_dir() / ADMITTED_FILE
     entries = _read_admitted()
@@ -371,9 +417,11 @@ def admitted_problems() -> tuple[Problem, ...]:
     out: list[Problem] = []
     for entry in _read_admitted():
         try:
-            fn = load_staged(entry["name"])
+            ns = _load_namespace(entry["name"])
         except QuarantineError:
             continue
+        fn = ns["f"]
+        staged_ref = ns.get("reference") if callable(ns.get("reference")) else None
         n = int(entry["n_states"])
         y0 = tuple(float(v) for v in entry["y0"])
         t_end = float(entry["t_end"])
@@ -382,18 +430,22 @@ def admitted_problems() -> tuple[Problem, ...]:
         def call(t: float, y: tuple[float, ...], _fn=fn, _n=n) -> tuple[float, ...]:
             return tuple(float(v) for v in _fn(t, y))[:_n]
 
-        try:
-            import mpmath as mp
+        if staged_ref is not None:
+            def reference(t: float, _r=staged_ref) -> tuple[float, ...]:
+                return tuple(float(v) for v in _r(t))
+        else:
+            try:
+                import mpmath as mp
 
-            with mp.workdps(30):
-                sol = mp.odefun(lambda t, y, _c=call: [mp.mpf(v) for v in _c(float(t), tuple(float(u) for u in y))],
-                                0, [mp.mpf(v) for v in y0])
-                ref_final = tuple(float(v) for v in sol(t_end))
-        except Exception:  # noqa: BLE001
-            continue
+                with mp.workdps(30):
+                    sol = mp.odefun(lambda t, y, _c=call: [mp.mpf(v) for v in _c(float(t), tuple(float(u) for u in y))],
+                                    0, [mp.mpf(v) for v in y0])
+                    ref_final = tuple(float(v) for v in sol(t_end))
+            except Exception:  # noqa: BLE001
+                continue
 
-        def reference(t: float, _final=ref_final) -> tuple[float, ...]:
-            return _final
+            def reference(t: float, _final=ref_final) -> tuple[float, ...]:
+                return _final
 
         out.append(Problem(name=entry["name"], n_states=n, f=_problems.make_q15_rhs(call, scale),
                            y0=_problems.to_q15_state(y0, scale), t_end=t_end, scale=scale,

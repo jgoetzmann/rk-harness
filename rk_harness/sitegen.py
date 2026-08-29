@@ -234,7 +234,8 @@ def render_hypotheses(hyps: list[dict]) -> str:
     if not hyps:
         parts.append("<p>no hypotheses recorded</p>")
     else:
-        parts.append("<table><tr><th>id</th><th>predicate</th><th>verdict</th><th>n_samples</th>"
+        parts.append("<table><tr><th>id</th><th>statement</th><th>mechanism</th><th>control</th>"
+                     "<th>predicate</th><th>verdict</th><th>n_samples</th>"
                      "<th>effect_size</th><th>min_samples</th><th>resolved_cycle</th><th>cycle</th>"
                      "<th>rationale</th></tr>")
         for h in sorted(hyps, key=lambda d: str(d.get("id", ""))):
@@ -242,6 +243,9 @@ def render_hypotheses(hyps: list[dict]) -> str:
             parts.append(
                 "<tr>"
                 f"<td>{_esc(h.get('id', ''))}</td>"
+                f"<td>{_esc(h.get('statement', ''))}</td>"
+                f"<td>{_esc(h.get('mechanism', ''))}</td>"
+                f"<td>{_esc(h.get('control', ''))}</td>"
                 f"<td>{_esc(h.get('predicate', ''))}</td>"
                 f"<td>{_esc(verdict) if verdict is not None else 'open'}</td>"
                 f"<td>{_num(h.get('n_samples'))}</td>"
