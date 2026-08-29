@@ -202,8 +202,11 @@ def log_event(kind: str, **detail) -> None:
         fh.flush()
 
 
-def _rejected_hashes() -> set[str]:
-    """tableau_hash of every 'rejected' event so far (skipped on later cycles)."""
+def _rejected_hashes(current_vh: str | None = None) -> set[str]:
+    """tableau_hash of every 'rejected' event so far (skipped on later cycles).
+
+    A rejection is only binding under the verifier that produced it: events carrying a different
+    verifier_hash (or none — older event format) are re-verified rather than skipped."""
     out: set[str] = set()
     path = _events_path()
     if not path.exists():
@@ -219,6 +222,8 @@ def _rejected_hashes() -> set[str]:
                 continue
             if isinstance(ev, dict) and ev.get("kind") == "rejected":
                 h = ev.get("tableau_hash")
+                if current_vh is not None and ev.get("verifier_hash") != current_vh:
+                    continue
                 if isinstance(h, str):
                     out.add(h)
     return out
@@ -456,7 +461,7 @@ def _run_cycle(state: RunState) -> RunState:
 
     # 3. candidates
     existing = {r.tableau_hash for r in archive.read_all()}
-    seen = set(existing) | _rejected_hashes()
+    seen = set(existing) | _rejected_hashes(vh)
     cands: list[_Candidate] = []
     enumeration_phase = False
     enumeration_exhausted = False
@@ -520,7 +525,7 @@ def _run_cycle(state: RunState) -> RunState:
             code = verdict.code if verdict is not None else "NAN_OR_INF"
             detail = verdict.detail if verdict is not None else "no score"
             log_event("rejected", code=code, detail=detail, tableau_hash=h,
-                      claimed_order=cand.order, directive_id=cand.directive_id)
+                      claimed_order=cand.order, directive_id=cand.directive_id, verifier_hash=vh)
             continue
         stg = tableau_mod.stages(t)
         bucket = archive.cycle_bucket(int(sv.cycles["m0plus_fast"]))

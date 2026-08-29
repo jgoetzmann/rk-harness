@@ -1262,7 +1262,7 @@ def test_V11_verify_uses_module_attribute_evaluate(monkeypatch, ct):
         ("error_constant nan", {"error_constant": float("nan")}, "NAN_OR_INF"),
         ("stability_imag inf", {"stability_imag": float("inf")}, "NAN_OR_INF"),
         ("measured_order inf", {"measured_order": float("inf")}, "NAN_OR_INF"),
-        ("per_problem inf", {"per_problem": {**_per_problem(), "slow:dahlquist": float("inf")}}, "NAN_OR_INF"),
+        ("per_problem inf", {"per_problem": {**_per_problem(), "dahlquist": float("inf")}}, "NAN_OR_INF"),
         ("per_problem nan", {"per_problem": {**_per_problem(), "pendulum": float("nan")}}, "NAN_OR_INF"),
         ("overflow_margin 0.9", {"overflow_margin": 0.9}, "Q15_OVERFLOW"),
         ("overflow_margin 1.0", {"overflow_margin": 1.0}, "Q15_OVERFLOW"),

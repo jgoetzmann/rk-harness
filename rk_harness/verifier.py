@@ -138,7 +138,12 @@ def _score_checks(sv: ScoreVector) -> VerdictReason | None:
     for name, v in scalars:
         if not _is_finite_number(v):
             return VerdictReason("NAN_OR_INF", f"{name} = {v!r}")
+    # Only the primary-model columns gate verification. "slow:*" and "avr_approx:*" entries are
+    # archive columns (HANDOFF §1 scope lock, §4.5: no claim may rest on AVR_APPROX), and an
+    # expensive method legitimately gets too few steps under a 32-cycle multiplier.
     for key, v in sv.per_problem.items():
+        if ":" in key:
+            continue
         if not _is_finite_number(v):
             return VerdictReason("NAN_OR_INF", f"per_problem[{key!r}] = {v!r}")
     return None
