@@ -18,9 +18,10 @@ section (0, A, B, C, K).
 - **J4 (set the system clock forward).** Executed through the real code path with `RK_CLOCK`
   driving `runner.now()` (the same function the encourager receives) instead of changing the
   Windows clock. All three transitions fire.
-- **F1 (`.wslconfig`).** `C:\Users\jacob\.wslconfig` carries another project's settings (a
-  "governor" that computes its own caps inside the VM). It was **not** overwritten. The §13 file
-  is `scripts/wslconfig.rk`; copy it over and `wsl --shutdown` when the other project allows.
+- **F1 (`.wslconfig`).** `C:\Users\jacob\.wslconfig` carried another project's settings (a
+  "governor" with processors=4, swap=0). With the owner's go-ahead it was overwritten with the §13
+  file (`scripts/wslconfig.rk`); the previous version is kept at `~/.wslconfig.bak-governor`.
+  After `wsl --shutdown`, the VM reports 7.8 GiB RAM, 8 CPUs, 4 GiB swap.
 - **0.2 (`Q15_INEXACT` grep).** Zero hits in code, tests, scripts and fixtures. `docs/HANDOFF.md`
   mentions the string because it documents the v2 defect; that is the only hit in the repo.
 - **A3 positive control.** The container gate prints its summary only when pytest is not run

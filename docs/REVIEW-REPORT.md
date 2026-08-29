@@ -11,7 +11,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | C | green |
 | D | green |
 | E | green (pending MANUAL: 2) |
-| F | green (pending MANUAL: 6) |
+| F | green (pending MANUAL: 5) |
 | G | green (pending MANUAL: 2) |
 | H | green |
 | I | green |
@@ -43,7 +43,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | A13 | PASS | check_source walks the AST (ast.parse/ast.walk present, no regex on source); 'import os' -> ["import of 'os' not allowed"] |
 | A1 | PASS | write to /harness inside the container: touch: cannot touch '/harness/.probe': Read-only file system rc=1 |
 | A3 | PASS | coeffrep.py altered by one line: container exit 1; stderr: VERIFIER HASH MISMATCH â€” refusing to run |
-| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 888 deselected in 4.46s'] |
+| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 888 deselected in 4.87s'] |
 | B1 | PASS | G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14, G15, G16, G17, G18, G19, G20, G21, G22, G23, G24, G25, G26, G27 passed |
 | B2 | PASS | convergence: euler 0.9849 (7 pts), heun2 2.0109 (8 pts), kutta3 3.0404 (5 pts), rk4 4.0706 (3 pts) |
 | B3 | PASS | rk4 real -2.785294, imag 2.828427 |
@@ -72,14 +72,14 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | D6 | PASS | better on both aggregates but only 1 family -> unreplicated (heldout_verified needs >= 2 families) |
 | D7 | PASS | 6 yielded tableaus; every A entry is k/2^s with s<=15 before the runner verifies (snap happens inside search.project) |
 | E1 | PASS | E2 passed (two runs, same seed -> byte-identical archive) |
-| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 2 records; kill#2: replay ok, 10 records; kill#3: replay ok, 22 records; final run exit 0: 22 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": true, "stall_counter": 0, "accepted": 12, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}', '{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 0, "rejected": 0, "skipped": 0, "total": 0}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 3, "phase": 1, "improved": false, "stall_counter": 1, "accepted": 0, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
+| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 1 records; kill#2: replay ok, 8 records; kill#3: replay ok, 21 records; final run exit 0: 21 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 1, "rejected": 0, "skipped": 0, "total": 1}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": false, "stall_counter": 1, "accepted": 1, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
 | E3 | PASS | R2, B34 passed (truncated last JSONL line discarded) |
 | E4 | MANUAL | docker pause rk for 60 s mid-evaluation, then compare the cycle's records against an unpaused run (R3); cost model is analytic so host load cannot change scores |
 | E5 | PASS | R4, R5 passed (missing / corrupt RUNSTATE.json rebuild from replay) |
 | E6 | MANUAL | pull the laptop power mid-run once; restart; confirm the runner replays and loses <= 1 cycle |
 | E7 | PASS | save_state -> _atomic_write_text: writes <name>.<pid>.tmp, fsync, then os.replace (never in place): True |
 | E8 | PASS | B62, E3 passed (sitegen deterministic; byte-identical rebuild) |
-| F1 | MANUAL | C:\Users\jacob\.wslconfig differs from §13 (have->want): {'processors': ('4', '8'), 'swap': ('0', '4GB'), 'autoMemoryReclaim': (None, 'gradual'), 'sparseVhd': (None, 'true')}. It carries another project's settings, so it was not overwritten; the §13 file is at scripts/wslconfig.rk — copy it, then `wsl --shutdown` and confirm with `free -h` |
+| F1 | PASS | C:\Users\jacob\.wslconfig matches §13 |
 | F2 | MANUAL | start the container, load Windows: scripts/watchdog.ps1 must print 'docker pause' within ~40 s |
 | F3 | MANUAL | drop the foreground load: watchdog must print 'docker unpause' within ~40 s |
 | F4 | MANUAL | watch Vmmem in Task Manager for one hour: plateau, not climb (autoMemoryReclaim) |
