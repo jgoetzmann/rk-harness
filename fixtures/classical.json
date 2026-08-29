@@ -1,0 +1,85 @@
+{
+  "_comment": "HANDOFF section 9. Computed and verified. Do not regenerate. Fractions are 'num/den' strings. Cycle counts at n_states=1 under section 4.5 rules.",
+  "euler": {
+    "A": [["0"]], "b": ["1"], "c": ["0"],
+    "stages": 1, "order": 1, "row_sums_ok": true, "all_dyadic": true,
+    "csd_total": 0, "quant_err": 0.0, "cycles_fast": 5, "cycles_slow": 5
+  },
+  "midpoint": {
+    "A": [["0", "0"], ["1/2", "0"]], "b": ["0", "1"], "c": ["0", "1/2"],
+    "stages": 2, "order": 2, "row_sums_ok": true, "all_dyadic": true,
+    "csd_total": 1, "quant_err": 0.0, "cycles_fast": 11, "cycles_slow": 11
+  },
+  "heun2": {
+    "A": [["0", "0"], ["1", "0"]], "b": ["1/2", "1/2"], "c": ["0", "1"],
+    "stages": 2, "order": 2, "row_sums_ok": true, "all_dyadic": true,
+    "csd_total": 2, "quant_err": 0.0, "cycles_fast": 13, "cycles_slow": 13
+  },
+  "ralston2": {
+    "A": [["0", "0"], ["2/3", "0"]], "b": ["1/4", "3/4"], "c": ["0", "2/3"],
+    "stages": 2, "order": 2, "row_sums_ok": true, "all_dyadic": false,
+    "csd_total": 11, "quant_err": 1.017e-05, "cycles_fast": 16, "cycles_slow": 30
+  },
+  "heun3": {
+    "A": [["0", "0", "0"], ["1/3", "0", "0"], ["0", "2/3", "0"]], "b": ["1/4", "0", "3/4"], "c": ["0", "1/3", "2/3"],
+    "stages": 3, "order": 3, "row_sums_ok": true, "all_dyadic": false,
+    "csd_total": 19, "quant_err": 1.017e-05, "cycles_fast": 23, "cycles_slow": 50
+  },
+  "kutta3": {
+    "A": [["0", "0", "0"], ["1/2", "0", "0"], ["-1", "2", "0"]], "b": ["1/6", "2/3", "1/6"], "c": ["0", "1/2", "1"],
+    "stages": 3, "order": 3, "row_sums_ok": true, "all_dyadic": false,
+    "csd_total": 26, "quant_err": 1.017e-05, "cycles_fast": 26, "cycles_slow": 65
+  },
+  "rk4": {
+    "A": [["0", "0", "0", "0"], ["1/2", "0", "0", "0"], ["0", "1/2", "0", "0"], ["0", "0", "1", "0"]],
+    "b": ["1/6", "1/3", "1/3", "1/6"], "c": ["0", "1/2", "1/2", "1"],
+    "stages": 4, "order": 4, "row_sums_ok": true, "all_dyadic": false,
+    "csd_total": 34, "quant_err": 5.086e-06, "cycles_fast": 33, "cycles_slow": 85
+  },
+  "rk38": {
+    "A": [["0", "0", "0", "0"], ["1/3", "0", "0", "0"], ["-1/3", "1", "0", "0"], ["1", "-1", "1", "0"]],
+    "b": ["1/8", "3/8", "3/8", "1/8"], "c": ["0", "1/3", "2/3", "1"],
+    "stages": 4, "order": 4, "row_sums_ok": true, "all_dyadic": false,
+    "csd_total": 22, "quant_err": 5.086e-06, "cycles_fast": 36, "cycles_slow": 64
+  },
+  "_anchor_cycles": {
+    "_comment": "HANDOFF section 9.5. cycle_count(t, model, n_states).",
+    "rk4":  {"1": {"m0plus_fast": 33, "m0plus_slow": 85},  "2": {"m0plus_fast": 66, "m0plus_slow": 170}, "4": {"m0plus_fast": 132, "m0plus_slow": 340}},
+    "rk38": {"1": {"m0plus_fast": 36, "m0plus_slow": 64},  "2": {"m0plus_fast": 72, "m0plus_slow": 128}, "4": {"m0plus_fast": 144, "m0plus_slow": 256}}
+  },
+  "_rk4_order5_residuals": ["1/120", "1/240", "-1/240", "1/120", "1/80", "-1/120", "-1/240", "1/240", "-1/120"],
+  "_stability": {
+    "_comment": "HANDOFF section 9.3. Bisection, 4000 samples, 200 iterations. Imag extent 0 means < 0.01.",
+    "euler":    {"R": ["1", "1"],                          "real": -2.000000, "imag": 0.0},
+    "heun2":    {"R": ["1", "1", "1/2"],                   "real": -2.000000, "imag": 0.0},
+    "midpoint": {"R": ["1", "1", "1/2"],                   "real": -2.000000, "imag": 0.0},
+    "kutta3":   {"R": ["1", "1", "1/2", "1/6"],            "real": -2.512745, "imag": 1.732051},
+    "rk4":      {"R": ["1", "1", "1/2", "1/6", "1/24"],    "real": -2.785294, "imag": 2.828427},
+    "rk38":     {"R": ["1", "1", "1/2", "1/6", "1/24"],    "real": -2.785294, "imag": 2.828427}
+  },
+  "_measured_order_dahlquist": {
+    "_comment": "HANDOFF section 4.7, float64, t_end=10, absolute final-state error, longest consistent slope run.",
+    "euler":  {"measured": 0.9849, "points": 7, "expected": 1},
+    "heun2":  {"measured": 2.0109, "points": 8, "expected": 2},
+    "kutta3": {"measured": 3.0404, "points": 5, "expected": 3},
+    "rk4":    {"measured": 4.0706, "points": 3, "expected": 4}
+  },
+  "_tree_counts": {"1": 1, "2": 1, "3": 2, "4": 4, "5": 9, "6": 20},
+  "_coeffrep": {
+    "_comment": "HANDOFF section 4.2b. value -> [m, s, exact, csd_weight]",
+    "1": [1, 0, true, 1], "2": [2, 0, true, 1], "-1": [-1, 0, true, 1],
+    "1/2": [1, 1, true, 1], "1/4": [1, 2, true, 1], "3/4": [3, 2, true, 2], "3/8": [3, 3, true, 2],
+    "1/3": [21845, 16, false, 8], "1/6": [21845, 17, false, 8], "2/3": [21845, 15, false, 8], "-1/3": [-21845, 16, false, 8]
+  },
+  "_phase0": {
+    "_comment": "HANDOFF section 9.6. a21 = m/2^s, s<=6, |a21|<=2: 256 candidates, 16 with b exactly representable.",
+    "candidates": 256, "valid": 16,
+    "cheapest_slow": [
+      {"cycles": 11, "a21": "1/2", "b": ["0", "1"], "name": "midpoint"},
+      {"cycles": 13, "a21": "-1/2", "b": ["2", "-1"]},
+      {"cycles": 13, "a21": "1", "b": ["1/2", "1/2"], "name": "heun2"},
+      {"cycles": 13, "a21": "1/4", "b": ["-1", "2"]},
+      {"cycles": 15, "a21": "-1", "b": ["3/2", "-1/2"]}
+    ]
+  }
+}

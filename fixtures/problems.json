@@ -1,0 +1,49 @@
+{
+  "_comment": "HANDOFF section 11. Peaks measured by float64 RK4 at 40,000 steps. Scale factors are powers of two. max_at_2x = 2 * peak * scale.",
+  "dahlquist": {
+    "set": "search", "family": "linear", "n_states": 1, "y0": [1.0], "t_end": 10.0,
+    "scale": 0.25, "peak": 1.000000, "max_at_2x": 0.500,
+    "equation": "y' = -y", "reference": "analytic exp(-t)"
+  },
+  "damped_osc": {
+    "set": "search", "family": "oscillatory", "n_states": 2, "y0": [1.0, 0.0], "t_end": 40.0,
+    "scale": 0.25, "peak": 1.000000, "max_at_2x": 0.500,
+    "params": {"zeta": 0.1, "omega": 1.0},
+    "equation": "x'' + 2 zeta omega x' + omega^2 x = 0",
+    "reference": "analytic x(t) = exp(-zeta omega t)(cos(wd t) + (zeta omega/wd) sin(wd t)), wd = omega sqrt(1-zeta^2)"
+  },
+  "vanderpol_mild": {
+    "set": "search", "family": "nonlinear", "n_states": 2, "y0": [1.0, 0.0], "t_end": 20.0,
+    "scale": 0.0625, "peak": 2.226469, "max_at_2x": 0.278,
+    "params": {"mu": 0.5},
+    "equation": "x'' = mu (1 - x^2) x' - x",
+    "reference": "mpmath odefun at mp.dps = 30"
+  },
+  "pendulum": {
+    "set": "heldout", "family": "nonlinear", "n_states": 2, "y0": [1.0, 0.0], "t_end": 60.0,
+    "scale": 0.25, "peak": 1.000000, "max_at_2x": 0.500,
+    "equation": "theta'' = -sin theta",
+    "metric": "energy drift |E(t) - E(0)|, E = omega^2/2 + (1 - cos theta)"
+  },
+  "dc_motor": {
+    "set": "heldout", "family": "linear", "n_states": 2, "y0": [0.0, 0.0], "t_end": 5.0,
+    "scale": 0.125, "peak": 1.996771, "max_at_2x": 0.499,
+    "params": {"R": 2.0, "L": 0.5, "K_e": 0.1, "K_t": 0.1, "B": 0.02, "J": 0.02, "V": 1.0},
+    "equation": "di/dt = (-R i - K_e w + V)/L ; dw/dt = (K_t i - B w)/J",
+    "reference": "analytic via matrix exponential"
+  },
+  "rc_thermal": {
+    "set": "heldout", "family": "stiff", "n_states": 3, "y0": [1.0, 0.0, 0.0], "t_end": 4.0,
+    "scale": 0.25, "peak": 1.000000, "max_at_2x": 0.500,
+    "params": {"A": [[-11, 10, 0], [5, -6, 1], [0, 2, -2]]},
+    "eigenvalues": [-16.047758, -2.723435, -0.228807], "stiffness_ratio": 70.137,
+    "equation": "y' = A y", "reference": "analytic via matrix exponential"
+  },
+  "quaternion": {
+    "set": "heldout", "family": "geometric", "n_states": 4, "y0": [1.0, 0.0, 0.0, 0.0], "t_end": 30.0,
+    "scale": 0.25, "peak": 1.000000, "max_at_2x": 0.500,
+    "params": {"omega": [0.3, 0.2, 0.5]},
+    "equation": "q' = 1/2 Omega(omega) q",
+    "metric": "norm drift | ||q|| - 1 |"
+  }
+}
