@@ -16,7 +16,7 @@ from pathlib import Path
 
 from rk_harness.ledger import load_hypotheses
 from rk_harness.orderconditions import achieved_order_symbolic
-from rk_harness.paths import archive_dir, work_dir  # noqa: F401
+from rk_harness.paths import archive_dir
 from rk_harness.problems import FAMILY
 from rk_harness.tableau import content_hash, from_json, stages, to_json
 from rk_harness.types import TIERS, ArchiveState, CellStat, Record, ScoreVector, Tier

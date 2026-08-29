@@ -206,7 +206,7 @@ def cmaes_island(order: int, stages: int, seed: int, constraints: dict, budget: 
         x0 = [float(v) for v in x0_raw]
     else:
         x0 = _default_x0(stages)
-    budget_cycles = int(constraints.get("budget_cycles", _DEFAULT_BUDGET_CYCLES) or _DEFAULT_BUDGET_CYCLES)
+    budget_cycles = _DEFAULT_BUDGET_CYCLES
     evals = 0
     best = math.inf
     seen: set[str] = set()

@@ -17,7 +17,6 @@ from rk_harness.paths import FIXTURES_DIR, work_dir
 from rk_harness.costmodel import M0PLUS_FAST, M0PLUS_SLOW, cycle_count
 from rk_harness.problems import PROBLEMS, FLOAT_RHS, error_metric
 from rk_harness.simulate import solve_float, problem_error
-from rk_harness.fixedpoint import Q15OverflowError
 
 _INF = float("inf")
 
@@ -82,8 +81,6 @@ def sweep(t: Tableau, problem_name: str, ns: list[int]) -> list[dict]:
         h = p.t_end / n
         try:
             q15_err = float(problem_error(t, p, n)[0])
-        except Q15OverflowError:
-            q15_err = _INF
         except Exception:
             q15_err = _INF
         if not math.isfinite(q15_err):

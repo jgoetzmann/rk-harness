@@ -17,7 +17,6 @@ from rk_harness.problems import SEARCH_SET, HELDOUT_SET, FLOAT_RHS
 from rk_harness.costmodel import M0PLUS_FAST, M0PLUS_SLOW, AVR_APPROX, cycle_count
 from rk_harness.coeffrep import tableau_csd_total, tableau_quant_error
 from rk_harness.orderconditions import residuals, achieved_order_symbolic, trees
-from rk_harness.fixedpoint import Q15OverflowError
 
 DEFAULT_BUDGET_CYCLES = 65536
 CONVERGENCE_NS = [8 * 2**k for k in range(12)]
@@ -202,9 +201,6 @@ def _run_set(t: Tableau, problems: tuple[Problem, ...], model: CostModel,
                 e = _INF
             per[p.name] = e
             max_q = max(max_q, abs(int(q)))
-        except Q15OverflowError:
-            per[p.name] = _INF
-            overflowed = True
         except Exception:
             per[p.name] = _INF
             overflowed = True

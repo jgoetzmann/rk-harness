@@ -9,17 +9,15 @@ Two integrators over the same tableau:
   using the CoeffRep from `rk_harness.coeffrep.to_rep`. Every intermediate stage input
   and every new state feeds the tracked maximum |q|. Q15OverflowError propagates.
 
-This module sits in search.py's import graph: it reads only `PROBLEMS`, `to_physical`
+This module sits in search.py's import graph: it reads only `DERIV_SCALE`, `to_physical`
 and `error_metric` from problems.py.
 """
 from __future__ import annotations
 
-import math
-
 from rk_harness.coeffrep import to_rep
 from rk_harness.costmodel import cycle_count
 from rk_harness.fixedpoint import q15_add, q15_apply, q15_from_float, q15_mul
-from rk_harness.problems import DERIV_SCALE, PROBLEMS, error_metric, to_physical
+from rk_harness.problems import DERIV_SCALE, error_metric, to_physical
 from rk_harness.types import CostModel, Problem, Q15, Tableau
 
 
@@ -143,21 +141,8 @@ def steps_for_budget(t: Tableau, model: CostModel, n_states: int, budget_cycles:
     return budget_cycles // cost
 
 
-def _fallback_error(problem: Problem, y_phys: tuple[float, ...]) -> float:
-    """Error for a problem not in PROBLEMS (runtime-admitted quarantine problems):
-    L2 distance to reference(t_end), scaled by the reference's peak magnitude (>= 1)."""
-    ref = problem.reference(problem.t_end)
-    peak = 1.0
-    for v in ref:
-        if abs(v) > peak:
-            peak = abs(v)
-    return math.sqrt(sum((a - b) ** 2 for a, b in zip(y_phys, ref))) / peak
-
-
 def problem_error(t: Tableau, problem: Problem, n: int) -> tuple[float, int]:
     """(error_metric(name, to_physical(final)), max_abs_q). Raises Q15OverflowError."""
     final, max_abs = solve_q15(t, problem, n)
     y_phys = to_physical(final, problem.scale)
-    if problem.name in PROBLEMS:
-        return error_metric(problem.name, y_phys), max_abs
-    return _fallback_error(problem, y_phys), max_abs
+    return error_metric(problem.name, y_phys), max_abs
