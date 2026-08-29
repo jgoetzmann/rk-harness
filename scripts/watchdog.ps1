@@ -7,7 +7,8 @@ param(
     [int]$PollSeconds = 10,
     [double]$MinFreeGB = 5.0,
     [int]$HeartbeatStaleSeconds = 120,
-    [int]$NoCandidateMinutes = 30
+    [int]$NoCandidateMinutes = 30,
+    [switch]$Once
 )
 $ErrorActionPreference = "Continue"
 
@@ -35,7 +36,7 @@ function Get-LastVerifiedAge {
     foreach ($line in (Get-Content $p -Tail 400)) {
         try {
             $o = $line | ConvertFrom-Json
-            if ($o.kind -eq "record" -or $o.kind -eq "record_appended") { $last = [datetime]::Parse($o.ts).ToUniversalTime() }
+            if ($o.kind -eq "accepted") { $last = [datetime]::Parse($o.ts).ToUniversalTime() }
         } catch {}
     }
     if ($null -eq $last) { return $null }
@@ -55,8 +56,8 @@ $alerted = $false
 Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s"
 
 while ($true) {
-    Start-Sleep -Seconds $PollSeconds
-    if (-not (Container-Running)) { Write-Host "$(Get-Date -Format s) container not running; watchdog idle"; continue }
+    if (-not $Once) { Start-Sleep -Seconds $PollSeconds }
+    if (-not (Container-Running)) { Write-Host "$(Get-Date -Format s) container not running; watchdog idle"; if ($Once) { break }; continue }
 
     # 1. Killfile: graceful stop at the cycle boundary (the runner polls STOP itself).
     if (Test-Path (Join-Path $Work "STOP")) {
@@ -72,7 +73,7 @@ while ($true) {
             if ($age -gt $HeartbeatStaleSeconds -and -not $paused) {
                 Write-Host "$(Get-Date -Format s) heartbeat stale ${age}s -> docker kill"
                 docker kill $Container | Out-Null
-                continue
+                if ($Once) { break }; continue
             }
         } catch { Write-Host "heartbeat unreadable" }
     }
@@ -88,7 +89,7 @@ while ($true) {
     if ($spend -gt $cap) {
         Write-Host "$(Get-Date -Format s) spend $spend USD > cap $cap -> docker stop"
         docker stop $Container | Out-Null
-        continue
+        if ($Once) { break }; continue
     }
 
     # 5. Disk free on the work volume < 5 GB -> hard stop.
@@ -97,7 +98,7 @@ while ($true) {
     if ($freeGB -lt $MinFreeGB) {
         Write-Host "$(Get-Date -Format s) disk free ${freeGB} GB < $MinFreeGB -> docker stop"
         docker stop $Container | Out-Null
-        continue
+        if ($Once) { break }; continue
     }
 
     # Pause watchdog (§13.5): non-container CPU > 50% for 30 s -> pause; < 30% for 30 s -> unpause.
@@ -120,4 +121,5 @@ while ($true) {
         Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for 30s -> docker unpause"
         docker unpause $Container | Out-Null; $paused = $false; $lowSince = $null
     }
+    if ($Once) { break }
 }

@@ -20,7 +20,6 @@ from rich.table import Table
 from rich.text import Text
 
 from rk_harness import archive
-from rk_harness import credentials
 from rk_harness import encourager
 from rk_harness import enumeration
 from rk_harness import tableau as tableau_mod
@@ -36,6 +35,17 @@ _enum_cache: dict[int, tuple[int, frozenset[str]]] = {}
 # ----------------------------------------------------------------------------
 # private helpers (duplicates of runner's on purpose; runner is not importable here)
 # ----------------------------------------------------------------------------
+
+
+def _cap_usd() -> float:
+    """Monthly cap for display only, read from the event stream (the runner logs `cap_usd` on
+    every cycle_done) so the read-only dashboard never touches credentials (review A6 / K13)."""
+    cap = 50.0
+    for ev in reversed(_all_events()):
+        if ev.get("kind") in ("cycle_done", "spend_cap_exceeded") and isinstance(ev.get("cap_usd"), (int, float)):
+            cap = float(ev["cap_usd"])
+            break
+    return cap if cap > 0 else 50.0
 
 def _now() -> datetime.datetime:
     raw = os.environ.get("RK_CLOCK")
@@ -180,7 +190,7 @@ def _header_panel(st: RunState, now: datetime.datetime) -> Panel:
     started = _parse_ts(st.started_at)
     uptime = _fmt_td(now - started) if started else "n/a"
     try:
-        cap = credentials.monthly_cap_usd()
+        cap = _cap_usd()
     except Exception:
         cap = float("nan")
     hb = _parse_ts(st.last_heartbeat)
@@ -219,7 +229,7 @@ def _candidates_panel(arch: ArchiveState, st: RunState, events: list[dict],
                     n_hour += 1
         lines.append(f"candidates/hour: {n_hour}")
     try:
-        cap = credentials.monthly_cap_usd()
+        cap = _cap_usd()
         lines.append(f"spend remaining: ${max(cap - st.spend_usd, 0.0):.4f}")
     except Exception:
         lines.append("spend remaining: n/a")

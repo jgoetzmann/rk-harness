@@ -438,8 +438,10 @@ def _run_cycle(state: RunState) -> RunState:
     # 1. replay, verifier hash, baselines
     arch = archive.replay()
     vh = verifier_hash.compute_verifier_hash()
-    if arch.n_records == 0:
-        n = seed_baselines(vh)
+    # Seed on every cycle, not only when the archive is empty: seed_baselines skips hashes already
+    # archived, and a crash mid-seeding (review E2 / R1) must not leave the baselines half-written.
+    n = seed_baselines(vh)
+    if n:
         log_event("baselines_seeded", count=n, verifier_hash=vh)
         arch = archive.replay()
 
@@ -601,7 +603,8 @@ def _run_cycle(state: RunState) -> RunState:
     )
     save_state(new_state)
     log_event("cycle_done", cycle_id=new_cycle_id, phase=new_phase, improved=improved,
-              stall_counter=new_state.stall_counter, accepted=n_accepted, rejected=n_rejected)
+              stall_counter=new_state.stall_counter, accepted=n_accepted, rejected=n_rejected,
+              spend_usd=new_state.spend_usd, cap_usd=credentials.monthly_cap_usd())
     return new_state
 
 
@@ -618,12 +621,22 @@ def main(argv: list[str] | None = None) -> int:
     state = load_state()
     done = 0
     limit = 1 if args.once else args.cycles
-    while not (work_dir() / "STOP").exists():
+    while True:
+        # Killfile (HANDOFF §13.4): graceful stop at the cycle boundary.
+        if (work_dir() / "STOP").exists():
+            log_event("stopped_by_killfile", cycle_id=state.cycle_id)
+            print("STOP present; stopping at cycle boundary", file=sys.stderr)
+            return 0
+        # Spend cap (HANDOFF §13.4, review G2): local hard stop, independent of the host watchdog.
+        cap = credentials.monthly_cap_usd()
+        if state.spend_usd > cap:
+            log_event("spend_cap_exceeded", spend_usd=state.spend_usd, cap_usd=cap, cycle_id=state.cycle_id)
+            print(f"spend {state.spend_usd:.4f} USD exceeds cap {cap:.4f}; hard stop", file=sys.stderr)
+            return 3
+        if limit is not None and done >= limit:
+            return 0
         state = run_cycle(state)
         done += 1
-        if limit is not None and done >= limit:
-            break
-    return 0
 
 
 if __name__ == "__main__":
