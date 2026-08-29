@@ -1,0 +1,18 @@
+[project]
+name = "rk-harness"
+version = "0.1.0"
+description = "Quantization-aware Runge-Kutta discovery harness (Q15 / Cortex-M0+)"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy==2.1.3", "scipy==1.14.1", "sympy==1.13.3", "mpmath==1.3.0",
+  "scikit-learn==1.5.2", "cma==4.0.0", "jsonschema==4.23.0", "rich==13.9.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
+markers = ["slow: takes seconds (evaluate / verify / search / run_cycle)"]
+filterwarnings = ["ignore::UserWarning:cma"]
