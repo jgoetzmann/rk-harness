@@ -1,13 +1,27 @@
 # Container wrapper - HANDOFF section 13.2. Hand-written (HANDOFF section 16.1).
-# Builds the image, creates the restricted bridge, and starts the container with the exact
-# flags from the handoff. Paths default to D:\rk\{harness,work,findings}.
+# Builds the image, creates the restricted bridge, and starts the container. Resource flags and
+# runner settings come from the workspace config.json via start.ps1; the defaults below are the
+# handoff's values.
 param(
     [string]$Harness  = "D:/rk/harness",
     [string]$Work     = "D:/rk/work",
     [string]$Findings = "D:/rk/findings",
     [string]$EnvFile  = "D:/rk/.env",
     [string]$CodexAuth = (Join-Path $env:USERPROFILE ".codex\auth.json"),
-    [string]$Llm = "",          # off | on (API key) | codex (mounted auth.json); default: codex if auth.json exists, else off
+    [string]$Llm = "auto",          # auto | codex | on | off
+    [string]$Model = "",
+    [double]$Cpus = 4,
+    [double]$MemoryGB = 6,
+    [int]$PidsLimit = 512,
+    [int]$CpuShares = 256,
+    [double]$ScratchGB = 2,
+    [int]$EvalBudget = 200,
+    [int]$EnumPerCycle = 500,
+    [int]$MaxMinutes = 0,
+    [int]$MaxCycles = 0,
+    [bool]$Site = $true,
+    [bool]$GitCommit = $true,
+    [string]$Phase = "",
     [switch]$Build
 )
 $ErrorActionPreference = "Stop"
@@ -42,22 +56,37 @@ $mounts = @(
     "-v", "${Work}:/work",
     "-v", "${Findings}:/findings"
 )
-if (Test-Path $CodexAuth) {
-    $mounts += @("-v", "${CodexAuth}:/root/.codex/auth.json:ro")
-    if (-not $Llm) { $Llm = "codex" }
-} else {
-    Write-Host "note: $CodexAuth not found; Codex OAuth not mounted (authenticate on the host first)"
-    if (-not $Llm) { $Llm = "off" }
-}
-Write-Host "LLM mode: RK_LLM=$Llm"
+$haveAuth = Test-Path $CodexAuth
+if ($haveAuth) { $mounts += @("-v", "${CodexAuth}:/root/.codex/auth.json:ro") }
+else { Write-Host "note: $CodexAuth not found; Codex OAuth not mounted (authenticate on the host first)" }
+if ($Llm -eq "auto") { if ($haveAuth) { $Llm = "codex" } else { $Llm = "off" } }
+if ($Llm -eq "codex" -and -not $haveAuth) { Write-Host "warning: RK_LLM=codex requested but auth.json is missing; directives will fall back"; }
+Write-Host "LLM mode: RK_LLM=$Llm$(if ($Model) { " model=$Model" })"
+
+$envFlags = @(
+    "-e", "RK_LLM=$Llm",
+    "-e", "RK_SITE=$(if ($Site) { 'on' } else { 'off' })",
+    "-e", "RK_GIT_COMMIT=$(if ($GitCommit) { 'on' } else { 'off' })",
+    "-e", "RK_EVAL_BUDGET=$EvalBudget",
+    "-e", "RK_ENUM_PER_CYCLE=$EnumPerCycle",
+    "-e", "RK_MAX_MINUTES=$MaxMinutes",
+    "-e", "RK_MAX_CYCLES=$MaxCycles"
+)
+if ($Model) { $envFlags += @("-e", "RK_LLM_MODEL=$Model") }
+if ($Phase -ne "") { $envFlags += @("-e", "RK_PHASE=$Phase") }
+
+$mem = "{0}g" -f $MemoryGB
+$scratch = "/scratch:size={0}g" -f $ScratchGB
+Write-Host "resources: cpus=$Cpus memory=$mem pids-limit=$PidsLimit cpu-shares=$CpuShares tmpfs=$scratch"
+Write-Host "limits: max_minutes=$MaxMinutes max_cycles=$MaxCycles eval_budget=$EvalBudget enum_per_cycle=$EnumPerCycle"
 
 docker run -d --name rk `
-  --cpus=4 --memory=6g --pids-limit=512 --cpu-shares=256 `
-  --tmpfs /scratch:size=2g `
+  --cpus=$Cpus --memory=$mem --pids-limit=$PidsLimit --cpu-shares=$CpuShares `
+  --tmpfs $scratch `
   @mounts `
   --env-file $ContainerEnv `
-  -e "RK_LLM=$Llm" -e "RK_SITE=on" -e "RK_GIT_COMMIT=on" `
+  @envFlags `
   --network rk-net `
   rk-harness:latest
 if ($LASTEXITCODE -ne 0) { exit 1 }
-Write-Host "rk started. Watchdog (kill switch + host-side push): scripts/watchdog.ps1 -Work $Work -Findings $Findings"
+Write-Host "rk started."

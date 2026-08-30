@@ -1,0 +1,36 @@
+{
+  "_comment": "Operational settings for the rk run. Edit with configure.py (python configure.py explain). Scientific thresholds (UNSTABLE, overflow margin, cost tables) are NOT here on purpose: changing them invalidates the archive and the verifier hash.",
+  "container": {
+    "cpus": 4,
+    "memory_gb": 6,
+    "pids_limit": 512,
+    "cpu_shares": 256,
+    "scratch_tmpfs_gb": 2
+  },
+  "run": {
+    "llm": "auto",
+    "llm_model": "",
+    "eval_budget": 200,
+    "enum_per_cycle": 500,
+    "auto_stop_minutes": 0,
+    "auto_stop_cycles": 0,
+    "site": true,
+    "git_commit": true,
+    "initial_phase": null
+  },
+  "watchdog": {
+    "poll_seconds": 10,
+    "heartbeat_stale_seconds": 120,
+    "min_free_gb": 5.0,
+    "no_candidate_minutes": 30,
+    "push_minutes": 10,
+    "battery_guard": true,
+    "cpu_pause_high_percent": 50,
+    "cpu_pause_low_percent": 30,
+    "cpu_pause_sustain_seconds": 30
+  },
+  "watcher": {
+    "refresh_seconds": 5,
+    "events_tail": 25
+  }
+}

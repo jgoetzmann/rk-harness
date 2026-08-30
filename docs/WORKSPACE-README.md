@@ -17,6 +17,7 @@ gating section green; falsification verdict *proceed*. The only open items are p
 ```
 handoff.md      the frozen spec (HANDOFF v3)             review.md   pre-flight checklist
 start.ps1       start container + watchdog               stop.ps1    graceful / forced stop
+watcher.ps1     live status window                       config.json + configure.py   settings
 rk-harness/     the code: package rk_harness, tests (943), fixtures, scripts, Dockerfile.
                 Mounted READ-ONLY into the container; the pinned VERIFIER_HASH guards it.
 rk-work/        the run's state: archive/YYYY-MM-DD.jsonl (one record per verified tableau),
@@ -26,15 +27,47 @@ rk-findings/    the generated site (docs/) -> https://jgoetzmann.github.io/rk-fi
 
 All three `rk-*` directories are git repos pushed to github.com/jgoetzmann/.
 
-## Start / stop / watch
+## Start / stop / watch / configure
 
 ```powershell
-.\start.ps1                 # start (add -Build after changing anything in rk-harness)
+.\start.ps1                 # start container + watchdog from config.json (add -Build after changing rk-harness)
 .\stop.ps1                  # graceful stop at the next cycle boundary (-Force = now)
+.\watcher.ps1               # opens the live status window (read-only; Ctrl+C there never touches the run)
+python configure.py show    # settings;  explain = every key with meaning/range;  set key=value [--apply]
 docker logs -f rk           # container log (quiet after the startup gate)
-Get-Content rk-work\events.jsonl -Tail 20 -Wait      # the live event stream
-cd rk-harness; $env:RK_WORK_DIR="..\rk-work"; .venv\Scripts\python.exe -m rk_harness.dashboard   # TUI
+Get-Content rk-work\events.jsonl -Tail 20 -Wait      # the raw event stream
 ```
+
+### Settings (`config.json`, edited with `configure.py`)
+
+Operational knobs only — resources, limits, LLM mode, watchdog thresholds. Scientific thresholds
+(UNSTABLE, overflow margin, cost tables) are deliberately not configurable: changing them
+invalidates the archive and the verifier hash.
+
+```
+python configure.py set container.cpus=6 container.memory_gb=8      # container resources
+python configure.py set run.auto_stop_minutes=480                   # stop after 8 h (at a cycle boundary)
+python configure.py set run.auto_stop_cycles=20                     # or after N cycles
+python configure.py set run.llm=off                                 # auto | codex | on | off
+python configure.py set run.enum_per_cycle=200 run.eval_budget=400  # work per cycle
+python configure.py set watchdog.battery_guard=false watchdog.push_minutes=5 watchdog.cpu_pause_high_percent=70
+python configure.py set ... --apply      # stop + start so it takes effect (container/watchdog keys need a restart)
+python configure.py reset                # back to the handoff defaults
+```
+
+### The watcher window
+
+`.\watcher.ps1` opens a 170-column terminal that refreshes every `watcher.refresh_seconds` with:
+container state, uptime, heartbeat age, watchdog presence; cycle/phase (with what the phase
+means); the full settings plus the container's live RK_* environment and resource limits;
+LLM mode, number of directive calls, Codex plan usage (% of the weekly limit, reset date, last
+call's tokens), API spend vs cap; progress (cycles, accepted/rejected, rate, reject codes,
+enumeration ETA, tier counts, grid coverage, last improvement, current cell); what it is
+working on (encourager action, current directive with its rationale/constraints/hypothesis,
+last island, open/refuted hypotheses with statements); health (verifier hash pin, abandoned
+cycles, last stop reason, disk, last pushes, falsification summary); per-cell best vs classical
+baselines and the best `heldout_verified` records; and the event tail. `-Once` prints a
+snapshot; `-Here` runs it in the current terminal.
 
 There is no Python entry point to run by hand: the container's `entrypoint.sh` is the
 launcher (`python -m rk_harness.runner` inside it). After a reboot just run `.\start.ps1`

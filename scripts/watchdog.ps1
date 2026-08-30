@@ -10,6 +10,9 @@ param(
     [int]$NoCandidateMinutes = 30,
     [string]$Findings = "D:/rk/findings",
     [int]$PushMinutes = 10,
+    [int]$CpuHigh = 50,             # pause when non-container host CPU stays above this ...
+    [int]$CpuLow = 30,              # ... unpause when it stays below this ...
+    [int]$CpuSustainSeconds = 30,   # ... for this long
     [switch]$NoBatteryGuard,
     [switch]$Once
 )
@@ -78,7 +81,7 @@ $highSince = $null
 $lowSince = $null
 $paused = $false
 $alerted = $false
-Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s"
+Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s heartbeat-stale=${HeartbeatStaleSeconds}s min-free=${MinFreeGB}GB push=${PushMinutes}min cpu-pause=${CpuHigh}/${CpuLow}% for ${CpuSustainSeconds}s battery-guard=$(-not $NoBatteryGuard)"
 
 while ($true) {
     if (-not $Once) { Start-Sleep -Seconds $PollSeconds }
@@ -154,15 +157,15 @@ while ($true) {
     } catch {}
     $host_cpu = [math]::Max(0.0, $total - $ctr)
     $now = Get-Date
-    if ($host_cpu -gt 50) { if ($null -eq $highSince) { $highSince = $now }; $lowSince = $null }
-    elseif ($host_cpu -lt 30) { if ($null -eq $lowSince) { $lowSince = $now }; $highSince = $null }
+    if ($host_cpu -gt $CpuHigh) { if ($null -eq $highSince) { $highSince = $now }; $lowSince = $null }
+    elseif ($host_cpu -lt $CpuLow) { if ($null -eq $lowSince) { $lowSince = $now }; $highSince = $null }
     else { $highSince = $null; $lowSince = $null }
 
-    if (-not $paused -and $null -ne $highSince -and ($now - $highSince).TotalSeconds -ge 30) {
-        Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for 30s -> docker pause"
+    if (-not $paused -and $null -ne $highSince -and ($now - $highSince).TotalSeconds -ge $CpuSustainSeconds) {
+        Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for ${CpuSustainSeconds}s -> docker pause"
         docker pause $Container | Out-Null; $paused = $true; $highSince = $null
-    } elseif ($paused -and $null -ne $lowSince -and ($now - $lowSince).TotalSeconds -ge 30) {
-        Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for 30s -> docker unpause"
+    } elseif ($paused -and -not $pausedBattery -and $null -ne $lowSince -and ($now - $lowSince).TotalSeconds -ge $CpuSustainSeconds) {
+        Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for ${CpuSustainSeconds}s -> docker unpause"
         docker unpause $Container | Out-Null; $paused = $false; $lowSince = $null
     }
     if ($Once) { break }

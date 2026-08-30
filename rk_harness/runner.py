@@ -40,7 +40,16 @@ HEARTBEAT_INTERVAL_S = 10
 _LLM_URL = "https://api.openai.com/v1/chat/completions"
 _LLM_IN_USD_PER_M = 0.4
 _LLM_OUT_USD_PER_M = 1.6
-_ENUM_PER_CYCLE = 500          # enumeration candidates processed per cycle (Phase 0 has 16)
+_ENUM_PER_CYCLE_DEFAULT = 500  # enumeration candidates processed per cycle (Phase 0 has 16)
+
+
+def _enum_per_cycle() -> int:
+    """RK_ENUM_PER_CYCLE (config.json run.enum_per_cycle) or the default."""
+    try:
+        n = int(os.environ.get("RK_ENUM_PER_CYCLE", _ENUM_PER_CYCLE_DEFAULT))
+    except ValueError:
+        n = _ENUM_PER_CYCLE_DEFAULT
+    return max(1, n)
 
 _heartbeat_thread: threading.Thread | None = None
 
@@ -446,14 +455,17 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int) -> tupl
         try:
             d = directive_mod.parse_directive(content)
             log_event("directive_accepted", directive_id=d.get("directive_id"),
-                      hypothesis_id=d.get("hypothesis_id"))
+                      hypothesis_id=d.get("hypothesis_id"), target_order=d.get("target_order"),
+                      stages=d.get("stages"), constraints=d.get("constraints"),
+                      rationale=d.get("rationale"), source="llm")
             return d, spent
         except directive_mod.DirectiveError as e:
             log_event("directive_rejected", error=str(e), text=content[:500])
     elif os.environ.get("RK_LLM") in ("on", "codex"):
         log_event("llm_skipped", reason="spend cap reached", spend_usd=state.spend_usd)
     d = directive_mod.fallback_directive(arch, phase, new_cycle_id)
-    log_event("directive_fallback", directive_id=d.get("directive_id"))
+    log_event("directive_fallback", directive_id=d.get("directive_id"), target_order=d.get("target_order"),
+              stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
     return d, spent
 
 
@@ -549,7 +561,7 @@ def _run_cycle(state: RunState) -> RunState:
         all_pts = enumeration.enumerate_phase0()
         fresh = [t for t in all_pts if tableau_mod.content_hash(t) not in seen]
         enumeration_exhausted = len(fresh) == 0
-        cands = [_Candidate(t, 2, 0, did, None) for t in fresh[:_ENUM_PER_CYCLE]]
+        cands = [_Candidate(t, 2, 0, did, None) for t in fresh[:_enum_per_cycle()]]
         log_event("enumeration", phase=0, total=len(all_pts), remaining=len(fresh),
                   taken=len(cands), directive_id=did)
     elif phase == 1:
@@ -558,20 +570,22 @@ def _run_cycle(state: RunState) -> RunState:
         if cap_exceeded:
             log_event("phase1_cap_exceeded", cap=enumeration.PHASE1_CAP)
             d = _fallback_like(f"D-F{new_cycle_id:05d}", 3, [3, 4], "phase 1 cap exceeded; CMA-ES fallback")
-            log_event("directive_fallback", directive_id=d["directive_id"])
+            log_event("directive_fallback", directive_id=d["directive_id"], target_order=d.get("target_order"),
+                      stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
             cands = _cmaes_candidates(d, state.cycle_id)
         else:
             enumeration_phase = True
             fresh = [t for t in all_pts if tableau_mod.content_hash(t) not in seen]
             enumeration_exhausted = len(fresh) == 0
-            cands = [_Candidate(t, 3, 0, did, None) for t in fresh[:_ENUM_PER_CYCLE]]
+            cands = [_Candidate(t, 3, 0, did, None) for t in fresh[:_enum_per_cycle()]]
             log_event("enumeration", phase=1, total=len(all_pts), remaining=len(fresh),
                       taken=len(cands), directive_id=did)
             if enumeration_exhausted:
                 # the 4-stage part of Phase 1 is treated as cap-exceeded -> CMA-ES fallback
                 log_event("phase1_cap_exceeded", cap=enumeration.PHASE1_CAP, part="4-stage")
                 d = _fallback_like(f"D-F{new_cycle_id:05d}", 3, [4], "phase 1 4-stage part: CMA-ES fallback")
-                log_event("directive_fallback", directive_id=d["directive_id"])
+                log_event("directive_fallback", directive_id=d["directive_id"], target_order=d.get("target_order"),
+                      stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
                 cands = _cmaes_candidates(d, state.cycle_id)
     else:
         d, spent = _llm_directive(state, arch, phase, new_cycle_id)
@@ -695,6 +709,15 @@ def main(argv: list[str] | None = None) -> int:
     state = load_state()
     done = 0
     limit = 1 if args.once else args.cycles
+    # Auto-stop limits (config.json run.auto_stop_cycles / run.auto_stop_minutes -> env).
+    env_cycles = int(os.environ.get("RK_MAX_CYCLES", "0") or 0)
+    env_minutes = int(os.environ.get("RK_MAX_MINUTES", "0") or 0)
+    if limit is None and env_cycles > 0:
+        limit = env_cycles
+    t_start = time.monotonic()
+    log_event("runner_started", max_cycles=limit, max_minutes=env_minutes,
+              enum_per_cycle=_enum_per_cycle(), llm=os.environ.get("RK_LLM", "off"),
+              eval_budget=os.environ.get("RK_EVAL_BUDGET", "200"))
     while True:
         # Killfile (HANDOFF §13.4): graceful stop at the cycle boundary.
         if (work_dir() / "STOP").exists():
@@ -708,6 +731,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"spend {state.spend_usd:.4f} USD exceeds cap {cap:.4f}; hard stop", file=sys.stderr)
             return 3
         if limit is not None and done >= limit:
+            if env_cycles > 0 and done >= env_cycles:
+                log_event("stopped_by_cycle_limit", cycles=done, cycle_id=state.cycle_id)
+                print(f"auto-stop: {done} cycles done", file=sys.stderr)
+            return 0
+        if env_minutes > 0 and (time.monotonic() - t_start) >= env_minutes * 60:
+            log_event("stopped_by_time_limit", minutes=env_minutes, cycles=done, cycle_id=state.cycle_id)
+            print(f"auto-stop: {env_minutes} minutes elapsed", file=sys.stderr)
             return 0
         state = run_cycle(state)
         done += 1
