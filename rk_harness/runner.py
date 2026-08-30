@@ -715,9 +715,11 @@ def _maybe_propose_hypothesis(state: RunState, arch, action_kind: str, new_cycle
         h = {
             "id": _next_hypothesis_id(),
             "cycle_proposed": new_cycle_id,
-            "statement": str(raw["statement"])[:500],
-            "mechanism": str(raw["mechanism"])[:500],
-            "control": str(raw["control"])[:500],
+            # prose is softened (banned priority-claim words replaced) because the ledger is
+            # rendered on the findings site, whose build refuses banned words (E4/H2)
+            "statement": literature.soften(str(raw["statement"]))[:500],
+            "mechanism": literature.soften(str(raw["mechanism"]))[:500],
+            "control": literature.soften(str(raw["control"]))[:500],
             "predicate": str(raw["predicate"]),
             "min_samples": max(20, min(int(raw.get("min_samples", 200)), 100000)),
         }
