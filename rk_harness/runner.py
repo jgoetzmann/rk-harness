@@ -246,7 +246,7 @@ def _call_codex(system: str, user: str) -> tuple[str, float]:
     last = out_dir / "last_message.txt"
     if last.exists():
         last.unlink()
-    cmd = [exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(out_dir),
+    cmd = [exe, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(out_dir),
            "--output-last-message", str(last)] + with_model + [system]
     proc = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
@@ -256,7 +256,52 @@ def _call_codex(system: str, user: str) -> tuple[str, float]:
     content = last.read_text(encoding="utf-8").strip()
     if not content:
         raise RuntimeError("codex exec final message is empty")
+    # Usage: per-call tokens come from the --json event stream; the plan's rate limits (the
+    # Codex "/usage" numbers) are in the rollout Codex writes for every session.
+    tokens: dict = {}
+    for line in proc.stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "turn.completed" and isinstance(ev.get("usage"), dict):
+            tokens = {k: int(v) for k, v in ev["usage"].items() if isinstance(v, (int, float))}
+    log_event("codex_usage", tokens=tokens, **_codex_rate_limits())
     return content, 0.0
+
+
+def _codex_rate_limits() -> dict:
+    """Latest rate-limit snapshot Codex wrote under ~/.codex/sessions (weekly window used_percent,
+    resets_at epoch, plan_type). Empty dict if none is found."""
+    root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
+    try:
+        files = sorted(root.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return {}
+    for path in reversed(files[-5:]):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in reversed(text.splitlines()):
+            if '"rate_limits"' not in line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            payload = ev.get("payload", ev) if isinstance(ev, dict) else {}
+            rl = payload.get("rate_limits") if isinstance(payload, dict) else None
+            if not isinstance(rl, dict):
+                continue
+            primary = rl.get("primary") or {}
+            return {
+                "used_percent": primary.get("used_percent"),
+                "window_minutes": primary.get("window_minutes"),
+                "resets_at": primary.get("resets_at"),
+                "plan_type": rl.get("plan_type"),
+            }
+    return {}
 
 
 def call_llm(system: str, user: str) -> tuple[str, float]:

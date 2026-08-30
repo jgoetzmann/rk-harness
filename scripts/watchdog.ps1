@@ -10,9 +10,18 @@ param(
     [int]$NoCandidateMinutes = 30,
     [string]$Findings = "D:/rk/findings",
     [int]$PushMinutes = 10,
+    [switch]$NoBatteryGuard,
     [switch]$Once
 )
 $ErrorActionPreference = "Continue"
+
+# Battery guard (owner's rule, 2026-08-29): never run on battery. On battery -> docker pause;
+# back on AC -> docker unpause. Pause is atomic, so the run resumes exactly where it was.
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+function On-Battery {
+    try { return ([System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus -eq "Offline") } catch { return $false }
+}
+$pausedBattery = $false
 
 # Host-side push (HANDOFF section 2.2 intent): the container only commits into the mounted
 # /work and /findings; the host pushes them with the owner's own git credentials, so no GitHub
@@ -81,6 +90,18 @@ while ($true) {
     }
 
     if (-not (Container-Running)) { Write-Host "$(Get-Date -Format s) container not running; watchdog idle"; if ($Once) { break }; continue }
+
+    # 0b. Battery: pause while unplugged, resume on AC. Takes precedence over the CPU pause logic.
+    if (-not $NoBatteryGuard) {
+        if ((On-Battery) -and -not $pausedBattery) {
+            Write-Host "$(Get-Date -Format s) on battery -> docker pause"
+            docker pause $Container | Out-Null; $pausedBattery = $true; $paused = $true
+        } elseif (-not (On-Battery) -and $pausedBattery) {
+            Write-Host "$(Get-Date -Format s) back on AC -> docker unpause"
+            docker unpause $Container | Out-Null; $pausedBattery = $false; $paused = $false
+        }
+        if ($pausedBattery) { if ($Once) { break }; continue }
+    }
 
     # 1. Killfile: graceful stop at the cycle boundary (the runner polls STOP itself).
     if (Test-Path (Join-Path $Work "STOP")) {

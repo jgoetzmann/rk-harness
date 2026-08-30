@@ -198,7 +198,33 @@ def _header_panel(st: RunState, now: datetime.datetime) -> Panel:
     txt = Text()
     txt.append(f"cycle {st.cycle_id}   phase {st.phase}   uptime {uptime}   ")
     txt.append(f"spend ${st.spend_usd:.4f} / ${cap:.2f}   last heartbeat age {hb_age}")
+    usage = _codex_usage_line()
+    if usage:
+        txt.append("\n" + usage)
     return Panel(txt, title="rk-harness")
+
+
+def _codex_usage_line() -> str:
+    """Latest Codex plan usage logged by the runner (event kind codex_usage), if any."""
+    for ev in reversed(_all_events()):
+        if ev.get("kind") != "codex_usage":
+            continue
+        used = ev.get("used_percent")
+        window = ev.get("window_minutes")
+        resets = ev.get("resets_at")
+        plan = ev.get("plan_type") or "plan"
+        tokens = ev.get("tokens") or {}
+        parts = []
+        if isinstance(used, (int, float)) and isinstance(window, (int, float)):
+            span = "weekly" if int(window) >= 10000 else f"{int(window) // 60}h"
+            parts.append(f"codex ({plan}): {used:.1f}% of {span} limit used")
+        if isinstance(resets, (int, float)):
+            when = datetime.datetime.fromtimestamp(float(resets), datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+            parts.append(f"resets {when}")
+        if tokens:
+            parts.append(f"last call {tokens.get('input_tokens', 0)} in / {tokens.get('output_tokens', 0)} out tokens")
+        return "   ".join(parts) if parts else f"codex usage logged at {ev.get('ts', '?')}"
+    return ""
 
 
 def _candidates_panel(arch: ArchiveState, st: RunState, events: list[dict],
