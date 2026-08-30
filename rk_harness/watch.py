@@ -150,6 +150,20 @@ def watchdog_running() -> bool | None:
     return val
 
 
+def _load_state(arch: ArchiveState):
+    """RUNSTATE.json as a RunState, read directly (this module must not import runner: K13).
+    Absent or corrupt -> a state rebuilt from the archive, like the runner does."""
+    from rk_harness.types import RunState
+    try:
+        d = json.loads((work_dir() / "RUNSTATE.json").read_text(encoding="utf-8"))
+        cell = d.get("current_cell")
+        return RunState(int(d["cycle_id"]), int(d["phase"]), str(d.get("started_at", "")), str(d.get("last_heartbeat", "")),
+                        float(d.get("spend_usd", 0.0)), int(d.get("stall_counter", 0)),
+                        (int(cell[0]), int(cell[1])) if cell else None)
+    except Exception:  # noqa: BLE001
+        return RunState(arch.last_cycle_id, 0, "", "", 0.0, 0, None)
+
+
 def last_push_time(repo: Path) -> str:
     try:
         p = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%ci", "origin/main"], capture_output=True, text=True, timeout=8)
@@ -399,12 +413,7 @@ def build_layout() -> Layout:
     except Exception:  # noqa: BLE001
         arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
         records = []
-    from rk_harness import runner  # read-only use of load_state
-    try:
-        st = runner.load_state()
-    except Exception:  # noqa: BLE001
-        from rk_harness.types import RunState
-        st = RunState(0, 0, "", "", 0.0, 0, None)
+    st = _load_state(arch)
     try:
         hyps = ledger.load_hypotheses()
     except Exception:  # noqa: BLE001

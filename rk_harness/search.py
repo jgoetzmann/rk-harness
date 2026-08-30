@@ -127,6 +127,23 @@ def project(A_free: list[float], b_guess: list[float], stages: int, order: int,
     return make_tableau(A, b, c)
 
 
+def project_or_lower(A_free: list[float], b_guess: list[float], stages: int, order: int,
+                     constraints: dict) -> Tableau | None:
+    """project() at `order`, else at the highest lower order >= 2 that is exactly solvable.
+
+    Exact order-4 conditions are rarely solvable for a snapped (dyadic) A, so an order-4
+    directive would otherwise yield nothing for months. The runner verifies each candidate at
+    the order it actually achieves, and the residual penalty in the fitness still pulls the
+    search toward the requested order."""
+    p = order
+    while p >= 2:
+        t = project(A_free, b_guess, stages, p, constraints)
+        if t is not None:
+            return t
+        p -= 1
+    return None
+
+
 def _search_rms(t: Tableau, budget_cycles: int) -> float:
     errs = []
     try:
@@ -180,7 +197,7 @@ def _fitness(x, stages: int, order: int, constraints: dict, budget_cycles: int) 
     A_free = [float(v) for v in x[:n_a]]
     b_guess = [float(v) for v in x[n_a:n_a + stages]]
     try:
-        t = project(A_free, b_guess, stages, order, constraints)
+        t = project_or_lower(A_free, b_guess, stages, order, constraints)
     except Exception:
         t = None
     if t is None:

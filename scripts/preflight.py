@@ -514,10 +514,11 @@ def section_F(results, docker_ok):
                            capture_output=True, text=True, timeout=120)
         m = re.search(r"spawned=(\d+)", p.stdout)
         spawned = int(m.group(1)) if m else -1
-        R.check("F5", "--pids-limit=512" in run_ps1 and 0 <= spawned < 300,
-                f"run.ps1 sets --pids-limit=512; bounded fork test under --pids-limit=64: {spawned}/300 forks succeeded before 'can't fork' (host unaffected)")
+        pid_ok = "--pids-limit=$PidsLimit" in run_ps1 and "[int]$PidsLimit = 512" in run_ps1
+        R.check("F5", pid_ok and 0 <= spawned < 300,
+                f"run.ps1 passes --pids-limit (default 512, config container.pids_limit); bounded fork test under --pids-limit=64: {spawned}/300 forks succeeded before 'can't fork' (host unaffected)")
     else:
-        R.check("F5", "--pids-limit=512" in run_ps1, "run.ps1 sets --pids-limit=512 (fork test skipped: docker unavailable)")
+        R.check("F5", "--pids-limit=$PidsLimit" in run_ps1 and "[int]$PidsLimit = 512" in run_ps1, "run.ps1 passes --pids-limit (default 512) (fork test skipped: docker unavailable)")
     R.check("F6", str(HARNESS).upper().startswith("D:") and str(RK_WORK).upper().startswith("D:"),
             f"harness at {HARNESS}, work at {RK_WORK} (D:); vhdx location is a Docker Desktop setting -> check Settings > Resources > Disk image location is on D:")
     wd = (HARNESS / "scripts" / "watchdog.ps1").read_text(encoding="utf-8")

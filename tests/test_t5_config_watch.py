@@ -104,3 +104,54 @@ def test_C14_watch_renders_and_is_clean(tmp_path, monkeypatch):
     assert "openai" not in src
     # read-only: nothing written into the work dir by rendering
     assert sorted(p.name for p in work.iterdir()) == ["events.jsonl"]
+
+
+def test_C15_project_falls_back_to_highest_solvable_order():
+    from rk_harness import search
+    from rk_harness.orderconditions import achieved_order_symbolic
+    from rk_harness.tableau import classical, content_hash
+    rk4 = classical()["rk4"]
+    a_free = [float(rk4.A[i][j]) for i in range(4) for j in range(i)]
+    t = search.project_or_lower(a_free, [float(b) for b in rk4.b], 4, 4, search.default_constraints())
+    assert t is not None and content_hash(t) == content_hash(rk4)          # exact order 4 still wins when solvable
+    # a dyadic A with no exact order-4 b: project() stays None (B46), project_or_lower falls back to order 3 (or 2)
+    a_free = [0.25, 0.125, 0.375, 0.5, -0.25, 0.75]
+    assert search.project(a_free, [0.25] * 4, 4, 4, search.default_constraints()) is None
+    t = search.project_or_lower(a_free, [0.25] * 4, 4, 4, search.default_constraints())
+    assert t is not None
+    assert 2 <= achieved_order_symbolic(t, max_order=4) < 4
+
+
+def test_C16_llm_throttle_and_usage_cap(tmp_path, monkeypatch):
+    from rk_harness import runner
+    from rk_harness.types import ArchiveState, RunState
+    work = tmp_path / "work"
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    monkeypatch.setenv("RK_LLM", "codex")
+    monkeypatch.setenv("RK_LLM_EVERY_CYCLES", "3")
+    monkeypatch.setenv("RK_CODEX_USAGE_CAP", "80")
+    arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
+    st = RunState(0, 2, "2026-09-21T10:00:00Z", "2026-09-21T10:00:00Z", 0.0, 0, None)
+    calls = []
+    good = json.dumps({"directive_id": "D-T1", "hypothesis_id": None, "target_order": 3, "stages": [4],
+                       "constraints": {}, "islands": 1, "budget_minutes": 5, "rationale": "test"})
+
+    def fake_call(system, user):
+        calls.append(1)
+        return good, 0.0
+    monkeypatch.setattr(runner, "call_llm", fake_call)
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {"used_percent": 10.0})
+    assert runner.llm_due(3, "SEARCH_CELL", 3) and not runner.llm_due(4, "SEARCH_CELL", 3) and runner.llm_due(4, "HYPOTHESIZE", 3)
+    d, _ = runner._llm_directive(st, arch, 2, 1, "SEARCH_CELL")      # cycle 1: not due, nothing to reuse -> fallback
+    assert calls == [] and d["directive_id"].startswith("D-F")
+    d, _ = runner._llm_directive(st, arch, 2, 3, "SEARCH_CELL")      # cycle 3: due -> call
+    assert calls == [1] and d["directive_id"] == "D-T1"
+    d, _ = runner._llm_directive(st, arch, 2, 4, "SEARCH_CELL")      # cycle 4: reuse the last directive
+    assert calls == [1] and d["directive_id"] == "D-T1"
+    assert "directive_reused" in (work / "events.jsonl").read_text(encoding="utf-8")
+    d, _ = runner._llm_directive(st, arch, 2, 5, "WIDEN")            # escalation -> call again
+    assert calls == [1, 1]
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {"used_percent": 85.0})
+    d, _ = runner._llm_directive(st, arch, 2, 6, "SEARCH_CELL")      # usage cap -> skipped, fallback
+    assert calls == [1, 1] and d["directive_id"].startswith("D-F")
+    assert "plan usage cap" in (work / "events.jsonl").read_text(encoding="utf-8")

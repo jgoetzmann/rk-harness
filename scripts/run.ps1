@@ -16,6 +16,8 @@ param(
     [int]$CpuShares = 256,
     [double]$ScratchGB = 2,
     [int]$EvalBudget = 200,
+    [int]$LlmEveryCycles = 5,
+    [int]$CodexUsageCap = 80,
     [int]$EnumPerCycle = 500,
     [int]$MaxMinutes = 0,
     [int]$MaxCycles = 0,
@@ -68,6 +70,8 @@ $envFlags = @(
     "-e", "RK_SITE=$(if ($Site) { 'on' } else { 'off' })",
     "-e", "RK_GIT_COMMIT=$(if ($GitCommit) { 'on' } else { 'off' })",
     "-e", "RK_EVAL_BUDGET=$EvalBudget",
+    "-e", "RK_LLM_EVERY_CYCLES=$LlmEveryCycles",
+    "-e", "RK_CODEX_USAGE_CAP=$CodexUsageCap",
     "-e", "RK_ENUM_PER_CYCLE=$EnumPerCycle",
     "-e", "RK_MAX_MINUTES=$MaxMinutes",
     "-e", "RK_MAX_CYCLES=$MaxCycles"
@@ -78,7 +82,7 @@ if ($Phase -ne "") { $envFlags += @("-e", "RK_PHASE=$Phase") }
 $mem = "{0}g" -f $MemoryGB
 $scratch = "/scratch:size={0}g" -f $ScratchGB
 Write-Host "resources: cpus=$Cpus memory=$mem pids-limit=$PidsLimit cpu-shares=$CpuShares tmpfs=$scratch"
-Write-Host "limits: max_minutes=$MaxMinutes max_cycles=$MaxCycles eval_budget=$EvalBudget enum_per_cycle=$EnumPerCycle"
+Write-Host "limits: max_minutes=$MaxMinutes max_cycles=$MaxCycles eval_budget=$EvalBudget enum_per_cycle=$EnumPerCycle llm_every=$LlmEveryCycles cycles codex_cap=$CodexUsageCap%"
 
 docker run -d --name rk `
   --cpus=$Cpus --memory=$mem --pids-limit=$PidsLimit --cpu-shares=$CpuShares `

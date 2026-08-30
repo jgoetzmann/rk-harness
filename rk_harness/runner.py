@@ -26,6 +26,7 @@ from rk_harness import encourager
 from rk_harness import enumeration
 from rk_harness import evaluator
 from rk_harness import ledger
+from rk_harness import orderconditions
 from rk_harness import prompts
 from rk_harness import search
 from rk_harness import sitegen
@@ -433,17 +434,68 @@ def _cmaes_candidates(d: dict, base_cycle_id: int) -> list[_Candidate]:
             log_event("island_start", order=order, stages=int(stg), seed=seed, budget=budget,
                       directive_id=d.get("directive_id"))
             n_yield = 0
+            achieved: dict[int, int] = {}
             for t in search.cmaes_island(order, int(stg), seed, constraints, budget):
-                out.append(_Candidate(t, order, seed, d.get("directive_id"), d.get("hypothesis_id")))
+                # search.project may fall back to a lower order when the requested one is not
+                # exactly solvable; verify each candidate at the order it actually achieves.
+                p = min(orderconditions.achieved_order_symbolic(t, max_order=4), 4)
+                if p < 1:
+                    continue
+                achieved[p] = achieved.get(p, 0) + 1
+                out.append(_Candidate(t, p, seed, d.get("directive_id"), d.get("hypothesis_id")))
                 n_yield += 1
-            log_event("island_done", order=order, stages=int(stg), seed=seed, yielded=n_yield)
+            log_event("island_done", order=order, stages=int(stg), seed=seed, yielded=n_yield,
+                      achieved_orders=achieved)
     return out
 
 
-def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int) -> tuple[dict, float]:
-    """Directive for phases 2/3: LLM when enabled, else deterministic fallback."""
+def _llm_every_cycles() -> int:
+    try:
+        return max(1, int(os.environ.get("RK_LLM_EVERY_CYCLES", "5") or 5))
+    except ValueError:
+        return 5
+
+
+def _codex_usage_cap() -> float:
+    try:
+        return float(os.environ.get("RK_CODEX_USAGE_CAP", "80") or 80)
+    except ValueError:
+        return 80.0
+
+
+def _last_directive_path() -> Path:
+    return work_dir() / "LAST_DIRECTIVE.json"
+
+
+def llm_due(new_cycle_id: int, action_kind: str, every: int) -> bool:
+    """A fresh directive is requested every `every` cycles or whenever the encourager escalates.
+    Between those, the last accepted directive is reused (HANDOFF section 5: a directive only
+    narrows the search, so reusing one is always safe)."""
+    return every <= 1 or new_cycle_id % every == 0 or action_kind in ("HYPOTHESIZE", "WIDEN", "ADVANCE_PHASE", "ROTATE_PROBLEMS")
+
+
+def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_kind: str = "") -> tuple[dict, float]:
+    """Directive for phases 2/3: LLM when enabled (throttled), else the last directive or the
+    deterministic fallback."""
     spent = 0.0
-    if os.environ.get("RK_LLM") in ("on", "codex") and state.spend_usd < credentials.monthly_cap_usd():
+    mode = os.environ.get("RK_LLM")
+    want = mode in ("on", "codex") and state.spend_usd < credentials.monthly_cap_usd()
+    if want and mode == "codex":
+        used = _codex_rate_limits().get("used_percent")
+        if isinstance(used, (int, float)) and used >= _codex_usage_cap():
+            log_event("llm_skipped", reason="plan usage cap", used_percent=used, cap_percent=_codex_usage_cap())
+            want = False
+    if want and not llm_due(new_cycle_id, action_kind, _llm_every_cycles()):
+        try:
+            last = json.loads(_last_directive_path().read_text(encoding="utf-8"))
+            d = directive_mod.validate_directive(last)
+            every = _llm_every_cycles()
+            log_event("directive_reused", directive_id=d.get("directive_id"),
+                      next_llm_cycle=(new_cycle_id // every + 1) * every)
+            return d, 0.0
+        except Exception:  # noqa: BLE001 - no reusable directive yet: fall back
+            want = False
+    if want:
         hyps = ledger.load_hypotheses()
         refuted = [h for h in hyps if h.get("verdict") == "refuted"]
         open_h = [h for h in hyps if h.get("verdict") is None]
@@ -454,6 +506,7 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int) -> tupl
                   chars=len(content))
         try:
             d = directive_mod.parse_directive(content)
+            _atomic_write_text(_last_directive_path(), json.dumps(d, indent=1))
             log_event("directive_accepted", directive_id=d.get("directive_id"),
                       hypothesis_id=d.get("hypothesis_id"), target_order=d.get("target_order"),
                       stages=d.get("stages"), constraints=d.get("constraints"),
@@ -461,7 +514,7 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int) -> tupl
             return d, spent
         except directive_mod.DirectiveError as e:
             log_event("directive_rejected", error=str(e), text=content[:500])
-    elif os.environ.get("RK_LLM") in ("on", "codex"):
+    elif mode in ("on", "codex") and state.spend_usd >= credentials.monthly_cap_usd():
         log_event("llm_skipped", reason="spend cap reached", spend_usd=state.spend_usd)
     d = directive_mod.fallback_directive(arch, phase, new_cycle_id)
     log_event("directive_fallback", directive_id=d.get("directive_id"), target_order=d.get("target_order"),
@@ -588,7 +641,7 @@ def _run_cycle(state: RunState) -> RunState:
                       stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
                 cands = _cmaes_candidates(d, state.cycle_id)
     else:
-        d, spent = _llm_directive(state, arch, phase, new_cycle_id)
+        d, spent = _llm_directive(state, arch, phase, new_cycle_id, action.kind)
         cands = _cmaes_candidates(d, state.cycle_id)
 
     # 4. verify / tier / append, with an in-memory elite map kept current
@@ -717,7 +770,8 @@ def main(argv: list[str] | None = None) -> int:
     t_start = time.monotonic()
     log_event("runner_started", max_cycles=limit, max_minutes=env_minutes,
               enum_per_cycle=_enum_per_cycle(), llm=os.environ.get("RK_LLM", "off"),
-              eval_budget=os.environ.get("RK_EVAL_BUDGET", "200"))
+              eval_budget=os.environ.get("RK_EVAL_BUDGET", "200"), llm_every_cycles=_llm_every_cycles(),
+              codex_usage_cap=_codex_usage_cap())
     while True:
         # Killfile (HANDOFF §13.4): graceful stop at the cycle boundary.
         if (work_dir() / "STOP").exists():

@@ -33,6 +33,8 @@ SCHEMA: dict[str, tuple] = {
                                    "LLM for directives: codex (mounted ~/.codex/auth.json), on (API key), off (deterministic fallback), auto = codex if auth.json exists else off"),
     "run.llm_model":              ("", str, None, "container", "model override (empty = the CLI/API default)"),
     "run.eval_budget":            (200, int, (10, 100000), "container", "CMA-ES fitness evaluations per island per cycle (phases 2-3)"),
+    "run.llm_every_cycles":       (5, int, (1, 1000), "container", "ask the LLM for a fresh directive every N cycles (and on every escalation); in between the last directive is reused"),
+    "run.codex_usage_cap_percent": (80, int, (1, 100), "container", "skip LLM calls once Codex reports this much of the weekly plan limit used (falls back to the deterministic directive)"),
     "run.enum_per_cycle":         (500, int, (1, 100000), "container", "enumerated candidates verified per cycle (phases 0-1)"),
     "run.auto_stop_minutes":      (0, int, (0, 1000000), "container", "stop the runner after this many minutes of wall clock (0 = never); it exits at the next cycle boundary"),
     "run.auto_stop_cycles":       (0, int, (0, 1000000), "container", "stop the runner after this many cycles in this process (0 = never)"),

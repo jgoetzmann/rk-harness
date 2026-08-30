@@ -16,7 +16,9 @@
     "auto_stop_cycles": 0,
     "site": true,
     "git_commit": true,
-    "initial_phase": null
+    "initial_phase": null,
+    "llm_every_cycles": 5,
+    "codex_usage_cap_percent": 80
   },
   "watchdog": {
     "poll_seconds": 10,
