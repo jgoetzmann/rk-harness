@@ -6,12 +6,12 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | Section | Status |
 | --- | --- |
 | 0 | green |
-| A | FAIL |
+| A | green (pending MANUAL: 1) |
 | B | green |
 | C | green |
 | D | green |
 | E | green (pending MANUAL: 2) |
-| F | FAIL |
+| F | green (pending MANUAL: 4) |
 | G | green (pending MANUAL: 1) |
 | H | green |
 | I | green |
@@ -34,7 +34,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | A2* | INFO | advisory PAT scope probe (token is host-only, so this no longer gates): K5 probe 1 PASS: PATCH rk-harness -> HTTP 403 \| K5 probe 2 FAIL: the PAT CAN push to rk-harness: \| K5 probe 2 PASS: push to rk-work accepted (dry-run) \| K5 probe 2 PASS: push to rk-findings accepted (dry-run) \| K5 FAIL |
 | A4 | PASS | verify() closure = ['coeffrep', 'costmodel', 'evaluator', 'fixedpoint', 'orderconditions', 'paths', 'problems', 'simulate', 'tableau', 'types', 'verifier']; network/subprocess hits: none; file writes: none; read-only open(): ['problems.py:30', 'tableau.py:159'] |
 | A5 | PASS | assign_tier in archive.py (11 lines, pure); prompt template tier-string hits: none |
-| A6 | FAIL | openai in any import graph except runner.py (credentials.py names OPENAI_API_KEY per §2.2, excluded): ['watch->credentials', 'watch->runner'] |
+| A6 | PASS | openai in any import graph except runner.py (credentials.py names OPENAI_API_KEY per §2.2, excluded): none |
 | A7 | PASS | ledger.py eval/exec/compile hits: none |
 | A8 | PASS | PredicateSyntaxError(expected field, got '__import__'); parser is a hand-rolled tokenizer + recursive descent (323 lines), no dynamic execution |
 | A9 | PASS | rk-harness=ignored, rk-work=ignored, rk-findings=ignored |
@@ -44,7 +44,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | A13 | PASS | check_source walks the AST (ast.parse/ast.walk present, no regex on source); 'import os' -> ["import of 'os' not allowed"] |
 | A1 | PASS | write to /harness inside the container: touch: cannot touch '/harness/.probe': Read-only file system rc=1 |
 | A3 | PASS | coeffrep.py altered by one line: container exit 1; stderr: VERIFIER HASH MISMATCH â€” refusing to run |
-| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 892 deselected in 4.58s'] |
+| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 894 deselected in 3.81s'] |
 | B1 | PASS | G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14, G15, G16, G17, G18, G19, G20, G21, G22, G23, G24, G25, G26, G27 passed |
 | B2 | PASS | convergence: euler 0.9849 (7 pts), heun2 2.0109 (8 pts), kutta3 3.0404 (5 pts), rk4 4.0706 (3 pts) |
 | B3 | PASS | rk4 real -2.785294, imag 2.828427 |
@@ -73,7 +73,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | D6 | PASS | better on both aggregates but only 1 family -> unreplicated (heldout_verified needs >= 2 families) |
 | D7 | PASS | 6 yielded tableaus; every A entry is k/2^s with s<=15 before the runner verifies (snap happens inside search.project) |
 | E1 | PASS | E2 passed (two runs, same seed -> byte-identical archive) |
-| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 2 records; kill#2: replay ok, 10 records; kill#3: replay ok, 22 records; final run exit 0: 22 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": true, "stall_counter": 0, "accepted": 12, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}', '{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 0, "rejected": 0, "skipped": 0, "total": 0}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 3, "phase": 1, "improved": false, "stall_counter": 1, "accepted": 0, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
+| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 2 records; kill#2: replay ok, 9 records; kill#3: replay ok, 19 records; final run exit 0: 19 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 3, "rejected": 0, "skipped": 0, "total": 3}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 3, "phase": 0, "improved": false, "stall_counter": 1, "accepted": 3, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
 | E3 | PASS | R2, B34 passed (truncated last JSONL line discarded) |
 | E4 | MANUAL | docker pause rk for 60 s mid-evaluation, then compare the cycle's records against an unpaused run (R3); cost model is analytic so host load cannot change scores |
 | E5 | PASS | R4, R5 passed (missing / corrupt RUNSTATE.json rebuild from replay) |
@@ -84,13 +84,13 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | F2 | MANUAL | start the container, load Windows: scripts/watchdog.ps1 must print 'docker pause' within ~40 s |
 | F3 | MANUAL | drop the foreground load: watchdog must print 'docker unpause' within ~40 s |
 | F4 | MANUAL | watch Vmmem in Task Manager for one hour: plateau, not climb (autoMemoryReclaim) |
-| F5 | FAIL | run.ps1 sets --pids-limit=512; bounded fork test under --pids-limit=64: 62/300 forks succeeded before 'can't fork' (host unaffected) |
+| F5 | PASS | run.ps1 passes --pids-limit (default 512, config container.pids_limit); bounded fork test under --pids-limit=64: 62/300 forks succeeded before 'can't fork' (host unaffected) |
 | F6 | PASS | harness at D:\Programming-Projects\Integration-Harness\rk-harness, work at D:\Programming-Projects\Integration-Harness\rk-work (D:); vhdx location is a Docker Desktop setting -> check Settings > Resources > Disk image location is on D: |
 | F7 | MANUAL | NitroSense: battery charge limit 80% (irreversible cell wear otherwise); the watchdog additionally pauses the container whenever the laptop is on battery (owner's rule) |
 | F8 | PASS | Windows power plan: Balanced; airflow (elevate the laptop) and NitroSense fans=auto are physical settings — confirm by hand |
 | G1 | MANUAL | set the monthly cap in the OpenAI dashboard and screenshot it |
 | G2 | PASS | spend 0.02 > cap 0.01: runner exit 3, event spend_cap_exceeded=True, no cycle ran=True |
-| G3 | PASS | STOP present: runner exited 0 in 1.0s at the cycle boundary, event stopped_by_killfile=True |
+| G3 | PASS | STOP present: runner exited 0 in 1.1s at the cycle boundary, event stopped_by_killfile=True |
 | G4 | PASS | stale HEARTBEAT (300 s): watchdog printed kill=True; container state now 'exited' |
 | G5 | PASS | disk threshold forced (MinFreeGB=999999): watchdog printed stop=True; container state 'exited' |
 | G6 | PASS | auth.json mounted :ro into the container; `codex login status` -> exit 0: Logged in using ChatGPT |
@@ -126,11 +126,11 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 ```
 Date started:         2026-08-30
 Section 0 green:      2026-08-30
-A green:              NO  (FAIL)
+A green:              2026-08-30  (green (pending MANUAL: 1))
 B green:              2026-08-30
 C green:              2026-08-30
 D green:              2026-08-30  (green)
 K decision:           proceed
-First unattended run: not yet — clear the MANUAL items first
+First unattended run: gating sections green; MANUAL items remain
 ```
 

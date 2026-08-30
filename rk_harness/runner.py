@@ -550,6 +550,64 @@ def _abandon(state: RunState, e: BaseException) -> RunState:
     return dataclasses.replace(state, stall_counter=state.stall_counter + 1)
 
 
+def _next_hypothesis_id() -> str:
+    nums = [0]
+    for h in ledger.load_hypotheses():
+        hid = str(h.get("id", ""))
+        if hid.startswith("H-") and hid[2:].isdigit():
+            nums.append(int(hid[2:]))
+    return f"H-{max(nums) + 1:03d}"
+
+
+def _maybe_propose_hypothesis(state: RunState, arch, action_kind: str, new_cycle_id: int) -> float:
+    """On a HYPOTHESIZE escalation, ask the LLM for one hypothesis (HANDOFF section 6). The id and
+    cycle are assigned here, the predicate must parse under the hand-written grammar, and the
+    verdict is never model-written (ledger validation enforces all of it). Returns the cost."""
+    if action_kind != "HYPOTHESIZE" or os.environ.get("RK_LLM") not in ("on", "codex"):
+        return 0.0
+    if state.spend_usd >= credentials.monthly_cap_usd():
+        return 0.0
+    if os.environ.get("RK_LLM") == "codex":
+        used = _codex_rate_limits().get("used_percent")
+        if isinstance(used, (int, float)) and used >= _codex_usage_cap():
+            return 0.0
+    hyps = ledger.load_hypotheses()
+    refuted = [h for h in hyps if h.get("verdict") == "refuted"]
+    open_h = [h for h in hyps if h.get("verdict") is None]
+    try:
+        content, cost = call_llm(prompts.HYPOTHESIS_SYSTEM_PROMPT,
+                                 prompts.build_hypothesis_prompt(arch, state, refuted, open_h))
+    except Exception as e:  # noqa: BLE001 - a failed proposal never fails the cycle
+        log_event("hypothesis_call_failed", error=repr(e))
+        return 0.0
+    try:
+        start = content.index("{")
+        depth = 0
+        for i in range(start, len(content)):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        raw = json.loads(content[start:i + 1])
+        h = {
+            "id": _next_hypothesis_id(),
+            "cycle_proposed": new_cycle_id,
+            "statement": str(raw["statement"])[:500],
+            "mechanism": str(raw["mechanism"])[:500],
+            "control": str(raw["control"])[:500],
+            "predicate": str(raw["predicate"]),
+            "min_samples": max(20, min(int(raw.get("min_samples", 200)), 100000)),
+        }
+        ledger.append_hypothesis(h)
+        log_event("hypothesis_proposed", id=h["id"], statement=h["statement"],
+                  predicate=h["predicate"], min_samples=h["min_samples"], cost_usd=cost)
+    except Exception as e:  # noqa: BLE001 - malformed proposal: log and move on
+        log_event("hypothesis_rejected", error=repr(e), text=str(content)[:300])
+    return cost
+
+
 def run_cycle(state: RunState) -> RunState:
     try:
         return _run_cycle(state)
@@ -587,6 +645,7 @@ def _run_cycle(state: RunState) -> RunState:
     # 2. encourager
     action = encourager.next_action(state, arch, now())
     log_event("action", action=action.kind, payload=action.payload, cycle_id=new_cycle_id, phase=phase)
+    spent_hyp = _maybe_propose_hypothesis(state, arch, action.kind, new_cycle_id)
     if action.kind == "FREEZE":
         log_event("frozen", cycle_id=state.cycle_id)
         return state
@@ -738,7 +797,7 @@ def _run_cycle(state: RunState) -> RunState:
         phase=new_phase,
         started_at=state.started_at,
         last_heartbeat=iso_now(),
-        spend_usd=state.spend_usd + spent,
+        spend_usd=state.spend_usd + spent + spent_hyp,
         stall_counter=0 if improved else state.stall_counter + 1,
         current_cell=last_cell,
     )

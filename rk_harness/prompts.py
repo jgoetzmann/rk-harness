@@ -191,3 +191,28 @@ def build_user_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], 
     )
     lines.append("Return exactly one JSON object and nothing else.")
     return "\n".join(lines)
+
+
+HYPOTHESIS_SYSTEM_PROMPT = (
+    "You are the hypothesis writer for a fixed-point Runge-Kutta search. Return exactly one JSON "
+    "object and nothing else, with exactly these keys: statement (one falsifiable sentence about "
+    "which archive cell beats which under which cost model), mechanism (one sentence: why), "
+    "control (one sentence: what should happen under the other cost model if the mechanism is "
+    "real), predicate (the machine-checkable form), min_samples (int >= 20). The predicate "
+    "grammar is: field op field | field op number, joined by AND/OR; field = "
+    "(fast|slow|avr_approx).p<digit>s<digit>.(heldout|search|cycles|order). Nothing else parses. "
+    "Do not include an id, a cycle number, or any verdict field: ids and verdicts are assigned "
+    "by the harness, never by you. Do not restate a hypothesis listed as already proposed."
+)
+
+
+def build_hypothesis_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], open_h: list[dict]) -> str:
+    lines = ["## Task", "Propose ONE new falsifiable hypothesis about the archive, as a single JSON object.", ""]
+    lines.extend(_grid_section(arch))
+    lines.append("")
+    lines.append(f"## Already proposed - do not repeat these ({len(refuted) + len(open_h)})")
+    for h in list(open_h) + list(refuted):
+        lines.append(_hyp_line(h))
+    if not (open_h or refuted):
+        lines.append("  none yet")
+    return "\n".join(lines)

@@ -155,3 +155,40 @@ def test_C16_llm_throttle_and_usage_cap(tmp_path, monkeypatch):
     d, _ = runner._llm_directive(st, arch, 2, 6, "SEARCH_CELL")      # usage cap -> skipped, fallback
     assert calls == [1, 1] and d["directive_id"].startswith("D-F")
     assert "plan usage cap" in (work / "events.jsonl").read_text(encoding="utf-8")
+
+
+def test_C17_hypothesize_action_appends_a_validated_hypothesis(tmp_path, monkeypatch):
+    from rk_harness import ledger, runner
+    from rk_harness.types import ArchiveState, RunState
+    work = tmp_path / "work"
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    monkeypatch.setenv("RK_LLM", "codex")
+    arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
+    st = RunState(9, 2, "2026-09-21T10:00:00Z", "2026-09-21T10:00:00Z", 0.0, 21, None)
+    good = json.dumps({"statement": "slow p3s4 beats p4s4", "mechanism": "csd weight",
+                       "control": "reverses under fast", "predicate": "slow.p3s4.heldout < slow.p4s4.heldout",
+                       "min_samples": 200})
+    monkeypatch.setattr(runner, "call_llm", lambda s, u: (good, 0.0))
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {"used_percent": 10.0})
+    assert runner._maybe_propose_hypothesis(st, arch, "SEARCH_CELL", 10) == 0.0      # only on HYPOTHESIZE
+    assert ledger.load_hypotheses() == []
+    runner._maybe_propose_hypothesis(st, arch, "HYPOTHESIZE", 10)
+    hyps = ledger.load_hypotheses()
+    assert len(hyps) == 1 and hyps[0]["id"] == "H-001" and hyps[0]["cycle_proposed"] == 10
+    assert hyps[0]["verdict"] is None and hyps[0]["min_samples"] == 200
+    runner._maybe_propose_hypothesis(st, arch, "HYPOTHESIZE", 11)                    # ids increment
+    assert [h["id"] for h in ledger.load_hypotheses()] == ["H-001", "H-002"]
+    # malformed predicate: rejected, nothing appended, cycle unaffected
+    bad = json.dumps({"statement": "x", "mechanism": "y", "control": "z",
+                      "predicate": "__import__('os')", "min_samples": 50})
+    monkeypatch.setattr(runner, "call_llm", lambda s, u: (bad, 0.0))
+    runner._maybe_propose_hypothesis(st, arch, "HYPOTHESIZE", 12)
+    assert len(ledger.load_hypotheses()) == 2
+    ev = (work / "events.jsonl").read_text(encoding="utf-8")
+    assert "hypothesis_proposed" in ev and "hypothesis_rejected" in ev
+    # K8/I5: the hypothesis prompt carries no tier strings and never asks for a verdict
+    from rk_harness import prompts
+    text = prompts.HYPOTHESIS_SYSTEM_PROMPT + prompts.build_hypothesis_prompt(arch, st, [], [])
+    for banned in ("heldout_verified", "search_only", "unreplicated"):
+        assert banned not in text
+    assert "verdicts are assigned" in prompts.HYPOTHESIS_SYSTEM_PROMPT
