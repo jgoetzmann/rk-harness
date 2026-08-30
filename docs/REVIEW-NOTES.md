@@ -56,6 +56,15 @@ with the mounted `/root/.codex/auth.json`; the image installs `@openai/codex@0.1
 egress allowlist gains `chatgpt.com` and `auth.openai.com`, and `run.ps1` defaults to codex
 when `auth.json` exists. The pre-flight G6 item runs `codex login status` inside the container.
 
+## A11 — egress allowlist on Docker Desktop
+
+`scripts/network.sh` is written for a Linux host (iptables `DOCKER-USER` chain). Docker Desktop
+on Windows runs dockerd inside its own `docker-desktop` WSL distro, which ships no `iptables`
+binary in its shell, so the script cannot be applied there. Options: run the container on a
+Linux/WSL-native Docker engine (where the script works as written), or accept that egress is
+unrestricted and rely on the other boundaries (read-only harness, no GitHub credential in the
+container, spend cap). Reported as MANUAL.
+
 ## Items that need the host or a human
 
 A2 (fine-grained PAT in `.env`, then `scripts/check_pat.ps1`), A11 (`scripts/network.sh` in

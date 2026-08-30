@@ -17,6 +17,12 @@ fi
 
 python -m rk_harness.verifier_hash --check || exit 1
 
+# The runner commits (never pushes) into the mounted /work and /findings; those checkouts are
+# owned by the host user, so git needs an identity and must trust the mounted directories.
+git config --global user.email "rk-runner@container" 2>/dev/null || true
+git config --global user.name "rk-runner" 2>/dev/null || true
+git config --global --add safe.directory '*' 2>/dev/null || true
+
 python -m pytest -p no:cacheprovider -o cache_dir=/tmp/pytest-cache -rN \
   -k "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or G20_ or K1_ or K2_" \
   tests || { echo "FATAL: golden/canary tests failed; refusing to run" >&2; exit 1; }
