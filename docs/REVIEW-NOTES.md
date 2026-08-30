@@ -37,6 +37,21 @@ written and the phase advanced without them. `seed_baselines` now runs on every 
 idempotent per hash). The pre-flight E2 item reproduces the scenario locally
 (`kill -9` × 3, then a clean run must reach 22 records with no duplicates).
 
+## A2 — the PAT is over-scoped (found 2026-08-29, still open)
+
+`scripts/check_pat.ps1` now runs two probes. The HANDOFF's literal one (PATCH the description)
+returns 403 — but only because the token lacks the *Administration* permission. The intent
+probe (`git push --dry-run`, which never updates a ref) shows the token **can push to
+rk-harness**. Re-issue the fine-grained PAT with *Only select repositories* = rk-work, rk-findings
+and *Contents: Read and write*; A2 stays FAIL until both probes pass.
+
+## G6 — Codex in the container
+
+`RK_LLM=codex` makes the runner call `codex exec --skip-git-repo-check --sandbox read-only`
+with the mounted `/root/.codex/auth.json`; the image installs `@openai/codex@0.151.0`, the
+egress allowlist gains `chatgpt.com` and `auth.openai.com`, and `run.ps1` defaults to codex
+when `auth.json` exists. The pre-flight G6 item runs `codex login status` inside the container.
+
 ## Items that need the host or a human
 
 A2 (fine-grained PAT in `.env`, then `scripts/check_pat.ps1`), A11 (`scripts/network.sh` in

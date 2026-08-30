@@ -29,7 +29,7 @@ $env:RK_WORK_DIR="..\rk-work"; $env:RK_FINDINGS_DIR="..\rk-findings"
 ```
 
 Environment: `RK_WORK_DIR` (rk-work checkout), `RK_FINDINGS_DIR` (rk-findings checkout),
-`RK_PHASE` (initial phase), `RK_LLM=on|off`, `RK_SITE=on|off`, `RK_GIT_COMMIT=on|off`,
+`RK_PHASE` (initial phase), `RK_LLM=off|on|codex` (`on` = API key via `OPENAI_API_KEY`; `codex` = `codex exec` with the host's `~/.codex/auth.json`, plan-billed, needs the Codex CLI which the image installs), `RK_SITE=on|off`, `RK_GIT_COMMIT=on|off`,
 `RK_CLOCK` (fixed ISO timestamp for deterministic runs), `RK_EVAL_BUDGET`
 (CMA-ES fitness evaluations per island). Credentials come from `.env` (see `.env.example`).
 

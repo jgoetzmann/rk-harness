@@ -11,6 +11,7 @@ import dataclasses
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -233,8 +234,36 @@ def _rejected_hashes(current_vh: str | None = None) -> set[str]:
 # LLM
 # ----------------------------------------------------------------------------
 
+def _call_codex(system: str, user: str) -> tuple[str, float]:
+    """RK_LLM=codex: one `codex exec` call using the host-authenticated ~/.codex/auth.json mounted
+    read-only into the container (HANDOFF §2.2). Plan-billed, so the metered cost is 0.0; the
+    monthly cap still governs the API-key path. Raises on any failure. No retries."""
+    exe = os.environ.get("RK_CODEX_BIN") or shutil.which("codex") or "codex"   # npm shim is codex.cmd on Windows
+    model = os.environ.get("RK_LLM_MODEL", "")
+    with_model = ["-m", model] if model else []
+    out_dir = work_dir() / ".codex-exec"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    last = out_dir / "last_message.txt"
+    if last.exists():
+        last.unlink()
+    cmd = [exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(out_dir),
+           "--output-last-message", str(last)] + with_model + [system]
+    proc = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"codex exec exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+    if not last.exists():
+        raise RuntimeError("codex exec produced no final message")
+    content = last.read_text(encoding="utf-8").strip()
+    if not content:
+        raise RuntimeError("codex exec final message is empty")
+    return content, 0.0
+
+
 def call_llm(system: str, user: str) -> tuple[str, float]:
-    """One urllib POST to the chat completions endpoint. Raises on any failure."""
+    """One urllib POST to the chat completions endpoint, or one `codex exec` when RK_LLM=codex.
+    Raises on any failure."""
+    if os.environ.get("RK_LLM") == "codex":
+        return _call_codex(system, user)
     key = credentials.openai_key()
     if not key:
         raise RuntimeError("no API key available")
@@ -360,7 +389,7 @@ def _cmaes_candidates(d: dict, base_cycle_id: int) -> list[_Candidate]:
 def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int) -> tuple[dict, float]:
     """Directive for phases 2/3: LLM when enabled, else deterministic fallback."""
     spent = 0.0
-    if os.environ.get("RK_LLM") == "on" and state.spend_usd < credentials.monthly_cap_usd():
+    if os.environ.get("RK_LLM") in ("on", "codex") and state.spend_usd < credentials.monthly_cap_usd():
         hyps = ledger.load_hypotheses()
         refuted = [h for h in hyps if h.get("verdict") == "refuted"]
         open_h = [h for h in hyps if h.get("verdict") is None]
@@ -376,7 +405,7 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int) -> tupl
             return d, spent
         except directive_mod.DirectiveError as e:
             log_event("directive_rejected", error=str(e), text=content[:500])
-    elif os.environ.get("RK_LLM") == "on":
+    elif os.environ.get("RK_LLM") in ("on", "codex"):
         log_event("llm_skipped", reason="spend cap reached", spend_usd=state.spend_usd)
     d = directive_mod.fallback_directive(arch, phase, new_cycle_id)
     log_event("directive_fallback", directive_id=d.get("directive_id"))

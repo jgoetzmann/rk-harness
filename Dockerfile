@@ -6,6 +6,11 @@ RUN pip install --no-cache-dir \
       numpy==2.1.3 scipy==1.14.1 sympy==1.13.3 mpmath==1.3.0 \
       scikit-learn==1.5.2 cma==4.0.0 jsonschema==4.23.0 \
       rich==13.9.4 pytest==8.3.3
+# Codex CLI for RK_LLM=codex (HANDOFF §2.2: OAuth done on the host, auth.json mounted :ro).
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+ && npm install -g @openai/codex@0.151.0 \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

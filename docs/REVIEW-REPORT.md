@@ -6,13 +6,13 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | Section | Status |
 | --- | --- |
 | 0 | green |
-| A | green (pending MANUAL: 2) |
+| A | FAIL |
 | B | green |
 | C | green |
 | D | green |
 | E | green (pending MANUAL: 2) |
 | F | green (pending MANUAL: 5) |
-| G | green (pending MANUAL: 2) |
+| G | green (pending MANUAL: 1) |
 | H | green |
 | I | green |
 | J | green |
@@ -30,7 +30,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | 0.6 | PASS | count_sequence exists; cycle_count(t: 'Tableau', model: 'CostModel', n_states: 'int') -> 'int' |
 | 0.7 | PASS | cost models: ['m0plus_fast', 'm0plus_slow', 'avr_approx']; no bare AVR |
 | 0.8 | PASS | §4.12 names present; missing: none |
-| A2 | MANUAL | needs a fine-grained PAT in .env; then run scripts/check_pat.ps1 (expects HTTP 403) |
+| A2 | FAIL | K5 probe 1 PASS: PATCH rk-harness -> HTTP 403 \| K5 probe 2 FAIL: the PAT CAN push to rk-harness: \| K5 probe 2 PASS: push to rk-work accepted (dry-run) \| K5 probe 2 PASS: push to rk-findings accepted (dry-run) \| K5 FAIL |
 | A4 | PASS | verify() closure = ['coeffrep', 'costmodel', 'evaluator', 'fixedpoint', 'orderconditions', 'paths', 'problems', 'simulate', 'tableau', 'types', 'verifier']; network/subprocess hits: none; file writes: none; read-only open(): ['problems.py:30', 'tableau.py:159'] |
 | A5 | PASS | assign_tier in archive.py (11 lines, pure); prompt template tier-string hits: none |
 | A6 | PASS | openai in any import graph except runner.py (credentials.py names OPENAI_API_KEY per §2.2, excluded): none |
@@ -43,7 +43,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | A13 | PASS | check_source walks the AST (ast.parse/ast.walk present, no regex on source); 'import os' -> ["import of 'os' not allowed"] |
 | A1 | PASS | write to /harness inside the container: touch: cannot touch '/harness/.probe': Read-only file system rc=1 |
 | A3 | PASS | coeffrep.py altered by one line: container exit 1; stderr: VERIFIER HASH MISMATCH â€” refusing to run |
-| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 888 deselected in 4.87s'] |
+| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 888 deselected in 6.25s'] |
 | B1 | PASS | G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14, G15, G16, G17, G18, G19, G20, G21, G22, G23, G24, G25, G26, G27 passed |
 | B2 | PASS | convergence: euler 0.9849 (7 pts), heun2 2.0109 (8 pts), kutta3 3.0404 (5 pts), rk4 4.0706 (3 pts) |
 | B3 | PASS | rk4 real -2.785294, imag 2.828427 |
@@ -72,7 +72,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | D6 | PASS | better on both aggregates but only 1 family -> unreplicated (heldout_verified needs >= 2 families) |
 | D7 | PASS | 6 yielded tableaus; every A entry is k/2^s with s<=15 before the runner verifies (snap happens inside search.project) |
 | E1 | PASS | E2 passed (two runs, same seed -> byte-identical archive) |
-| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 1 records; kill#2: replay ok, 8 records; kill#3: replay ok, 21 records; final run exit 0: 21 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 1, "rejected": 0, "skipped": 0, "total": 1}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": false, "stall_counter": 1, "accepted": 1, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
+| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 0 records; kill#2: replay ok, 4 records; kill#3: replay ok, 13 records; final run exit 0: 13 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 9, "rejected": 0, "skipped": 0, "total": 9}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": false, "stall_counter": 1, "accepted": 9, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
 | E3 | PASS | R2, B34 passed (truncated last JSONL line discarded) |
 | E4 | MANUAL | docker pause rk for 60 s mid-evaluation, then compare the cycle's records against an unpaused run (R3); cost model is analytic so host load cannot change scores |
 | E5 | PASS | R4, R5 passed (missing / corrupt RUNSTATE.json rebuild from replay) |
@@ -89,10 +89,10 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | F8 | MANUAL | elevate for airflow, Windows power profile Balanced, NitroSense fans auto |
 | G1 | MANUAL | set the monthly cap in the OpenAI dashboard and screenshot it |
 | G2 | PASS | spend 0.02 > cap 0.01: runner exit 3, event spend_cap_exceeded=True, no cycle ran=True |
-| G3 | PASS | STOP present: runner exited 0 in 1.0s at the cycle boundary, event stopped_by_killfile=True |
+| G3 | PASS | STOP present: runner exited 0 in 1.3s at the cycle boundary, event stopped_by_killfile=True |
 | G4 | PASS | stale HEARTBEAT (300 s): watchdog printed kill=True; container state now 'exited' |
 | G5 | PASS | disk threshold forced (MinFreeGB=999999): watchdog printed stop=True; container state 'exited' |
-| G6 | MANUAL | C:\Users\jacob\.codex\auth.json missing: authenticate Codex on the host before the first unattended night; run.ps1 mounts it :ro |
+| G6 | PASS | auth.json mounted :ro into the container; `codex login status` -> exit 0: Logged in using ChatGPT |
 | H1 | PASS | site built from the live archive (22 records, 5 elites, 9 pages); every elite shows tier + hash on index |
 | H2 | PASS | planted 'novel'/'beats' -> BannedWordError(banned word 'novel' at offset 5); build() raises before writing (E4 passed) |
 | H3 | PASS | banner on 9/9 pages |
@@ -125,11 +125,11 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 ```
 Date started:         2026-08-29
 Section 0 green:      2026-08-29
-A green:              2026-08-29  (green (pending MANUAL: 2))
+A green:              NO  (FAIL)
 B green:              2026-08-29
 C green:              2026-08-29
 D green:              2026-08-29  (green)
 K decision:           proceed
-First unattended run: gating sections green; MANUAL items remain
+First unattended run: not yet — clear the MANUAL items first
 ```
 

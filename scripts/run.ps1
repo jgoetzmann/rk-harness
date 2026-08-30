@@ -7,6 +7,7 @@ param(
     [string]$Findings = "D:/rk/findings",
     [string]$EnvFile  = "D:/rk/.env",
     [string]$CodexAuth = (Join-Path $env:USERPROFILE ".codex\auth.json"),
+    [string]$Llm = "",          # off | on (API key) | codex (mounted auth.json); default: codex if auth.json exists, else off
     [switch]$Build
 )
 $ErrorActionPreference = "Stop"
@@ -40,15 +41,19 @@ $mounts = @(
 )
 if (Test-Path $CodexAuth) {
     $mounts += @("-v", "${CodexAuth}:/root/.codex/auth.json:ro")
+    if (-not $Llm) { $Llm = "codex" }
 } else {
     Write-Host "note: $CodexAuth not found; Codex OAuth not mounted (authenticate on the host first)"
+    if (-not $Llm) { $Llm = "off" }
 }
+Write-Host "LLM mode: RK_LLM=$Llm"
 
 docker run -d --name rk `
   --cpus=4 --memory=6g --pids-limit=512 --cpu-shares=256 `
   --tmpfs /scratch:size=2g `
   @mounts `
   --env-file $EnvFile `
+  -e "RK_LLM=$Llm" -e "RK_SITE=on" -e "RK_GIT_COMMIT=on" `
   --network rk-net `
   rk-harness:latest
 if ($LASTEXITCODE -ne 0) { exit 1 }

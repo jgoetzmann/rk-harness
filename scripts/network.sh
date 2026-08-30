@@ -3,7 +3,8 @@
 # `docker network create rk-net`. Everything not listed is dropped.
 set -eu
 NET="${1:-rk-net}"
-ALLOW="api.openai.com github.com api.github.com codeload.github.com pypi.org files.pythonhosted.org"
+# HANDOFF §13.3 list plus the two hosts Codex OAuth (RK_LLM=codex) talks to.
+ALLOW="api.openai.com github.com api.github.com codeload.github.com pypi.org files.pythonhosted.org chatgpt.com auth.openai.com"
 
 SUBNET=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$NET")
 echo "rk-net subnet: $SUBNET"

@@ -215,10 +215,12 @@ def section_A(results, docker_ok: bool):
     R.section = "A"
     # A1 / A3 / A10 are container checks (below); A2 needs the PAT.
     env = HARNESS / ".env"
-    if env.exists() and "GITHUB_TOKEN=" in env.read_text(encoding="utf-8") and "<" not in env.read_text(encoding="utf-8"):
-        proc = subprocess.run(["powershell", "-NoProfile", "-File", str(HARNESS / "scripts" / "check_pat.ps1")],
-                              capture_output=True, text=True)
-        R.check("A2", proc.returncode == 0, proc.stdout.strip()[-200:])
+    tok = re.search(r"^\s*GITHUB_TOKEN\s*=\s*(\S+)", env.read_text(encoding="utf-8"), re.M) if env.exists() else None
+    if tok and not tok.group(1).startswith("<"):
+        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HARNESS / "scripts" / "check_pat.ps1")],
+                              capture_output=True, text=True, timeout=300)
+        lines = [l for l in proc.stdout.splitlines() if l.startswith("K5")]
+        R.check("A2", proc.returncode == 0, " | ".join(lines)[-400:])
     else:
         R.add("A2", "MANUAL", "needs a fine-grained PAT in .env; then run scripts/check_pat.ps1 (expects HTTP 403)")
     closure = _import_closure("verifier")
@@ -548,7 +550,16 @@ def section_G(results, docker_ok):
         R.add("G4", "SKIP", "docker unavailable; watchdog heartbeat kill is testable with scripts/watchdog.ps1 -Once against a sleeping container")
         R.add("G5", "SKIP", "docker unavailable; run scripts/watchdog.ps1 -Once -MinFreeGB 999999 against a sleeping container")
     auth = Path.home() / ".codex" / "auth.json"
-    R.add("G6", "PASS" if auth.exists() else "MANUAL", f"{auth} {'exists' if auth.exists() else 'missing: authenticate Codex on the host before the first unattended night'}; run.ps1 mounts it :ro")
+    if not auth.exists():
+        R.add("G6", "MANUAL", f"{auth} missing: authenticate Codex on the host (`codex login`) before the first unattended night; run.ps1 mounts it :ro")
+    elif docker_ok:
+        p = subprocess.run(["docker", "run", "--rm", "-v", f"{auth}:/root/.codex/auth.json:ro", "--entrypoint", "codex",
+                            "rk-harness:latest", "login", "status"], capture_output=True, text=True, timeout=120)
+        out = (p.stdout + p.stderr).strip()
+        R.check("G6", p.returncode == 0 and "logged in" in out.lower(),
+                f"auth.json mounted :ro into the container; `codex login status` -> exit {p.returncode}: {out[-120:]}")
+    else:
+        R.add("G6", "SKIP", f"{auth} exists; docker unavailable to confirm the container authenticates (docker run --entrypoint codex ... login status)")
 
 
 def section_H(results):
