@@ -520,8 +520,14 @@ def section_F(results, docker_ok):
         R.check("F5", "--pids-limit=512" in run_ps1, "run.ps1 sets --pids-limit=512 (fork test skipped: docker unavailable)")
     R.check("F6", str(HARNESS).upper().startswith("D:") and str(RK_WORK).upper().startswith("D:"),
             f"harness at {HARNESS}, work at {RK_WORK} (D:); vhdx location is a Docker Desktop setting -> check Settings > Resources > Disk image location is on D:")
-    R.add("F7", "MANUAL", "NitroSense: battery charge limit 80% (irreversible cell wear otherwise)")
-    R.add("F8", "MANUAL", "elevate for airflow, Windows power profile Balanced, NitroSense fans auto")
+    wd = (HARNESS / "scripts" / "watchdog.ps1").read_text(encoding="utf-8")
+    R.add("F7", "MANUAL", "NitroSense: battery charge limit 80% (irreversible cell wear otherwise)"
+          + ("; the watchdog additionally pauses the container whenever the laptop is on battery (owner's rule)" if "On-Battery" in wd else ""))
+    plan = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True, text=True).stdout
+    if "Balanced" in plan:
+        R.add("F8", "PASS", f"Windows power plan: {plan.strip().split('(')[-1].rstrip(')')}; airflow (elevate the laptop) and NitroSense fans=auto are physical settings — confirm by hand")
+    else:
+        R.add("F8", "MANUAL", f"Windows power plan is {plan.strip()} — set Balanced with `powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e`; elevate for airflow; NitroSense fans auto")
 
 
 def section_G(results, docker_ok):

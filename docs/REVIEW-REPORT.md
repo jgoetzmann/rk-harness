@@ -11,7 +11,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | C | green |
 | D | green |
 | E | green (pending MANUAL: 2) |
-| F | green (pending MANUAL: 5) |
+| F | green (pending MANUAL: 4) |
 | G | green (pending MANUAL: 1) |
 | H | green |
 | I | green |
@@ -44,7 +44,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | A13 | PASS | check_source walks the AST (ast.parse/ast.walk present, no regex on source); 'import os' -> ["import of 'os' not allowed"] |
 | A1 | PASS | write to /harness inside the container: touch: cannot touch '/harness/.probe': Read-only file system rc=1 |
 | A3 | PASS | coeffrep.py altered by one line: container exit 1; stderr: VERIFIER HASH MISMATCH â€” refusing to run |
-| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 888 deselected in 4.06s'] |
+| A3+ | PASS | untampered harness: exit 0; hash ok=True; golden/canary gate: ['55 passed, 888 deselected in 5.31s'] |
 | B1 | PASS | G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14, G15, G16, G17, G18, G19, G20, G21, G22, G23, G24, G25, G26, G27 passed |
 | B2 | PASS | convergence: euler 0.9849 (7 pts), heun2 2.0109 (8 pts), kutta3 3.0404 (5 pts), rk4 4.0706 (3 pts) |
 | B3 | PASS | rk4 real -2.785294, imag 2.828427 |
@@ -64,7 +64,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | C4 | PASS | Phase 0: 16 valid points of 256 candidate a21 values |
 | C5 | PASS | slow cycles (all 16): 11:1/2->b=(0,1) [midpoint] \| 13:-1/2->b=(2,-1) \| 13:1->b=(1/2,1/2) [heun2] \| 13:1/4->b=(-1,2) \| 15:-1->b=(3/2,-1/2) \| 16:-1/16->b=(9,-8) \| 16:-1/32->b=(17,-16) \| 16:-1/4->b=(3,-2) \| 16:-1/64->b=(33,-32) \| 16:-1/8->b=(5,-4) \| 16:-2->b=(5/4,-1/4) \| 16:1/16->b=(-7,8) \| 16:1/32->b=(-15,16) \| 16:1/64->b=(-31,32) \| 16:1/8->b=(-3,4) \| 16:2->b=(3/4,1/4) |
 | C6 | PASS | runner: phase 0 -> enumeration.enumerate_phase0 (exhaustive), phase 1 -> enumerate_phase1 with cap fallback, phases 2/3 -> search.cmaes_island; encourager only routes (SEARCH_CELL/WIDEN/...), never selects the optimizer |
-| C7 | PASS | site labels present: exhaustive=True, 'search result'=True (9 pages from 22 records) |
+| C7 | PASS | site labels present: exhaustive=True, 'search result'=True (9 pages from 3426 records) |
 | D1 | PASS | planted search-tuned tableau (search 0.005 < 0.02, heldout 0.20 > 0.05, 3 search families improved) -> search_only |
 | D2 | PASS | single-family winner (dahlquist only, worse aggregates) -> unreplicated |
 | D3 | PASS | search.py import graph = ['coeffrep', 'costmodel', 'fixedpoint', 'orderconditions', 'paths', 'problems', 'search', 'simulate', 'tableau', 'types']; HELDOUT_SET loads: none |
@@ -73,7 +73,7 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | D6 | PASS | better on both aggregates but only 1 family -> unreplicated (heldout_verified needs >= 2 families) |
 | D7 | PASS | 6 yielded tableaus; every A entry is k/2^s with s<=15 before the runner verifies (snap happens inside search.project) |
 | E1 | PASS | E2 passed (two runs, same seed -> byte-identical archive) |
-| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 2 records; kill#2: replay ok, 11 records; kill#3: replay ok, 22 records; final run exit 0: 22 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": true, "stall_counter": 0, "accepted": 11, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}', '{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 0, "rejected": 0, "skipped": 0, "total": 0}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 3, "phase": 1, "improved": false, "stall_counter": 1, "accepted": 0, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
+| E2 | PASS | local kill -9 x3 then restart: kill#1: replay ok, 0 records; kill#2: replay ok, 3 records; kill#3: replay ok, 10 records; final run exit 0: 10 -> 22 records (22 = 8 baselines + 14 Phase 0 points), duplicates=0, cycle_done logged=True; last events: ['{"ts": "2026-09-21T10:00:00Z", "kind": "candidates_processed", "accepted": 12, "rejected": 0, "skipped": 0, "total": 12}', '{"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 2, "phase": 0, "improved": true, "stall_counter": 0, "accepted": 12, "rejected": 0, "spend_usd": 0.0, "cap_usd": 50.0}']; stderr: ss\.venv\Lib\site-packages\cma\s.py:15: UserWarning: Could not import matplotlib.pyplot, therefore ``cma.plot()`` etc. is not available _warnings.warn('Could not import matplotlib.pyplot, therefore' |
 | E3 | PASS | R2, B34 passed (truncated last JSONL line discarded) |
 | E4 | MANUAL | docker pause rk for 60 s mid-evaluation, then compare the cycle's records against an unpaused run (R3); cost model is analytic so host load cannot change scores |
 | E5 | PASS | R4, R5 passed (missing / corrupt RUNSTATE.json rebuild from replay) |
@@ -86,21 +86,21 @@ Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (pre
 | F4 | MANUAL | watch Vmmem in Task Manager for one hour: plateau, not climb (autoMemoryReclaim) |
 | F5 | PASS | run.ps1 sets --pids-limit=512; bounded fork test under --pids-limit=64: 62/300 forks succeeded before 'can't fork' (host unaffected) |
 | F6 | PASS | harness at D:\Programming-Projects\Integration-Harness\rk-harness, work at D:\Programming-Projects\Integration-Harness\rk-work (D:); vhdx location is a Docker Desktop setting -> check Settings > Resources > Disk image location is on D: |
-| F7 | MANUAL | NitroSense: battery charge limit 80% (irreversible cell wear otherwise) |
-| F8 | MANUAL | elevate for airflow, Windows power profile Balanced, NitroSense fans auto |
+| F7 | MANUAL | NitroSense: battery charge limit 80% (irreversible cell wear otherwise); the watchdog additionally pauses the container whenever the laptop is on battery (owner's rule) |
+| F8 | PASS | Windows power plan: Balanced; airflow (elevate the laptop) and NitroSense fans=auto are physical settings — confirm by hand |
 | G1 | MANUAL | set the monthly cap in the OpenAI dashboard and screenshot it |
 | G2 | PASS | spend 0.02 > cap 0.01: runner exit 3, event spend_cap_exceeded=True, no cycle ran=True |
-| G3 | PASS | STOP present: runner exited 0 in 0.9s at the cycle boundary, event stopped_by_killfile=True |
+| G3 | PASS | STOP present: runner exited 0 in 1.2s at the cycle boundary, event stopped_by_killfile=True |
 | G4 | PASS | stale HEARTBEAT (300 s): watchdog printed kill=True; container state now 'exited' |
 | G5 | PASS | disk threshold forced (MinFreeGB=999999): watchdog printed stop=True; container state 'exited' |
 | G6 | PASS | auth.json mounted :ro into the container; `codex login status` -> exit 0: Logged in using ChatGPT |
-| H1 | PASS | site built from the live archive (22 records, 5 elites, 9 pages); every elite shows tier + hash on index |
+| H1 | PASS | site built from the live archive (3520 records, 5 elites, 9 pages); every elite shows tier + hash on index |
 | H2 | PASS | planted 'novel'/'beats' -> BannedWordError(banned word 'novel' at offset 5); build() raises before writing (E4 passed) |
 | H3 | PASS | banner on 9/9 pages |
 | H4 | PASS | costmodel.html carries AVR_APPROX figures with the note: True |
 | H5 | PASS | 5 cell pages each show tableau_hash and verifier_hash |
 | H6 | PASS | GET https://jgoetzmann.github.io/rk-findings/ -> 200 (Pages may take up to 10 minutes after the first push) |
-| H7 | PASS | archive files in rk-work history: none yet; runner commits only files other than today's (source checked) |
+| H7 | PASS | archive files in rk-work history: ['archive/2026-08-29.jsonl']; runner commits only files other than today's (source checked) |
 | I1 | PASS | accepted the §6 example (2 terms); rejected 9/9 malformed: ['fast.p2s2.cycles = 16', 'fast.p2s2.foo < 1', 'medium.p2s2.heldout < 1', 'fast.p2s2.heldout < 1 XOR fast.p2s2.heldout < 2', '', 'fast.p2s2.heldout < (1)', "__import__('os')", 'import os', 'fast.p2s2.heldout < 1; print(1)'] |
 | I2 | PASS | two buckets at (p2,s2) with heldout 0.30 / 0.10 -> p2s2.heldout resolves to min 0.1 (n=2); 'fast.p2s2.heldout < 0.2' -> supported |
 | I3 | PASS | empty cell p4s6 -> (inconclusive, 0, 0.0) |
