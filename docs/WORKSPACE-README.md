@@ -55,6 +55,18 @@ python configure.py set ... --apply      # stop + start so it takes effect (cont
 python configure.py reset                # back to the handoff defaults
 ```
 
+### Literature review and interpretation (model-written, published)
+
+Every `run.litreview_every_cycles` (50) cycles, Codex web-searches one rotating topic
+(fixed-point RK arithmetic, tableau optimization, MCU multiplier costs, embedded integrators,
+roundoff-vs-truncation analysis), and the digest - summary, key points, real source links -
+is stored in `rk-work/literature/` and fed into every directive and hypothesis prompt, so the
+search's theories are grounded in existing research. Every `run.interpret_every_cycles` (25)
+cycles, Codex writes a prose interpretation of the archive. Both are published on the findings
+site (`literature.html`, `interpretation.html`) with the not-reviewed-by-a-human banner, and
+both are softened at write time (priority-claim words replaced) so the site's banned-words
+guard still holds. `rk-overview` remains the human-written meta view.
+
 ### The watcher window
 
 `.\watcher.ps1` opens a 170-column terminal that refreshes every `watcher.refresh_seconds` with:

@@ -259,7 +259,7 @@ def _call_codex(system: str, user: str, extra_args: list[str] | None = None, tim
         last.unlink()
     cmd = [exe, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(out_dir),
            "--output-last-message", str(last)] + with_model + (extra_args or []) + [system]
-    proc = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(cmd, input=user, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(f"codex exec exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
     if not last.exists():

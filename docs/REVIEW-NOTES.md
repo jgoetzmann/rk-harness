@@ -65,6 +65,14 @@ Linux/WSL-native Docker engine (where the script works as written), or accept th
 unrestricted and rely on the other boundaries (read-only harness, no GitHub credential in the
 container, spend cap). Reported as MANUAL.
 
+## Interpretation and literature on the findings site (owner's decision, 2026-08-30)
+
+HANDOFF section 17 limited the site to "numbers and mechanically generated captions". The owner
+directed that model-written interpretation and web-researched literature digests be published in
+rk-findings (rk-overview stays human-written). Both pages carry the automatic banner plus a
+"model-written, verify sources" note, and all text passes through literature.soften() before it
+is stored, so E4/H2 (banned words, build() raising) still hold and are still tested.
+
 ## Items that need the host or a human
 
 A2 (fine-grained PAT in `.env`, then `scripts/check_pat.ps1`), A11 (`scripts/network.sh` in
