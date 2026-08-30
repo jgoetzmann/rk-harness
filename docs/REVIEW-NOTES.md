@@ -37,13 +37,17 @@ written and the phase advanced without them. `seed_baselines` now runs on every 
 idempotent per hash). The pre-flight E2 item reproduces the scenario locally
 (`kill -9` × 3, then a clean run must reach 22 records with no duplicates).
 
-## A2 — the PAT is over-scoped (found 2026-08-29, still open)
+## A2 — GitHub credential is host-only (owner's decision, 2026-08-29)
 
-`scripts/check_pat.ps1` now runs two probes. The HANDOFF's literal one (PATCH the description)
-returns 403 — but only because the token lacks the *Administration* permission. The intent
-probe (`git push --dry-run`, which never updates a ref) shows the token **can push to
-rk-harness**. Re-issue the fine-grained PAT with *Only select repositories* = rk-work, rk-findings
-and *Contents: Read and write*; A2 stays FAIL until both probes pass.
+The PAT in `.env` has contents read/write on all three repos (the owner's choice: it is the
+owner's general-purpose token). Rather than narrow the token, the credential simply never enters
+the container: `scripts/run.ps1` passes a filtered env file (`scripts/container_env.ps1`,
+GITHUB_TOKEN removed), the runner only commits into the mounted `/work` and `/findings`, and
+`scripts/watchdog.ps1` pushes both repos from the host every `-PushMinutes` with the owner's own
+git credentials. The property K5 exists to guarantee — the agent cannot push to `rk-harness` —
+therefore holds independent of the token's scope, and the pre-flight A2 verifies it directly
+(filtered file has no token; `env` inside a container started with it shows none).
+`scripts/check_pat.ps1` (PATCH probe + dry-run push probe) is still run and reported as INFO.
 
 ## G6 — Codex in the container
 

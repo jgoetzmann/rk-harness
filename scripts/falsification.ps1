@@ -1,4 +1,4 @@
-# HANDOFF §15 — the falsification experiment. Writes rk-work/falsification.json and prints
+# HANDOFF section 15 - the falsification experiment. Writes rk-work/falsification.json and prints
 # the kill/proceed verdict. Run before anything else.
 param([string]$Work = (Join-Path $PSScriptRoot "..\..\rk-work"))
 $ErrorActionPreference = "Stop"

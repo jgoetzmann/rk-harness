@@ -1,4 +1,4 @@
-# HANDOFF §2.1 — creates the three GitHub repos and enables Pages for rk-findings.
+# HANDOFF section 2.1 - creates the three GitHub repos and enables Pages for rk-findings.
 # Run once, by a human, from the directory that should contain the clones.
 # Acceptance: all three repos cloneable; https://jgoetzmann.github.io/rk-findings/ returns 200 within 10 minutes.
 $ErrorActionPreference = "Stop"

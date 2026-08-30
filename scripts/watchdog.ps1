@@ -1,4 +1,4 @@
-# Host-side kill switch (HANDOFF §13.4) and pause watchdog (§13.5). Hand-written (§16.1).
+# Host-side kill switch (HANDOFF section 13.4) and pause watchdog (section 13.5). Hand-written (section 16.1).
 # Polls every 10 s. All five triggers live here, outside the container.
 param(
     [string]$Work = "D:/rk/work",
@@ -8,9 +8,25 @@ param(
     [double]$MinFreeGB = 5.0,
     [int]$HeartbeatStaleSeconds = 120,
     [int]$NoCandidateMinutes = 30,
+    [string]$Findings = "D:/rk/findings",
+    [int]$PushMinutes = 10,
     [switch]$Once
 )
 $ErrorActionPreference = "Continue"
+
+# Host-side push (HANDOFF section 2.2 intent): the container only commits into the mounted
+# /work and /findings; the host pushes them with the owner's own git credentials, so no GitHub
+# token ever enters the container.
+function Push-Repo([string]$path) {
+    if (-not (Test-Path (Join-Path $path ".git"))) { return }
+    $ahead = cmd /c "git -C `"$path`" rev-list --count @{u}..HEAD 2>&1"
+    if ($ahead -match '^\d+$' -and [int]$ahead -gt 0) {
+        $out = cmd /c "git -C `"$path`" push -q origin HEAD 2>&1"
+        if ($LASTEXITCODE -eq 0) { Write-Host "$(Get-Date -Format s) pushed $ahead commit(s) from $path" }
+        else { Write-Host "$(Get-Date -Format s) push FAILED for ${path}: $out" }
+    }
+}
+$lastPush = Get-Date
 
 function Read-Cap {
     $cap = 50.0
@@ -57,6 +73,13 @@ Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSe
 
 while ($true) {
     if (-not $Once) { Start-Sleep -Seconds $PollSeconds }
+    # 0. Host-side push of completed commits every $PushMinutes (or on every -Once pass).
+    if ($Once -or ((Get-Date) - $lastPush).TotalMinutes -ge $PushMinutes) {
+        Push-Repo $Work
+        Push-Repo $Findings
+        $lastPush = Get-Date
+    }
+
     if (-not (Container-Running)) { Write-Host "$(Get-Date -Format s) container not running; watchdog idle"; if ($Once) { break }; continue }
 
     # 1. Killfile: graceful stop at the cycle boundary (the runner polls STOP itself).
@@ -101,7 +124,7 @@ while ($true) {
         if ($Once) { break }; continue
     }
 
-    # Pause watchdog (§13.5): non-container CPU > 50% for 30 s -> pause; < 30% for 30 s -> unpause.
+    # Pause watchdog (section 13.5): non-container CPU > 50% for 30 s -> pause; < 30% for 30 s -> unpause.
     $total = [double](Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
     $ctr = 0.0
     try {

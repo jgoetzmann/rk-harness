@@ -54,7 +54,7 @@ class Report:
             return "n/a"
         if "FAIL" in st:
             return "FAIL"
-        if all(s == "PASS" for s in st):
+        if all(s in ("PASS", "INFO") for s in st):
             return "green"
         return "green (pending MANUAL: %d)" % st.count("MANUAL") if "MANUAL" in st else "green (SKIP)"
 
@@ -214,15 +214,35 @@ def section_0(results):
 def section_A(results, docker_ok: bool):
     R.section = "A"
     # A1 / A3 / A10 are container checks (below); A2 needs the PAT.
+    # A2 (owner's decision, 2026-08-29): the GitHub credential never enters the container. run.ps1
+    # passes a filtered env file (scripts/container_env.ps1) and the host watchdog pushes
+    # rk-work / rk-findings with the owner's own credentials. So the property that matters —
+    # "the agent cannot push to rk-harness" — holds regardless of the PAT's scope. The HANDOFF's
+    # literal PATCH probe is still run and reported as advisory information.
     env = HARNESS / ".env"
     tok = re.search(r"^\s*GITHUB_TOKEN\s*=\s*(\S+)", env.read_text(encoding="utf-8"), re.M) if env.exists() else None
     if tok and not tok.group(1).startswith("<"):
+        filtered = Path(tempfile.mkdtemp(prefix="rk-a2-")) / "container.env"
+        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HARNESS / "scripts" / "container_env.ps1"),
+                               "-EnvFile", str(env), "-OutFile", str(filtered)], capture_output=True, text=True, timeout=60)
+        ftext = filtered.read_text(encoding="utf-8") if filtered.exists() else ""
+        leak_in_file = "GITHUB_TOKEN" in ftext
+        in_container = None
+        if docker_ok and filtered.exists():
+            p2 = subprocess.run(["docker", "run", "--rm", "--env-file", str(filtered), "--entrypoint", "env", "rk-harness:latest"],
+                                capture_output=True, text=True, timeout=120)
+            in_container = "GITHUB_TOKEN" in p2.stdout
+        shutil.rmtree(filtered.parent, ignore_errors=True)
+        R.check("A2", proc.returncode == 0 and not leak_in_file and in_container is not True,
+                f"GitHub credential is host-only: container env file has GITHUB_TOKEN={leak_in_file}; "
+                f"inside a container started with it: {'GITHUB_TOKEN present' if in_container else ('absent' if in_container is False else 'not checked (docker off)')}; "
+                f"pushes are done by scripts/watchdog.ps1 on the host")
         proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HARNESS / "scripts" / "check_pat.ps1")],
                               capture_output=True, text=True, timeout=300)
         lines = [l for l in proc.stdout.splitlines() if l.startswith("K5")]
-        R.check("A2", proc.returncode == 0, " | ".join(lines)[-400:])
+        R.add("A2*", "INFO", "advisory PAT scope probe (token is host-only, so this no longer gates): " + " | ".join(lines)[-400:])
     else:
-        R.add("A2", "MANUAL", "needs a fine-grained PAT in .env; then run scripts/check_pat.ps1 (expects HTTP 403)")
+        R.add("A2", "MANUAL", "put the PAT in .env (used on the host only) so the filtered-env check can run")
     closure = _import_closure("verifier")
     files = [HARNESS / "rk_harness" / f"{m}.py" for m in closure]
     bad = _grep(files, r"^\s*(import|from)\s+(requests|openai|httpx|socket|subprocess)\b")
@@ -749,7 +769,7 @@ def write_report(path: Path, suite_ran: bool, docker_ok: bool) -> None:
     secs = ["0", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"]
     lines = ["# REVIEW REPORT — pre-flight checklist (docs/REVIEW.md)", "",
              f"Generated {today} by `scripts/preflight.py` (suite run: {suite_ran}; docker: {docker_ok}).",
-             "Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (prerequisite absent).", "",
+             "Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (prerequisite absent) / INFO (advisory, does not gate).", "",
              "| Section | Status |", "| --- | --- |"]
     for s in secs:
         lines.append(f"| {s} | {R.section_status(s)} |")
