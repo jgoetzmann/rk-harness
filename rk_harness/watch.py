@@ -276,6 +276,12 @@ def working_panel(events: list[dict], hyps: list[dict]) -> Panel:
     e = last("enumeration")
     if e and not isl:
         rows.append(("enumeration batch", f"phase {e.get('phase')}: took {e.get('taken')} of {e.get('remaining')} remaining ({e.get('directive_id')})"))
+    lit = last("literature_digest")
+    if lit:
+        rows.append(("last literature", str(lit.get("topic"))[:110] + " (" + str(lit.get("sources")) + " sources, " + str(lit.get("ts")) + ")"))
+    interp = last("interpretation_published")
+    if interp:
+        rows.append(("last interpretation", "cycle " + str(interp.get("cycle")) + " at " + str(interp.get("ts")) + " (" + str(interp.get("chars")) + " chars)"))
     open_h = [h for h in hyps if h.get("verdict") is None]
     done_h = [h for h in hyps if h.get("verdict") is not None]
     rows.append(("hypotheses", f"open {len(open_h)}   supported {sum(h.get('verdict') == 'supported' for h in done_h)}   refuted {sum(h.get('verdict') == 'refuted' for h in done_h)}   inconclusive {sum(h.get('verdict') == 'inconclusive' for h in done_h)}"))

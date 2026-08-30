@@ -18,6 +18,8 @@ param(
     [int]$EvalBudget = 200,
     [int]$LlmEveryCycles = 5,
     [int]$CodexUsageCap = 80,
+    [int]$LitEvery = 50,
+    [int]$InterpretEvery = 25,
     [int]$EnumPerCycle = 500,
     [int]$MaxMinutes = 0,
     [int]$MaxCycles = 0,
@@ -72,6 +74,8 @@ $envFlags = @(
     "-e", "RK_EVAL_BUDGET=$EvalBudget",
     "-e", "RK_LLM_EVERY_CYCLES=$LlmEveryCycles",
     "-e", "RK_CODEX_USAGE_CAP=$CodexUsageCap",
+    "-e", "RK_LIT_EVERY=$LitEvery",
+    "-e", "RK_INTERPRET_EVERY=$InterpretEvery",
     "-e", "RK_ENUM_PER_CYCLE=$EnumPerCycle",
     "-e", "RK_MAX_MINUTES=$MaxMinutes",
     "-e", "RK_MAX_CYCLES=$MaxCycles"

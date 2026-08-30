@@ -26,6 +26,7 @@ from rk_harness import encourager
 from rk_harness import enumeration
 from rk_harness import evaluator
 from rk_harness import ledger
+from rk_harness import literature
 from rk_harness import orderconditions
 from rk_harness import prompts
 from rk_harness import search
@@ -244,7 +245,7 @@ def _rejected_hashes(current_vh: str | None = None) -> set[str]:
 # LLM
 # ----------------------------------------------------------------------------
 
-def _call_codex(system: str, user: str) -> tuple[str, float]:
+def _call_codex(system: str, user: str, extra_args: list[str] | None = None, timeout: int = 600) -> tuple[str, float]:
     """RK_LLM=codex: one `codex exec` call using the host-authenticated ~/.codex/auth.json mounted
     read-only into the container (HANDOFF §2.2). Plan-billed, so the metered cost is 0.0; the
     monthly cap still governs the API-key path. Raises on any failure. No retries."""
@@ -257,8 +258,8 @@ def _call_codex(system: str, user: str) -> tuple[str, float]:
     if last.exists():
         last.unlink()
     cmd = [exe, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(out_dir),
-           "--output-last-message", str(last)] + with_model + [system]
-    proc = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=600)
+           "--output-last-message", str(last)] + with_model + (extra_args or []) + [system]
+    proc = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(f"codex exec exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
     if not last.exists():
@@ -499,7 +500,8 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_
         hyps = ledger.load_hypotheses()
         refuted = [h for h in hyps if h.get("verdict") == "refuted"]
         open_h = [h for h in hyps if h.get("verdict") is None]
-        user = prompts.build_user_prompt(arch, state, refuted, open_h)
+        user = prompts.build_user_prompt(arch, state, refuted, open_h,
+                                         literature=literature.digest_for_prompt())
         content, cost = call_llm(prompts.SYSTEM_PROMPT, user)
         spent = cost
         log_event("llm_call", cost_usd=cost, model=os.environ.get("RK_LLM_MODEL", "gpt-4.1-mini"),
@@ -550,6 +552,124 @@ def _abandon(state: RunState, e: BaseException) -> RunState:
     return dataclasses.replace(state, stall_counter=state.stall_counter + 1)
 
 
+def _first_json_object(content: str) -> dict:
+    """The first balanced {...} in `content`, parsed. Raises on none."""
+    start = content.index("{")
+    depth = 0
+    end = start
+    for i in range(start, len(content)):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    return json.loads(content[start:end + 1])
+
+
+def _lit_every() -> int:
+    try:
+        return max(0, int(os.environ.get("RK_LIT_EVERY", "50") or 50))
+    except ValueError:
+        return 50
+
+
+def _interpret_every() -> int:
+    try:
+        return max(0, int(os.environ.get("RK_INTERPRET_EVERY", "25") or 25))
+    except ValueError:
+        return 25
+
+
+def _codex_capped() -> bool:
+    used = _codex_rate_limits().get("used_percent")
+    return isinstance(used, (int, float)) and used >= _codex_usage_cap()
+
+
+def _maybe_literature_review(state: RunState, arch, new_cycle_id: int) -> float:
+    """Every RK_LIT_EVERY cycles: one web-searched literature digest (codex only - the web
+    search tool runs server-side on the plan). Digests feed the directive, hypothesis and
+    interpretation prompts and are published on the findings site (softened)."""
+    every = _lit_every()
+    if every <= 0 or new_cycle_id % every != 0 or os.environ.get("RK_LLM") != "codex":
+        return 0.0
+    if state.spend_usd >= credentials.monthly_cap_usd() or _codex_capped():
+        return 0.0
+    digests = literature.load_digests()
+    topic = literature.next_topic(len(digests))
+    hyps = ledger.load_hypotheses()
+    open_h = [h for h in hyps if h.get("verdict") is None]
+    try:
+        content, cost = _call_codex(
+            prompts.LITERATURE_SYSTEM_PROMPT,
+            prompts.build_literature_prompt(topic, state, open_h, digests),
+            extra_args=["-c", "tools.web_search=true"], timeout=900)
+    except Exception as e:  # noqa: BLE001 - research must never fail the cycle
+        log_event("literature_failed", error=repr(e), topic=topic)
+        return 0.0
+    try:
+        raw = _first_json_object(content)
+        entry = {"ts": iso_now(), "cycle": new_cycle_id, "topic": raw.get("topic", topic),
+                 "summary": raw.get("summary", ""), "key_points": raw.get("key_points"),
+                 "sources": raw.get("sources")}
+        if not str(entry["summary"]).strip():
+            raise ValueError("empty summary")
+        literature.append_digest(entry)
+        log_event("literature_digest", topic=str(entry["topic"])[:200],
+                  sources=len(raw.get("sources") or []), cost_usd=cost)
+    except Exception as e:  # noqa: BLE001
+        log_event("literature_failed", error=repr(e), topic=topic, text=str(content)[:300])
+    return cost
+
+
+def _maybe_interpret(state: RunState, arch, new_cycle_id: int) -> float:
+    """Every RK_INTERPRET_EVERY cycles: model-written prose interpretation of the archive,
+    published on the findings site as clearly labelled analysis (softened at write time so
+    the banned-words guard still holds)."""
+    every = _interpret_every()
+    if every <= 0 or new_cycle_id % every != 0 or os.environ.get("RK_LLM") not in ("on", "codex"):
+        return 0.0
+    if state.spend_usd >= credentials.monthly_cap_usd():
+        return 0.0
+    if os.environ.get("RK_LLM") == "codex" and _codex_capped():
+        return 0.0
+    hyps = ledger.load_hypotheses()
+    refuted = [h for h in hyps if h.get("verdict") == "refuted"]
+    open_h = [h for h in hyps if h.get("verdict") is None]
+    extra_lines = []
+    f = work_dir() / "falsification.json"
+    if f.exists():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            rk4 = data.get("methods", {}).get("rk4", {})
+            extra_lines.append(
+                f"falsification: verdict {data.get('verdict')}; rk4 coefficient fraction "
+                f"{rk4.get('coefficient_fraction')}; crossover h {rk4.get('crossover_h')}")
+        except ValueError:
+            pass
+    try:
+        content, cost = _call_codex(  # plain call: no web needed to read our own data
+            prompts.INTERPRET_SYSTEM_PROMPT,
+            prompts.build_interpretation_prompt(arch, state, refuted, open_h,
+                                                literature.digest_for_prompt(),
+                                                "\n".join(extra_lines))) if os.environ.get("RK_LLM") == "codex" else call_llm(
+            prompts.INTERPRET_SYSTEM_PROMPT,
+            prompts.build_interpretation_prompt(arch, state, refuted, open_h,
+                                                literature.digest_for_prompt(),
+                                                "\n".join(extra_lines)))
+    except Exception as e:  # noqa: BLE001
+        log_event("interpretation_failed", error=repr(e))
+        return 0.0
+    text = str(content).strip()
+    if len(text) < 200:
+        log_event("interpretation_failed", error="too short", text=text[:200])
+        return cost
+    literature.append_interpretation({"ts": iso_now(), "cycle": new_cycle_id, "text": text})
+    log_event("interpretation_published", cycle=new_cycle_id, chars=len(text), cost_usd=cost)
+    return cost
+
+
 def _next_hypothesis_id() -> str:
     nums = [0]
     for h in ledger.load_hypotheses():
@@ -576,7 +696,8 @@ def _maybe_propose_hypothesis(state: RunState, arch, action_kind: str, new_cycle
     open_h = [h for h in hyps if h.get("verdict") is None]
     try:
         content, cost = call_llm(prompts.HYPOTHESIS_SYSTEM_PROMPT,
-                                 prompts.build_hypothesis_prompt(arch, state, refuted, open_h))
+                                 prompts.build_hypothesis_prompt(arch, state, refuted, open_h,
+                                                                 literature=literature.digest_for_prompt()))
     except Exception as e:  # noqa: BLE001 - a failed proposal never fails the cycle
         log_event("hypothesis_call_failed", error=repr(e))
         return 0.0
@@ -646,6 +767,8 @@ def _run_cycle(state: RunState) -> RunState:
     action = encourager.next_action(state, arch, now())
     log_event("action", action=action.kind, payload=action.payload, cycle_id=new_cycle_id, phase=phase)
     spent_hyp = _maybe_propose_hypothesis(state, arch, action.kind, new_cycle_id)
+    spent_hyp += _maybe_literature_review(state, arch, new_cycle_id)
+    spent_hyp += _maybe_interpret(state, arch, new_cycle_id)
     if action.kind == "FREEZE":
         log_event("frozen", cycle_id=state.cycle_id)
         return state

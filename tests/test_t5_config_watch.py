@@ -96,6 +96,11 @@ def test_C14_watch_renders_and_is_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("RK_WORK_DIR", str(work))
     monkeypatch.setenv("RK_CONFIG", str(cfg))
     from rk_harness import watch
+    monkeypatch.setattr(watch, "docker_info", lambda name="rk": {"status": "running", "started": "2026-09-21T09:00:00Z",
+                                                                 "image": "rk-harness:latest", "cpus": 4.0, "memory_gb": 6.0,
+                                                                 "pids_limit": 512, "cpu_shares": 256, "env": {"RK_LLM": "codex"}})
+    monkeypatch.setattr(watch, "watchdog_running", lambda: True)
+    monkeypatch.setattr(watch, "last_push_time", lambda repo: "n/a")
     text = watch.render_once()
     for needle in ("rk run", "settings", "auto_stop_minutes", "what it is working on", "SEARCH_CELL", "fallback: emptiest cell",
                    "codex usage", "3.5%", "progress", "health", "results", "last 10 events"):
@@ -192,3 +197,80 @@ def test_C17_hypothesize_action_appends_a_validated_hypothesis(tmp_path, monkeyp
     for banned in ("heldout_verified", "search_only", "unreplicated"):
         assert banned not in text
     assert "verdicts are assigned" in prompts.HYPOTHESIS_SYSTEM_PROMPT
+
+
+def test_C18_literature_store_soften_and_prompt_wiring(tmp_path, monkeypatch):
+    monkeypatch.setenv("RK_WORK_DIR", str(tmp_path / "work"))
+    from rk_harness import literature, prompts
+    from rk_harness.types import ArchiveState, RunState
+    softened = literature.soften("a novel first method that beats X, proves Y, a breakthrough")
+    for banned in ("novel", "first", "beats", "proves", "breakthrough"):
+        assert banned not in softened.lower()
+    literature.append_digest({"ts": "2026-09-21T10:00:00Z", "cycle": 5, "topic": "novel Q15 RK",
+                              "summary": "Stochastic rounding beats floor rounding in drift.\n\nSecond para.",
+                              "key_points": ["floor bias is systematic"],
+                              "sources": [{"title": "first paper", "url": "https://arxiv.org/abs/1911.00318"}]})
+    d = literature.load_digests()[0]
+    assert "novel" not in d["topic"] and "beats" not in d["summary"]
+    text = literature.digest_for_prompt()
+    assert "floor bias is systematic" in text
+    assert literature.next_topic(0) != literature.next_topic(1)
+    arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
+    st = RunState(1, 2, "", "", 0.0, 0, None)
+    assert "floor bias is systematic" in prompts.build_user_prompt(arch, st, [], [], literature=text)
+    assert "floor bias is systematic" in prompts.build_hypothesis_prompt(arch, st, [], [], literature=text)
+    for banned in ("heldout_verified", "search_only", "unreplicated"):
+        assert banned not in prompts.LITERATURE_SYSTEM_PROMPT + prompts.INTERPRET_SYSTEM_PROMPT
+
+
+def test_C19_runner_literature_and_interpretation_gating(tmp_path, monkeypatch):
+    from rk_harness import ledger, literature, runner
+    from rk_harness.types import ArchiveState, RunState
+    work = tmp_path / "work"
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    monkeypatch.setenv("RK_LLM", "codex")
+    monkeypatch.setenv("RK_LIT_EVERY", "2")
+    monkeypatch.setenv("RK_INTERPRET_EVERY", "3")
+    arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
+    st = RunState(1, 2, "2026-09-21T10:00:00Z", "2026-09-21T10:00:00Z", 0.0, 0, None)
+    dig = json.dumps({"topic": "csd multipliers", "summary": "CSD halves the shift count on slow multipliers.",
+                      "key_points": ["naf is minimal"], "sources": [{"title": "t", "url": "https://x"}]})
+    seen = []
+
+    def fake_codex(system, user, extra_args=None, timeout=600):
+        seen.append(list(extra_args or []))
+        return (dig if extra_args else "Para one interpreting the grids at length, easily long enough to pass the two-hundred-character floor for a published interpretation entry, with mechanism talk.\n\nPara two about the novel first results."), 0.0
+    monkeypatch.setattr(runner, "_call_codex", fake_codex)
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {"used_percent": 10.0})
+    assert runner._maybe_literature_review(st, arch, 3) == 0.0        # not due
+    assert literature.load_digests() == []
+    runner._maybe_literature_review(st, arch, 4)                      # due -> digest written via web search args
+    assert ["-c", "tools.web_search=true"] in seen
+    assert literature.load_digests()[0]["topic"] == "csd multipliers"
+    assert runner._maybe_interpret(st, arch, 4) == 0.0                # not due
+    runner._maybe_interpret(st, arch, 6)                              # due -> interpretation written, softened
+    entries = literature.load_interpretations()
+    assert len(entries) == 1 and "novel" not in entries[0]["text"]
+    ev = (work / "events.jsonl").read_text(encoding="utf-8")
+    assert "literature_digest" in ev and "interpretation_published" in ev
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {"used_percent": 95.0})
+    assert runner._maybe_literature_review(st, arch, 6) == 0.0        # capped
+
+
+def test_C20_sitegen_publishes_literature_and_interpretation(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    from rk_harness import archive, literature, sitegen
+    literature.append_digest({"ts": "2026-09-21T10:00:00Z", "cycle": 5, "topic": "novel Q15 RK",
+                              "summary": "Floor rounding drift beats naive expectations.",
+                              "key_points": ["k1"], "sources": [{"title": "first paper", "url": "https://arxiv.org/abs/1911.00318"}]})
+    literature.append_interpretation({"ts": "2026-09-21T10:01:00Z", "cycle": 6,
+                                      "text": "The archive proves a novel pattern.\n\nSecond paragraph."})
+    out = tmp_path / "docs"
+    sitegen.build(archive.replay(), out)                              # would raise on any banned word
+    lit = (out / "literature.html").read_text(encoding="utf-8")
+    interp = (out / "interpretation.html").read_text(encoding="utf-8")
+    assert sitegen.BANNER in lit and sitegen.BANNER in interp
+    assert "arxiv.org" in lit and "Model-written" in lit and "Model-written" in interp
+    for page in (lit, interp):
+        sitegen.check_banned(page)

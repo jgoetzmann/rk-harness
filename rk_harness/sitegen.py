@@ -12,6 +12,7 @@ import re
 from fractions import Fraction
 from pathlib import Path
 
+from rk_harness import literature as literature_mod
 from rk_harness import costmodel
 from rk_harness import ledger
 from rk_harness import tableau as tableau_mod
@@ -371,6 +372,8 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
             rec = grid[(stg, bucket)]
             pages[_cell_file(order, stg, bucket)] = render_cell(order, stg, bucket, rec)
     pages["hypotheses.html"] = render_hypotheses(_load_hypotheses())
+    pages["literature.html"] = render_literature(literature_mod.load_digests())
+    pages["interpretation.html"] = render_interpretation(literature_mod.load_interpretations())
     pages["costmodel.html"] = render_costmodel()
     pages["falsification.html"] = render_falsification(_load_falsification())
     for name in sorted(pages.keys()):
@@ -379,3 +382,42 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
     for name in sorted(pages.keys()):
         with open(out_dir / name, "wb") as fh:
             fh.write(pages[name].encode("utf-8"))
+
+
+_MODEL_NOTE = ("Model-written text. Sources are model-collected citations; verify them before "
+               "relying on them. See rk-overview for the human view.")
+
+
+def render_literature(digests: list[dict]) -> str:
+    parts = ["<p class=" + '"note"' + ">" + _esc(_MODEL_NOTE) + "</p>"]
+    if not digests:
+        parts.append("<p>no literature digests yet</p>")
+    for d in reversed(digests):
+        parts.append("<hr>")
+        parts.append("<h2>" + _esc(d.get("topic", "")) + "</h2>")
+        parts.append("<p>collected " + _esc(d.get("ts", "")) + " at cycle " + str(int(d.get("cycle", 0))) + "</p>")
+        for para in str(d.get("summary", "")).split("\n\n"):
+            if para.strip():
+                parts.append("<p>" + _esc(para.strip()) + "</p>")
+        pts = d.get("key_points") or []
+        if pts:
+            parts.append("<ul>" + "".join("<li>" + _esc(k) + "</li>" for k in pts) + "</ul>")
+        srcs = d.get("sources") or []
+        if srcs:
+            items = "".join('<li><a href="' + _esc(x.get("url", "")) + '">' + _esc(x.get("title", "") or x.get("url", "")) + "</a></li>" for x in srcs)
+            parts.append("<p>sources:</p><ul>" + items + "</ul>")
+    return _page("literature digest", "\n".join(parts))
+
+
+def render_interpretation(entries: list[dict]) -> str:
+    parts = ["<p class=" + '"note"' + ">" + _esc(_MODEL_NOTE) + "</p>"]
+    if not entries:
+        parts.append("<p>no interpretation yet</p>")
+    for e in reversed(entries):
+        parts.append("<hr>")
+        parts.append("<h2>cycle " + str(int(e.get("cycle", 0))) + "</h2>")
+        parts.append("<p>written " + _esc(e.get("ts", "")) + "</p>")
+        for para in str(e.get("text", "")).split("\n\n"):
+            if para.strip():
+                parts.append("<p>" + _esc(para.strip()) + "</p>")
+    return _page("interpretation", "\n".join(parts))

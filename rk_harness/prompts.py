@@ -153,7 +153,7 @@ def _state_section(state: RunState) -> list[str]:
     ]
 
 
-def build_user_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], open_h: list[dict]) -> str:
+def build_user_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], open_h: list[dict], literature: str = "") -> str:
     lines: list[str] = []
     lines.append("# Search directive request")
     lines.extend(_state_section(state))
@@ -189,6 +189,7 @@ def build_user_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], 
         "open hypothesis. Reference an open hypothesis id in hypothesis_id when the search is "
         "meant to gather samples for it; otherwise set it to null."
     )
+    lines.extend(_literature_section(literature))
     lines.append("Return exactly one JSON object and nothing else.")
     return "\n".join(lines)
 
@@ -206,7 +207,7 @@ HYPOTHESIS_SYSTEM_PROMPT = (
 )
 
 
-def build_hypothesis_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], open_h: list[dict]) -> str:
+def build_hypothesis_prompt(arch: ArchiveState, state: RunState, refuted: list[dict], open_h: list[dict], literature: str = "") -> str:
     lines = ["## Task", "Propose ONE new falsifiable hypothesis about the archive, as a single JSON object.", ""]
     lines.extend(_grid_section(arch))
     lines.append("")
@@ -215,4 +216,65 @@ def build_hypothesis_prompt(arch: ArchiveState, state: RunState, refuted: list[d
         lines.append(_hyp_line(h))
     if not (open_h or refuted):
         lines.append("  none yet")
+    lines.extend(_literature_section(literature))
+    return "\n".join(lines)
+
+
+def _literature_section(literature: str) -> list[str]:
+    if not literature:
+        return []
+    return ["", "## Literature digest (web-researched; background for your reasoning)", literature]
+
+
+LITERATURE_SYSTEM_PROMPT = (
+    "You are the literature scout for a search over fixed-point Runge-Kutta methods on "
+    "Cortex-M0+ (Q15, fixed cycle budget, floor rounding). Use the web search tool to find "
+    "current, real sources on the requested topic. Return exactly one JSON object with keys: "
+    "topic (short), summary (2-3 plain-text paragraphs of what the literature says and how it "
+    "bears on this search), key_points (list of short strings), sources (list of {title, url} "
+    "you actually consulted). Facts only; no priority claims about our own project. Do not "
+    "repeat digests listed as already collected."
+)
+
+
+def build_literature_prompt(topic: str, state: RunState, open_h: list[dict], digests: list[dict]) -> str:
+    lines = ["## Research topic", topic, "",
+             f"## Context: the run is in phase {state.phase}, cycle {state.cycle_id}.",
+             "Open hypotheses the digest should help sharpen or challenge:"]
+    for h in open_h[-5:]:
+        lines.append(f"  {h.get('id')}: {h.get('statement')}")
+    if not open_h:
+        lines.append("  none open")
+    lines.append("")
+    lines.append(f"## Already collected ({len(digests)}) - do not repeat")
+    for d in digests[-8:]:
+        lines.append(f"  [{d.get('ts', '')}] {d.get('topic', '')}")
+    if not digests:
+        lines.append("  none yet")
+    return "\n".join(lines)
+
+
+INTERPRET_SYSTEM_PROMPT = (
+    "You write the analysis page of an auto-generated findings site for a fixed-point "
+    "Runge-Kutta search. Write 3-5 plain-text paragraphs interpreting the data you are given: "
+    "what the archive shows, which mechanisms explain it, how it relates to the literature "
+    "digest, what is still uncertain, and what is worth examining next. Plain prose, no "
+    "markdown, no lists, no headings. Never claim priority or importance for this project "
+    "(avoid words like novel, breakthrough, or claims of being ahead of others); verdicts on "
+    "hypotheses are computed by the harness, so describe them as observations, not decisions."
+)
+
+
+def build_interpretation_prompt(arch: ArchiveState, state: RunState, refuted: list[dict],
+                                open_h: list[dict], literature: str = "", extra: str = "") -> str:
+    lines = ["# Interpretation request", ""]
+    lines.extend(_state_section(state))
+    lines.extend(_grid_section(arch))
+    lines.append("")
+    lines.append(f"## Hypotheses: open {len(open_h)}, refuted {len(refuted)}")
+    for h in (open_h + refuted)[-8:]:
+        lines.append(_hyp_line(h))
+    if extra:
+        lines.extend(["", "## Fixed reference results", extra])
+    lines.extend(_literature_section(literature))
     return "\n".join(lines)

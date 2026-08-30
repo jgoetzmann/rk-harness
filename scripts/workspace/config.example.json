@@ -18,7 +18,9 @@
     "git_commit": true,
     "initial_phase": null,
     "llm_every_cycles": 5,
-    "codex_usage_cap_percent": 80
+    "codex_usage_cap_percent": 80,
+    "litreview_every_cycles": 50,
+    "interpret_every_cycles": 25
   },
   "watchdog": {
     "poll_seconds": 10,
