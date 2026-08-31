@@ -8,6 +8,11 @@ set -eu
 HARNESS="${RK_HARNESS_DIR:-/harness}"
 cd "$HARNESS"
 
+# Write a heartbeat immediately: the golden gate below takes ~a minute before the runner's own
+# heartbeat thread starts, and the host watchdog must not mistake gate time for a hang (it once
+# killed a fresh container 14 s after start because the file on disk predated the restart).
+date -u +"%Y-%m-%dT%H:%M:%SZ" > "${RK_WORK_DIR:-/work}/HEARTBEAT" 2>/dev/null || true
+
 # K4: the harness mount must be read-only.
 if touch "$HARNESS/.rw-probe" 2>/dev/null; then
   rm -f "$HARNESS/.rw-probe"

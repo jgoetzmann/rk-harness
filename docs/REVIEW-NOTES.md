@@ -73,6 +73,16 @@ rk-findings (rk-overview stays human-written). Both pages carry the automatic ba
 "model-written, verify sources" note, and all text passes through literature.soften() before it
 is stored, so E4/H2 (banned words, build() raising) still hold and are still tested.
 
+## Incident 2026-08-30: watchdog killed a fresh container mid-gate
+
+After the site-redesign restart, the watchdog's first poll saw a HEARTBEAT file predating the
+restart (age > 120 s) and ran `docker kill` 14 s after start — before the entrypoint gate had
+finished, so the runner never got to write a fresh heartbeat. The run then sat exited for ~90
+minutes because nothing restarts a killed container. Three-part fix: the entrypoint now writes a
+heartbeat at second zero; the watchdog never kills a container younger than the staleness
+threshold; and the container runs with `--restart on-failure:5`, so a wrongful kill self-heals
+while a graceful STOP exit (code 0) or an explicit watchdog `docker stop` stays down.
+
 ## Items that need the host or a human
 
 A2 (fine-grained PAT in `.env`, then `scripts/check_pat.ps1`), A11 (`scripts/network.sh` in

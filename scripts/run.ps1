@@ -88,7 +88,9 @@ $scratch = "/scratch:size={0}g" -f $ScratchGB
 Write-Host "resources: cpus=$Cpus memory=$mem pids-limit=$PidsLimit cpu-shares=$CpuShares tmpfs=$scratch"
 Write-Host "limits: max_minutes=$MaxMinutes max_cycles=$MaxCycles eval_budget=$EvalBudget enum_per_cycle=$EnumPerCycle llm_every=$LlmEveryCycles cycles codex_cap=$CodexUsageCap%"
 
-docker run -d --name rk `
+# on-failure: a wrongful kill (nonzero exit) self-heals; a graceful STOP exit (0) or an explicit
+# `docker stop` from the watchdog stays down.
+docker run -d --name rk --restart on-failure:5 `
   --cpus=$Cpus --memory=$mem --pids-limit=$PidsLimit --cpu-shares=$CpuShares `
   --tmpfs $scratch `
   @mounts `

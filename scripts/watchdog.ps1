@@ -76,6 +76,14 @@ function Container-Running {
     return ($s -eq "running" -or $s -eq "paused")
 }
 
+function Container-UptimeSeconds {
+    try {
+        $st = docker inspect -f "{{.State.StartedAt}}" $Container 2>$null
+        if (-not $st) { return 0 }
+        return [int]((Get-Date).ToUniversalTime() - [datetime]::Parse($st).ToUniversalTime()).TotalSeconds
+    } catch { return 0 }
+}
+
 $cap = Read-Cap
 $highSince = $null
 $lowSince = $null
@@ -117,7 +125,9 @@ while ($true) {
         try {
             $ts = [datetime]::Parse((Get-Content $hb -Raw).Trim()).ToUniversalTime()
             $age = ((Get-Date).ToUniversalTime() - $ts).TotalSeconds
-            if ($age -gt $HeartbeatStaleSeconds -and -not $paused) {
+            # Startup grace: never kill a container younger than the staleness threshold — the
+            # entrypoint gate runs before the runner's heartbeat thread exists.
+            if ($age -gt $HeartbeatStaleSeconds -and -not $paused -and (Container-UptimeSeconds) -gt $HeartbeatStaleSeconds) {
                 Write-Host "$(Get-Date -Format s) heartbeat stale ${age}s -> docker kill"
                 docker kill $Container | Out-Null
                 if ($Once) { break }; continue
