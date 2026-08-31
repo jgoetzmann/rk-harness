@@ -87,7 +87,6 @@ function Container-UptimeSeconds {
 $cap = Read-Cap
 $highSince = $null
 $lowSince = $null
-$paused = $false
 $alerted = $false
 Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s heartbeat-stale=${HeartbeatStaleSeconds}s min-free=${MinFreeGB}GB push=${PushMinutes}min cpu-pause=${CpuHigh}/${CpuLow}% for ${CpuSustainSeconds}s battery-guard=$(-not $NoBatteryGuard)"
 
@@ -100,18 +99,27 @@ while ($true) {
         $lastPush = Get-Date
     }
 
-    if (-not (Container-Running)) { Write-Host "$(Get-Date -Format s) container not running; watchdog idle"; if ($Once) { break }; continue }
+    # Pause state is derived from docker every poll, never trusted from this process's own
+    # variables: start.ps1 restarts the watchdog, and a fresh instance must adopt a paused
+    # container instead of killing it or leaving it frozen.
+    $status = (docker inspect -f "{{.State.Status}}" $Container 2>$null)
+    if ($status -ne "running" -and $status -ne "paused") { Write-Host "$(Get-Date -Format s) container not running ($status); watchdog idle"; if ($Once) { break }; continue }
+    $isPaused = ($status -eq "paused")
 
     # 0b. Battery: pause while unplugged, resume on AC. Takes precedence over the CPU pause logic.
     if (-not $NoBatteryGuard) {
-        if ((On-Battery) -and -not $pausedBattery) {
-            Write-Host "$(Get-Date -Format s) on battery -> docker pause"
-            docker pause $Container | Out-Null; $pausedBattery = $true; $paused = $true
-        } elseif (-not (On-Battery) -and $pausedBattery) {
+        if (On-Battery) {
+            if (-not $isPaused) {
+                Write-Host "$(Get-Date -Format s) on battery -> docker pause"
+                docker pause $Container | Out-Null
+            }
+            $pausedBattery = $true
+            if ($Once) { break }; continue
+        } elseif ($pausedBattery) {
             Write-Host "$(Get-Date -Format s) back on AC -> docker unpause"
-            docker unpause $Container | Out-Null; $pausedBattery = $false; $paused = $false
+            if ($isPaused) { docker unpause $Container | Out-Null; $isPaused = $false }
+            $pausedBattery = $false
         }
-        if ($pausedBattery) { if ($Once) { break }; continue }
     }
 
     # 1. Killfile: graceful stop at the cycle boundary (the runner polls STOP itself).
@@ -125,9 +133,9 @@ while ($true) {
         try {
             $ts = [datetime]::Parse((Get-Content $hb -Raw).Trim()).ToUniversalTime()
             $age = ((Get-Date).ToUniversalTime() - $ts).TotalSeconds
-            # Startup grace: never kill a container younger than the staleness threshold — the
+            # Startup grace: never kill a container younger than the staleness threshold - the
             # entrypoint gate runs before the runner's heartbeat thread exists.
-            if ($age -gt $HeartbeatStaleSeconds -and -not $paused -and (Container-UptimeSeconds) -gt $HeartbeatStaleSeconds) {
+            if ($age -gt $HeartbeatStaleSeconds -and -not $isPaused -and (Container-UptimeSeconds) -gt $HeartbeatStaleSeconds) {
                 Write-Host "$(Get-Date -Format s) heartbeat stale ${age}s -> docker kill"
                 docker kill $Container | Out-Null
                 if ($Once) { break }; continue
@@ -171,12 +179,12 @@ while ($true) {
     elseif ($host_cpu -lt $CpuLow) { if ($null -eq $lowSince) { $lowSince = $now }; $highSince = $null }
     else { $highSince = $null; $lowSince = $null }
 
-    if (-not $paused -and $null -ne $highSince -and ($now - $highSince).TotalSeconds -ge $CpuSustainSeconds) {
+    if (-not $isPaused -and $null -ne $highSince -and ($now - $highSince).TotalSeconds -ge $CpuSustainSeconds) {
         Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for ${CpuSustainSeconds}s -> docker pause"
-        docker pause $Container | Out-Null; $paused = $true; $highSince = $null
-    } elseif ($paused -and -not $pausedBattery -and $null -ne $lowSince -and ($now - $lowSince).TotalSeconds -ge $CpuSustainSeconds) {
+        docker pause $Container | Out-Null; $highSince = $null
+    } elseif ($isPaused -and $null -ne $lowSince -and ($now - $lowSince).TotalSeconds -ge $CpuSustainSeconds) {
         Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for ${CpuSustainSeconds}s -> docker unpause"
-        docker unpause $Container | Out-Null; $paused = $false; $lowSince = $null
+        docker unpause $Container | Out-Null; $lowSince = $null
     }
     if ($Once) { break }
 }

@@ -83,6 +83,17 @@ heartbeat at second zero; the watchdog never kills a container younger than the 
 threshold; and the container runs with `--restart on-failure:5`, so a wrongful kill self-heals
 while a graceful STOP exit (code 0) or an explicit watchdog `docker stop` stays down.
 
+## F2/F3 exercised live (2026-08-31): pause and auto-resume confirmed
+
+The CPU guard paused the container under real session load, and a freshly started watchdog
+(which had not set that pause) auto-resumed it once host CPU stayed under the resume threshold
+for the sustain window. While confirming this, a state hole was fixed: the watchdog previously
+tracked "paused" in its own process variables, so a watchdog restart while the container was
+paused (start.ps1 restarts it every run) would strand the container frozen and could docker-kill
+it via the stale-heartbeat path. Pause state is now read from docker on every poll: a fresh
+watchdog adopts an existing pause, resumes it on CPU/AC recovery, and never heartbeat-kills a
+paused container.
+
 ## Items that need the host or a human
 
 A2 (fine-grained PAT in `.env`, then `scripts/check_pat.ps1`), A11 (`scripts/network.sh` in
