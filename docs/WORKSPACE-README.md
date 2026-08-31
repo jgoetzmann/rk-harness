@@ -23,6 +23,9 @@ rk-harness/     the code: package rk_harness, tests (943), fixtures, scripts, Do
 rk-work/        the run's state: archive/YYYY-MM-DD.jsonl (one record per verified tableau),
                 events.jsonl (the event stream), hypotheses.jsonl, RUNSTATE.json, HEARTBEAT.
 rk-findings/    the generated site (docs/) -> https://jgoetzmann.github.io/rk-findings/
+rk-overview/    the human explainer site   -> https://jgoetzmann.github.io/rk-overview/
+                (architecture, annotated design decisions, run charts, findings snapshot;
+                 regenerate with rk-overview	ools\generate.py)
 ```
 
 All three `rk-*` directories are git repos pushed to github.com/jgoetzmann/.
