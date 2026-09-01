@@ -25,6 +25,7 @@ from rk_harness import enumeration
 from rk_harness import tableau as tableau_mod
 from rk_harness import verifier_hash
 from rk_harness.paths import work_dir
+from rk_harness.timefmt import fmt_ct
 from rk_harness.types import ArchiveState, RunState
 
 _ESCALATION_KINDS = ("WIDEN", "HYPOTHESIZE", "ADVANCE_PHASE", "ROTATE_PROBLEMS")
@@ -218,12 +219,11 @@ def _codex_usage_line() -> str:
         if isinstance(used, (int, float)) and isinstance(window, (int, float)):
             span = "weekly" if int(window) >= 10000 else f"{int(window) // 60}h"
             parts.append(f"codex ({plan}): {used:.1f}% of {span} limit used")
-        if isinstance(resets, (int, float)):
-            when = datetime.datetime.fromtimestamp(float(resets), datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
-            parts.append(f"resets {when}")
+        if isinstance(resets, (int, float)) and not isinstance(resets, bool):
+            parts.append(f"resets {fmt_ct(resets)}")
         if tokens:
             parts.append(f"last call {tokens.get('input_tokens', 0)} in / {tokens.get('output_tokens', 0)} out tokens")
-        return "   ".join(parts) if parts else f"codex usage logged at {ev.get('ts', '?')}"
+        return "   ".join(parts) if parts else f"codex usage logged at {fmt_ct(ev.get('ts'), default='?')}"
     return ""
 
 
@@ -245,7 +245,7 @@ def _candidates_panel(arch: ArchiveState, st: RunState, events: list[dict],
             for rec in grid.values():
                 if last is None or rec.timestamp > last:
                     last = rec.timestamp
-        lines.append(f"last discovery: {last if last else 'none'}")
+        lines.append(f"last discovery: {fmt_ct(last, default='none') if last else 'none'}")
         hour_ago = now - datetime.timedelta(hours=1)
         n_hour = 0
         for e in events:
@@ -359,7 +359,7 @@ def _gap_panel(arch: ArchiveState) -> Panel:
 
 def _events_panel(tail: list[dict]) -> Panel:
     table = Table(expand=True)
-    table.add_column("ts", no_wrap=True)
+    table.add_column("ts (CT)", no_wrap=True)
     table.add_column("kind", no_wrap=True)
     table.add_column("detail")
     for e in tail:
@@ -367,7 +367,7 @@ def _events_panel(tail: list[dict]) -> Panel:
         text = json.dumps(detail, default=str, sort_keys=True)
         if len(text) > 100:
             text = text[:97] + "..."
-        table.add_row(str(e.get("ts", "")), str(e.get("kind", "")), text)
+        table.add_row(fmt_ct(e.get("ts"), seconds=True, default=""), str(e.get("kind", "")), text)
     return Panel(table, title="recent events")
 
 

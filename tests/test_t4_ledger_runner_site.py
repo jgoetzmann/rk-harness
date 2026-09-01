@@ -36,7 +36,8 @@ from rk_harness.archive import read_all, replay, append, record_to_json
 from rk_harness.verifier_hash import compute_verifier_hash
 from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
-    render_hypotheses, render_costmodel, render_falsification, check_banned,
+    render_hypotheses, render_costmodel, render_falsification, render_glossary,
+    render_literature, render_interpretation, check_banned,
 )
 from rk_harness.dashboard import read_events, build_layout, render
 from rk_harness.tableau import make_tableau, content_hash
@@ -1235,6 +1236,102 @@ def test_B61_render_falsification_and_index_on_empty_inputs():
     assert BANNER in idx and "<title>" in idx.lower()
     assert "<script" not in idx.lower()
     check_banned(idx)
+
+
+def test_B61_render_glossary_defines_terms_with_anchors():
+    html = render_glossary()
+    assert html.lower().lstrip().startswith("<!doctype html>")
+    assert BANNER in html and "<title>" in html.lower()
+    assert "<script" not in html.lower()
+    for anchor in ("q15", "lsb", "floor-rounding", "tableau", "stage", "cycle-budget",
+                   "cost-bucket", "map-elites", "elite", "tiers", "held-out-set",
+                   "anchor-methods", "cohens-d", "csd-weight", "dyadic-rational",
+                   "order", "directive", "hypothesis-ledger", "verifier-hash"):
+        assert f'id="{anchor}"' in html, anchor
+    for tier in TIERS:
+        assert tier in html                       # the actual tier strings are defined
+    check_banned(html)
+    assert render_glossary() == render_glossary()  # deterministic
+
+
+def test_B61_build_writes_glossary_and_index_deep_links_it(monkeypatch, tmp_path):
+    _work, arch = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    build(arch, out)
+    gl = out / "glossary.html"
+    assert gl.is_file()
+    check_banned(gl.read_text(encoding="utf-8"))
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert 'href="glossary.html"' in index
+    assert "glossary.html#" in index              # explanations deep-link into the glossary
+
+
+def test_B61_nav_lists_every_page_in_order():
+    html = render_costmodel()
+    nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
+    assert re.findall(r'href="([^"]+)"', nav) == [
+        "index.html", "methodology.html", "costmodel.html", "falsification.html",
+        "hypotheses.html", "literature.html", "interpretation.html", "glossary.html"]
+
+
+def test_B61_major_pages_carry_collapsed_explanations(monkeypatch, tmp_path):
+    _work, arch = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    build(arch, out)
+    for name in ("index.html", "costmodel.html", "falsification.html", "hypotheses.html",
+                 "literature.html", "interpretation.html", "cell-p4-s4-b2.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert '<details class="explain">' in html, name
+        assert "How to read this" in html, name
+
+
+def test_B61_hypotheses_page_folds_each_hypothesis_with_provenance():
+    hyps = [
+        _hyp(id="H-001", verdict="supported", n_samples=250, effect_size=1.5, resolved_cycle=7),
+        _hyp(id="H-003"),
+    ]
+    html = render_hypotheses(hyps)
+    assert html.count('<details class="fold">') == 2
+    m = re.search(r'<summary><span class="mono">H-001</span> <span class="badge badge-supported">'
+                  r"supported</span>[^<]*<span class=\"when\">effect size 1\.5, n = 250", html)
+    assert m is not None, "summary must carry id + status + effect size"
+    assert "slow.p3s4.heldout" in html            # full predicate text in the body
+    assert "verdict computed by the ledger" in html and "at cycle 7" in html
+    assert "open: the ledger resolves it automatically" in html   # H-003 is unresolved
+    assert "112" in html                          # cycle_proposed is shown
+    check_banned(html)
+
+
+def test_B61_cell_page_shows_dyadic_coefficient_representation():
+    rec = _site_records()[0]                      # rk4
+    html = render_cell(4, 4, 2, rec)
+    assert "Raw coefficient representation (m/2^s)" in html
+    assert "A[1][0]" in html and "b[0]" in html   # nonzero entries are listed
+    assert "A[2][0]" not in html                  # zero entries are skipped
+    check_banned(html)
+
+
+def test_B61_stored_utc_timestamps_display_in_central_time():
+    rec = _site_records()[0]                      # timestamp CLOCK = 2026-09-21T10:00:00Z (CDT)
+    html = render_cell(4, 4, 2, rec)
+    assert "2026-09-21 05:00 CT" in html
+    assert CLOCK in html                          # the stored UTC value stays visible
+
+
+def test_B61_literature_and_interpretation_entries_fold_with_ct_dates():
+    digests = [{"ts": "2026-09-21T10:00:00Z", "cycle": 5, "topic": "fixed point drift",
+                "summary": "para one.\n\npara two.", "key_points": ["k1"],
+                "sources": [{"title": "paper", "url": "https://example.org/x"}]}]
+    lit = render_literature(digests)
+    assert '<details class="fold entry" open>' in lit
+    assert "fixed point drift" in lit and "2026-09-21 05:00 CT" in lit
+    assert "para two." in lit and "example.org" in lit
+    check_banned(lit)
+    interp = render_interpretation([{"ts": "2026-09-21T10:01:00Z", "cycle": 6,
+                                     "text": "reading one.\n\nreading two."}])
+    assert '<details class="fold entry" open>' in interp
+    assert "cycle 6" in interp and "2026-09-21 05:01 CT" in interp and "reading two." in interp
+    check_banned(interp)
 
 
 def test_B61_falsification_page_reflects_falsification_json(monkeypatch, tmp_path):

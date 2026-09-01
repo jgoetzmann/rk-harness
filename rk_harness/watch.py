@@ -33,6 +33,7 @@ from rich.text import Text
 from rk_harness import archive, ledger, verifier_hash
 from rk_harness import tableau as tableau_mod
 from rk_harness.paths import findings_dir, work_dir
+from rk_harness.timefmt import fmt_ct, to_ct
 from rk_harness.types import ArchiveState
 
 PHASES = {
@@ -166,8 +167,8 @@ def _load_state(arch: ArchiveState):
 
 def last_push_time(repo: Path) -> str:
     try:
-        p = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%ci", "origin/main"], capture_output=True, text=True, timeout=8)
-        return p.stdout.strip()[:16] if p.returncode == 0 else "n/a"
+        p = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%cI", "origin/main"], capture_output=True, text=True, timeout=8)
+        return fmt_ct(p.stdout.strip()) if p.returncode == 0 else "n/a"
     except Exception:  # noqa: BLE001
         return "n/a"
 
@@ -200,7 +201,7 @@ def header(st, arch: ArchiveState, events: list[dict], dk: dict, now) -> Panel:
     txt = Text.from_markup(
         f"container [{colour}]{status}[/]  up {up}   heartbeat age {hb_age}   watchdog {wd_txt}   "
         f"cycle {st.cycle_id}   phase {st.phase} = {name}   records {arch.n_records}   stall {st.stall_counter}\n"
-        f"[dim]{desc}[/]   now {now.strftime('%Y-%m-%d %H:%M:%SZ')}"
+        f"[dim]{desc}[/]   now {fmt_ct(now, seconds=True)}"
     )
     return Panel(txt, title="rk run")
 
@@ -226,7 +227,7 @@ def progress_panel(st, arch: ArchiveState, events: list[dict], records, now) -> 
     recent = [e for e in accepted if (_parse_ts(e.get("ts")) or now) > now - datetime.timedelta(minutes=10)]
     rate_h = len(recent) * 6
     rows: list[tuple[str, str]] = [
-        ("cycles done", f"{len(cycles)} (this archive)   last: " + (cycles[-1].get("ts", "?") if cycles else "none")),
+        ("cycles done", f"{len(cycles)} (this archive)   last: " + (fmt_ct(cycles[-1].get("ts"), default="?") if cycles else "none")),
         ("candidates", f"accepted {len(accepted)}   rejected {len(rejected)}   rate {rate_h}/h (last 10 min)"),
     ]
     if rejected:
@@ -243,7 +244,7 @@ def progress_panel(st, arch: ArchiveState, events: list[dict], records, now) -> 
     cov = {o: len(g) for o, g in arch.grids.items()}
     rows.append(("grid coverage", "  ".join(f"order {o}: {n}/40 cells" for o, n in sorted(cov.items()))))
     improved = [e for e in cycles if e.get("improved")]
-    rows.append(("last improvement", improved[-1].get("ts", "?") if improved else "none yet"))
+    rows.append(("last improvement", fmt_ct(improved[-1].get("ts"), default="?") if improved else "none yet"))
     rows.append(("current cell", str(st.current_cell)))
     return _kv_table(rows, "progress")
 
@@ -278,10 +279,10 @@ def working_panel(events: list[dict], hyps: list[dict]) -> Panel:
         rows.append(("enumeration batch", f"phase {e.get('phase')}: took {e.get('taken')} of {e.get('remaining')} remaining ({e.get('directive_id')})"))
     lit = last("literature_digest")
     if lit:
-        rows.append(("last literature", str(lit.get("topic"))[:110] + " (" + str(lit.get("sources")) + " sources, " + str(lit.get("ts")) + ")"))
+        rows.append(("last literature", str(lit.get("topic"))[:110] + " (" + str(lit.get("sources")) + " sources, " + fmt_ct(lit.get("ts")) + ")"))
     interp = last("interpretation_published")
     if interp:
-        rows.append(("last interpretation", "cycle " + str(interp.get("cycle")) + " at " + str(interp.get("ts")) + " (" + str(interp.get("chars")) + " chars)"))
+        rows.append(("last interpretation", "cycle " + str(interp.get("cycle")) + " at " + fmt_ct(interp.get("ts")) + " (" + str(interp.get("chars")) + " chars)"))
     open_h = [h for h in hyps if h.get("verdict") is None]
     done_h = [h for h in hyps if h.get("verdict") is not None]
     rows.append(("hypotheses", f"open {len(open_h)}   supported {sum(h.get('verdict') == 'supported' for h in done_h)}   refuted {sum(h.get('verdict') == 'refuted' for h in done_h)}   inconclusive {sum(h.get('verdict') == 'inconclusive' for h in done_h)}"))
@@ -303,12 +304,12 @@ def llm_panel(events: list[dict], dk: dict) -> Panel:
     env = dk.get("env", {})
     rows: list[tuple[str, str]] = [("mode", f"RK_LLM={env.get('RK_LLM', os.environ.get('RK_LLM', '?'))}  model={env.get('RK_LLM_MODEL', 'default')}")]
     calls = [e for e in events if e.get("kind") == "llm_call"]
-    rows.append(("directive calls", f"{len(calls)} total; last {calls[-1].get('ts') if calls else 'none'}"))
+    rows.append(("directive calls", f"{len(calls)} total; last {fmt_ct(calls[-1].get('ts')) if calls else 'none'}"))
     u = last("codex_usage")
     if u:
         used, window, resets, plan = u.get("used_percent"), u.get("window_minutes"), u.get("resets_at"), u.get("plan_type")
         span = "weekly" if isinstance(window, (int, float)) and window >= 10000 else (f"{int(window) // 60}h" if isinstance(window, (int, float)) else "?")
-        when = datetime.datetime.fromtimestamp(float(resets), datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if isinstance(resets, (int, float)) else "?"
+        when = fmt_ct(resets, default="?") if isinstance(resets, (int, float)) and not isinstance(resets, bool) else "?"
         tok = u.get("tokens") or {}
         rows.append(("codex usage", f"{used}% of the {span} {plan or ''} limit used, resets {when}"))
         rows.append(("last call tokens", f"in {tok.get('input_tokens', 0)} (cached {tok.get('cached_input_tokens', 0)})  out {tok.get('output_tokens', 0)}  reasoning {tok.get('reasoning_output_tokens', 0)}"))
@@ -317,7 +318,7 @@ def llm_panel(events: list[dict], dk: dict) -> Panel:
         rows.append(("api spend", f"${float(cd.get('spend_usd', 0)):.4f} of ${float(cd.get('cap_usd', 0)):.2f} cap (metered path only; codex is plan-billed)"))
     sk = last("llm_skipped")
     if sk:
-        rows.append(("last skip", f"{sk.get('reason')} at {sk.get('ts')}"))
+        rows.append(("last skip", f"{sk.get('reason')} at {fmt_ct(sk.get('ts'))}"))
     return _kv_table(rows, "LLM / codex")
 
 
@@ -374,7 +375,7 @@ def health_panel(events: list[dict], now) -> Panel:
     rows.append(("abandoned cycles", f"{len(abandoned)}" + (f"; last: {str(abandoned[-1].get('error'))[:120]}" if abandoned else "")))
     stops = [e for e in events if str(e.get("kind", "")).startswith("stopped_by") or e.get("kind") == "spend_cap_exceeded"]
     if stops:
-        rows.append(("last stop", f"{stops[-1].get('kind')} at {stops[-1].get('ts')}"))
+        rows.append(("last stop", f"{stops[-1].get('kind')} at {fmt_ct(stops[-1].get('ts'))}"))
     sb = [e for e in events if e.get("kind") == "site_build_failed"]
     if sb:
         rows.append(("site build failures", f"{len(sb)}; last {str(sb[-1].get('error'))[:100]}"))
@@ -398,13 +399,14 @@ def health_panel(events: list[dict], now) -> Panel:
 
 def events_panel(events: list[dict], n: int) -> Panel:
     t = Table(expand=True)
-    t.add_column("time", no_wrap=True)
+    t.add_column("time (CT)", no_wrap=True)
     t.add_column("kind", no_wrap=True)
     t.add_column("detail")
     for e in events[-n:]:
         detail = {k: v for k, v in e.items() if k not in ("ts", "kind")}
         s = json.dumps(detail, default=str)
-        t.add_row(str(e.get("ts", ""))[11:19], str(e.get("kind")), s[:150])
+        ct = to_ct(e.get("ts"))
+        t.add_row(ct.strftime("%H:%M:%S") if ct else "", str(e.get("kind")), s[:150])
     return Panel(t, title=f"last {n} events")
 
 

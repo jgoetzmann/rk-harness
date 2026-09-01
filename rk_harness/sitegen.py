@@ -1,7 +1,9 @@
 """Findings site generator — SPEC §Surface/sitegen.py, HANDOFF §17.
 
-Pure HTML + inline SVG, no JavaScript, no timestamps: the same ArchiveState always produces
-byte-identical files. Every page is checked against BANNED_WORDS before any file is written.
+Pure HTML + inline SVG, no JavaScript, no wall-clock reads: the same ArchiveState always
+produces byte-identical files. Stored UTC timestamps are displayed in US Central via
+rk_harness.timefmt (a pure conversion of stored data); still no wall-clock reads. Every
+page is checked against BANNED_WORDS before any file is written.
 
 Charts follow the dataviz method: form first, colors by job (categorical slots 1-3 of the
 validated reference palette, sequential blue ramp for magnitude), status colors reserved for
@@ -19,9 +21,11 @@ from fractions import Fraction
 from pathlib import Path
 
 from rk_harness import literature as literature_mod
+from rk_harness import coeffrep
 from rk_harness import costmodel
 from rk_harness import ledger
 from rk_harness import tableau as tableau_mod
+from rk_harness import timefmt
 from rk_harness.paths import work_dir
 from rk_harness.types import ArchiveState, Record
 
@@ -133,6 +137,22 @@ article.entry{background:var(--surface-1);border:1px solid var(--line);border-ra
   padding:16px 20px;margin:14px 0}
 article.entry h2{margin-top:0}
 article.entry .when{font-size:12px;color:var(--text-3);margin:0 0 8px}
+.when{font-size:12px;color:var(--text-3)}
+p.lead{color:var(--text-2);font-size:13.5px;max-width:76ch;margin:10px 0 16px}
+details.explain{margin:10px 0;max-width:76ch;font-size:13px;color:var(--text-2);
+  border:1px solid var(--line);border-radius:8px;background:var(--surface-1)}
+details.explain summary{cursor:pointer;padding:6px 12px;color:var(--text-3);
+  font-size:12.5px;letter-spacing:.02em}
+details.explain summary:hover{color:var(--text-1)}
+details.explain[open] summary{border-bottom:1px solid var(--line);color:var(--text-2)}
+details.explain>div{padding:4px 12px 8px}
+details.explain p{margin:8px 0}
+details.fold{background:var(--surface-1);border:1px solid var(--line);border-radius:10px;
+  margin:10px 0}
+details.fold>summary{cursor:pointer;padding:10px 16px;font-size:13.5px}
+details.fold>summary:hover{color:var(--text-1)}
+details.fold[open]>summary{border-bottom:1px solid var(--line)}
+details.fold>div{padding:6px 16px 12px}
 footer{margin-top:40px;font-size:12px;color:var(--text-3)}
 """
 
@@ -189,13 +209,32 @@ def _cell_file(order: int, stages: int, bucket: int) -> str:
     return f"cell-p{order}-s{stages}-b{bucket}.html"
 
 
+def _ct(value) -> str:
+    """Stored UTC timestamp -> US Central display string (pure, deterministic)."""
+    return timefmt.fmt_ct(value)
+
+
+def _gloss(anchor: str, text: str) -> str:
+    """A deep link into the glossary."""
+    return f'<a href="glossary.html#{_esc(anchor)}">{_esc(text)}</a>'
+
+
+def _explain(*paras: str) -> str:
+    """A collapsed "How to read this" block. Paragraphs are trusted HTML fragments."""
+    body = "".join(f"<p>{p}</p>" for p in paras)
+    return ('<details class="explain"><summary>How to read this</summary>'
+            f"<div>{body}</div></details>")
+
+
 _NAV_ITEMS = (
     ("index.html", "overview"),
+    ("methodology.html", "methodology"),
     ("costmodel.html", "cost model"),
     ("falsification.html", "falsification"),
     ("hypotheses.html", "hypotheses"),
     ("literature.html", "literature"),
     ("interpretation.html", "interpretation"),
+    ("glossary.html", "glossary"),
 )
 
 
@@ -516,6 +555,45 @@ def _tableau_table(rec: Record) -> str:
     return f'<div class="scroll"><table>\n{head}\n' + "\n".join(rows) + "\n</table></div>"
 
 
+def _coeff_rep_details(rec: Record) -> str:
+    """The dyadic m/2^s form of every nonzero A and b entry, as the integrator applies it.
+
+    The Record stores the tableau as exact fractions; the m/2^s pairs shown here are
+    recomputed with the same pinned coeffrep.to_rep the integrator uses, so the listing
+    is exactly what ran.
+    """
+    t = rec.tableau
+    entries: list[tuple[str, object]] = []
+    for i, row in enumerate(t.A):
+        for j in range(i):
+            if row[j] != 0:
+                entries.append((f"A[{i}][{j}]", row[j]))
+    for i, x in enumerate(t.b):
+        if x != 0:
+            entries.append((f"b[{i}]", x))
+    rows = []
+    for label, x in entries:
+        r = coeffrep.to_rep(x)
+        rows.append(f'<tr><td class="mono">{_esc(label)}</td><td class="mono">{_frac(x)}</td>'
+                    f"<td>{r.m}</td><td>{r.s}</td><td class=\"mono\">{r.m}/2^{r.s}</td>"
+                    f"<td>{'yes' if r.exact else 'no'}</td><td>{r.csd_weight}</td></tr>")
+    body = [
+        "<p>The Q15 integrator applies each nonzero A and b entry to a state value v as "
+        "(v * m) &gt;&gt; s, an arithmetic right shift that "
+        + _gloss("floor-rounding", "floors") + ". Zero entries are skipped. "
+        "When exact is no, m/2^s only approximates the fraction and the largest such gap is "
+        "the record's coeff_quant_error. " + _gloss("csd-weight", "CSD weight")
+        + " is the length of the shift-add chain the cost model may charge for the multiply "
+        "by m.</p>",
+        '<div class="scroll"><table><tr><th>entry</th><th>exact value</th><th>m</th><th>s</th>'
+        "<th>m/2^s</th><th>exact</th><th>csd weight</th></tr>",
+    ]
+    body.extend(rows)
+    body.append("</table></div>")
+    return ('<details class="fold"><summary>Raw coefficient representation (m/2^s)</summary>'
+            "<div>" + "\n".join(body) + "</div></details>")
+
+
 def _record_meta(rec: Record) -> str:
     items = [
         ("tier", _tier_badge(rec.tier)),
@@ -526,7 +604,7 @@ def _record_meta(rec: Record) -> str:
         ("seed", _num(rec.seed)),
         ("directive_id", _esc(rec.directive_id) if rec.directive_id is not None else "none"),
         ("hypothesis_id", _esc(rec.hypothesis_id) if rec.hypothesis_id is not None else "none"),
-        ("recorded", _esc(rec.timestamp)),
+        ("recorded", f"{_esc(_ct(rec.timestamp))} <span class=\"when\">(stored {_esc(rec.timestamp)} UTC)</span>"),
     ]
     return '<dl class="meta">\n' + "\n".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in items) + "\n</dl>"
 
@@ -552,23 +630,71 @@ def _stat_cards(arch: ArchiveState) -> str:
 # ----------------------------------------------------------------------------
 
 def render_index(arch: ArchiveState) -> str:
-    parts = [_stat_cards(arch)]
+    parts = [
+        '<p class="lead">This page summarizes the archive of an automated search for explicit '
+        "Runge-Kutta methods that hold up in " + _gloss("q15", "Q15") + " fixed-point arithmetic "
+        "on small microcontrollers. Every verified " + _gloss("tableau", "tableau") + " lives in a "
+        + _gloss("map-elites", "MAP-Elites grid") + "; the tables and charts below are generated "
+        "from that archive and each entry links to a detail page. Terms are defined in the "
+        '<a href="glossary.html">glossary</a>.</p>'
+    ]
+    parts.append(_stat_cards(arch))
     parts.append('<p class="note">Fitness is heldout_error under m0plus_fast at equal cycle budget; '
                  "lower is better and nothing more is claimed. Cells are (stages, cycle bucket).</p>")
     parts.append("<h2>Cost against held-out error</h2>")
     parts.append('<div class="panel">' + _elite_scatter(arch) + "</div>")
+    parts.append(_explain(
+        "Each blue dot is one archive record: a " + _gloss("tableau", "Butcher tableau")
+        + " that passed the pinned verifier, stored with its full score, provenance and timestamps. "
+        "The horizontal axis is the analytic cycle count of one step under the m0plus_fast cost "
+        "model for a one-state problem, on a log scale.",
+        "The vertical axis, also log, is held-out error: the root-mean-square final-state error "
+        "over the four " + _gloss("held-out-set", "held-out problems") + ", integrated in Q15 at a "
+        "fixed " + _gloss("cycle-budget", "cycle budget") + " of 65536 cycles. Cheaper methods get "
+        "more, smaller steps inside the same budget, so the plot shows the cost-accuracy trade "
+        "directly. Down and to the left is better on both axes.",
+        "Orange diamonds are classical baseline methods at the same budget; a baseline gets a "
+        "vertical position only when a record with the identical tableau is in the archive. "
+        "Every dot links to the detail page of its grid cell."))
     parts.append("<h2>Elite grids</h2>")
+    parts.append(_explain(
+        "The archive is a " + _gloss("map-elites", "MAP-Elites") + " structure: one grid per "
+        "algebraic " + _gloss("order", "order") + " 1 to 4, whose cells are keyed by (stage count, "
+        "cycle bucket). A cell holds at most one record, its " + _gloss("elite", "elite") + ": the "
+        "verified tableau with the lowest held-out error seen so far for that shape and cost; ties "
+        "keep the earlier record.",
+        "Rows are " + _gloss("stage", "stage") + " counts 2 to 6. Columns are "
+        + _gloss("cost-bucket", "cycle buckets") + " computed from the m0plus_fast cycles per "
+        "step: bucket 0 means fewer than 16 cycles, bucket 1 is 16 to 31, bucket 2 is 32 to 63, "
+        "doubling each column, and bucket 7 collects everything at 1024 cycles or more.",
+        "Deeper blue means lower held-out error within that grid; the printed number is the error "
+        "itself. An empty cell means no verified tableau has landed there yet. Click any filled "
+        "cell to open its detail page."))
     parts.append('<div class="charts">')
     for order in sorted(arch.grids.keys()):
         if arch.grids[order]:
             parts.append('<div class="panel">' + _grid_heatmap(order, arch.grids[order]) + "</div>")
     parts.append("</div>")
+    table_explain = _explain(
+        "Each row is the elite of one grid cell; the tableau hash links to the cell's detail "
+        "page with the full tableau, score and per-problem errors. heldout_error is the fitness "
+        "that decides which record occupies a cell; search_error is the same measurement on the "
+        "three problems the optimizer was allowed to see, so a large gap between the two columns "
+        "is overfitting to the search set.",
+        "The cycles columns are analytic per-step costs under the two primary cost models. "
+        "measured_order is the convergence slope observed in float64 on the dahlquist problem "
+        "(see " + _gloss("order", "order") + " in the glossary); it can differ from the algebraic "
+        "order that names the grid. The " + _gloss("tiers", "tier") + " badge records how the "
+        "elite compared against the incumbent it displaced, and the label column separates "
+        "exhaustive-enumeration results from search results. verifier_hash pins the exact "
+        + _gloss("verifier-hash", "scoring code") + " that produced the row.")
     for order in sorted(arch.grids.keys()):
         grid = arch.grids[order]
         parts.append(f"<h2>Order {order} grid</h2>")
         if not grid:
             parts.append("<p>no elites yet</p>")
             continue
+        parts.append(table_explain)
         parts.append('<div class="scroll"><table>\n<tr><th>stages</th><th>bucket</th><th>tableau_hash</th><th>tier</th>'
                      "<th>heldout_error</th><th>search_error</th><th>cycles fast</th><th>cycles slow</th>"
                      "<th>measured_order</th><th>label</th><th>verifier_hash</th></tr>")
@@ -597,11 +723,53 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
     sv = rec.score
     parts = []
     parts.append(f'<p class="sub">grid order {order}, {stages} stages, cycle bucket {bucket}</p>')
+    parts.append(
+        '<p class="lead">This page is the full archive record for the '
+        + _gloss("elite", "elite") + f" of one grid cell: algebraic order {order}, "
+        f"{stages} stages, " + _gloss("cost-bucket", "cycle bucket") + f" {bucket}. "
+        'Everything here was produced by the pinned verifier; see the <a href="index.html">'
+        'overview</a> for where this cell sits in the archive.</p>')
     parts.append('<div class="panel">' + _record_meta(rec) + "</div>")
+    parts.append(_explain(
+        "The metadata above identifies the record. tableau_hash is a content hash of the exact "
+        "coefficients, so identical methods collide on purpose; "
+        + _gloss("verifier-hash", "verifier_hash") + " pins the code and fixtures that scored "
+        "the record, and a record scored by different code would carry a different hash. "
+        "recorded is the stored UTC timestamp shown in US Central.",
+        "The " + _gloss("tiers", "tier") + " is assigned mechanically when the record enters its "
+        "cell: heldout_verified means it improved on the incumbent's search and held-out error "
+        "with gains in at least two problem families, search_only means it improved on search "
+        "error but not held-out error, and unreplicated covers the rest, including records that "
+        "landed in an empty cell.",
+        "The phase label separates exhaustive enumeration (" + _gloss("directive", "directives")
+        + " whose id starts with D-E, where every point in a small space was scored) from "
+        "ordinary search results. cycle_id and seed say when and with what randomness the "
+        "record was produced."))
     parts.append("<h2>Tableau</h2>")
     parts.append(_tableau_table(rec))
+    parts.append(_explain(
+        "This is the " + _gloss("tableau", "Butcher tableau") + ", the coefficient table that "
+        "defines the method. Row i of A weights the earlier "
+        + _gloss("stage", "stage") + " derivatives that form the input of stage i; A is strictly "
+        "lower triangular, so the method is explicit. c[i] is the time offset of stage i as a "
+        "fraction of the step, and the b row weights the stage derivatives in the final state "
+        "update.",
+        "All values are exact fractions. The Q15 integrator never uses them directly: each one "
+        "is applied as a " + _gloss("dyadic-rational", "dyadic") + " pair m/2^s, listed below."))
+    parts.append(_coeff_rep_details(rec))
     parts.append("<h2>Per problem</h2>")
     parts.append('<div class="panel">' + _per_problem_bars(sv) + "</div>")
+    parts.append(_explain(
+        "One bar per problem: the final-state error of this tableau on that problem, integrated "
+        "in Q15 under m0plus_fast at the fixed " + _gloss("cycle-budget", "cycle budget")
+        + ", log scale. dahlquist, damped_osc and vanderpol_mild are the search set the "
+        "optimizer was allowed to see; pendulum, dc_motor, rc_thermal and quaternion are the "
+        + _gloss("held-out-set", "held-out set") + " that decides archive fitness.",
+        "Errors on several problems are dominated by Q15 quantization rather than by the "
+        "method: " + _gloss("floor-rounding", "floor rounding") + " loses up to one "
+        + _gloss("lsb", "LSB") + " per multiply, always downward, so bars can look similar "
+        "across very different tableaus. The table further down lists the same measurements "
+        "under the other cost models."))
     parts.append("<h2>Cycle counts (n_states = 1)</h2>")
     parts.append("<table><tr><th>model</th><th>cycles</th><th>note</th></tr>")
     for name in ("m0plus_fast", "m0plus_slow", "avr_approx"):
@@ -625,6 +793,21 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
     for k, v in score_rows:
         parts.append(f"<tr><td>{k}</td><td>{_num(v)}</td></tr>")
     parts.append("</table>")
+    parts.append(_explain(
+        "measured_order is the slope of a log-log fit of float64 final-state error against step "
+        "size on the dahlquist problem, over the longest usable run of points "
+        "(order_fit_points of them); it is measured evidence, distinct from the algebraic "
+        + _gloss("order", "order") + " that keys the grid. error_constant is the L2 norm of the "
+        "order-condition residuals one order past the achieved one, a size estimate for the "
+        "leading truncation term. stability_real and stability_imag are the extents of the "
+        "stability region along the negative real axis and the imaginary axis.",
+        "csd_weight_total sums " + _gloss("csd-weight", "CSD weights") + " over the non-trivial "
+        "coefficients, a proxy for coefficient-arithmetic cost. coeff_quant_error is the largest "
+        "gap between an exact coefficient and its m/2^s form. search_error and heldout_error are "
+        "root-mean-square errors over the two problem sets at the fixed cycle budget; "
+        "heldout_error is the archive fitness. overflow_margin is 1 / max|state| observed at "
+        "twice the nominal amplitude and must exceed 1.0, meaning a doubled signal still fits "
+        "in " + _gloss("q15", "Q15") + " range."))
     parts.append("<h3>All per-problem keys</h3>")
     parts.append('<div class="scroll"><table><tr><th>key</th><th>error</th><th>note</th></tr>')
     for k in sorted(sv.per_problem.keys()):
@@ -640,8 +823,62 @@ def _verdict_badge(verdict) -> str:
     return f'<span class="badge badge-{_esc(v)}">{_esc(v)}</span>'
 
 
+def _hyp_details(h: dict) -> str:
+    verdict = h.get("verdict")
+    resolved_cycle = h.get("resolved_cycle")
+    if verdict is None:
+        provenance = ("open: the ledger resolves it automatically once every cell the predicate "
+                      "references has at least min_samples records")
+    else:
+        provenance = ("verdict computed by the ledger from archive cell statistics"
+                      + (f" at cycle {_num(resolved_cycle)}" if resolved_cycle is not None else "")
+                      + "; the model never writes verdicts")
+    rows = [
+        ("statement", _esc(h.get("statement", ""))),
+        ("mechanism", _esc(h.get("mechanism", ""))),
+        ("control", _esc(h.get("control", ""))),
+        ("predicate", f'<span class="mono">{_esc(h.get("predicate", ""))}</span>'),
+        ("min_samples", _num(h.get("min_samples"))),
+        ("n_samples", _num(h.get("n_samples"))),
+        ("effect_size", _num(h.get("effect_size"))),
+        ("proposed at cycle", _num(h.get("cycle_proposed"))),
+        ("resolved at cycle", _num(resolved_cycle)),
+        ("provenance", _esc(provenance)),
+    ]
+    body = ('<dl class="meta">\n'
+            + "\n".join(f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in rows)
+            + "\n</dl>")
+    summary = (f'<span class="mono">{_esc(h.get("id", ""))}</span> {_verdict_badge(verdict)} '
+               f'<span class="when">effect size {_num(h.get("effect_size"))}, '
+               f"n = {_num(h.get('n_samples'))}</span>")
+    return (f'<details class="fold"><summary>{summary}</summary>'
+            f"<div>{body}</div></details>")
+
+
 def render_hypotheses(hyps: list[dict]) -> str:
-    parts = []
+    parts = [
+        '<p class="lead">The ' + _gloss("hypothesis-ledger", "hypothesis ledger")
+        + ": statements the planning model committed to before the data could answer them, "
+        "each resolved mechanically against the archive. Click a hypothesis to see its full "
+        "text, predicate and resolution provenance.</p>"
+    ]
+    parts.append(_explain(
+        "A hypothesis is a falsifiable statement about archive cells, recorded with a proposed "
+        "mechanism, a control (what should happen instead if the mechanism is wrong), and a "
+        "machine-checkable predicate over per-cell statistics, for example "
+        '<span class="mono">slow.p3s4.heldout &lt; slow.p4s4.heldout</span>. '
+        "The p and s numbers name an (order, stages) cell; the leading word picks the cost model.",
+        "Verdicts come from code, never from the model. Once every cell a predicate references "
+        "has at least min_samples records, the predicate is evaluated against the cells' running "
+        "statistics and the result is supported or refuted. The effect size is "
+        + _gloss("cohens-d", "Cohen's d") + ", the absolute difference of the two populations' "
+        "means divided by their pooled standard deviation; when populations are compared and d "
+        "is below 0.2 the verdict is inconclusive no matter which way the comparison went, so "
+        "weak effects cannot be claimed as findings.",
+        "A predicate that references a cell with no data is also inconclusive: absence of "
+        "evidence never refutes. n is the smallest record count among the referenced cells. "
+        "Hypotheses carry cycle numbers rather than clock times; cycles are the run's unit of "
+        "progress."))
     if not hyps:
         parts.append("<p>no hypotheses recorded</p>")
     else:
@@ -653,38 +890,34 @@ def render_hypotheses(hyps: list[dict]) -> str:
             for k, v in counts.items()) + "</div>")
         parts.append('<p class="note">Verdicts are computed by code from the archive; the model never '
                      "writes one. A missing cell reads as inconclusive, never refuted.</p>")
-        parts.append('<div class="scroll"><table><tr><th>id</th><th>statement</th><th>mechanism</th><th>control</th>'
-                     "<th>predicate</th><th>verdict</th><th>n_samples</th>"
-                     "<th>effect_size</th><th>min_samples</th><th>resolved_cycle</th><th>cycle</th>"
-                     "<th>rationale</th></tr>")
         for h in sorted(hyps, key=lambda d: str(d.get("id", ""))):
-            verdict = h.get("verdict")
-            parts.append(
-                "<tr>"
-                f"<td>{_esc(h.get('id', ''))}</td>"
-                f"<td>{_esc(h.get('statement', ''))}</td>"
-                f"<td>{_esc(h.get('mechanism', ''))}</td>"
-                f"<td>{_esc(h.get('control', ''))}</td>"
-                f'<td class="mono">{_esc(h.get("predicate", ""))}</td>'
-                f"<td>{_verdict_badge(verdict)}</td>"
-                f"<td>{_num(h.get('n_samples'))}</td>"
-                f"<td>{_num(h.get('effect_size'))}</td>"
-                f"<td>{_num(h.get('min_samples'))}</td>"
-                f"<td>{_num(h.get('resolved_cycle'))}</td>"
-                f"<td>{_num(h.get('cycle'))}</td>"
-                f"<td>{_esc(h.get('rationale', ''))}</td>"
-                "</tr>"
-            )
-        parts.append("</table></div>")
+            parts.append(_hyp_details(h))
     return _page("hypothesis ledger", "\n".join(parts), active="hypotheses.html",
                  subtitle="Falsifiable statements about the archive, resolved mechanically.")
 
 
 def render_costmodel() -> str:
     classical = tableau_mod.classical()
-    parts = []
+    parts = [
+        '<p class="lead">This page shows the analytic cost model: cycles per integration step '
+        "computed from instruction counts, with no compiler or hardware in the loop. It is what "
+        "the " + _gloss("cycle-budget", "cycle budget") + " and the "
+        + _gloss("cost-bucket", "cycle buckets") + " on the other pages are built from.</p>"
+    ]
     parts.append("<h2>Anchor: rk4 vs rk38</h2>")
     parts.append('<div class="panel">' + _anchor_bars() + "</div>")
+    parts.append(_explain(
+        "rk4 and rk38 are the " + _gloss("anchor-methods", "anchor methods") + ": two classical "
+        "four-stage, order-4 tableaus with the same stability polynomial. The only difference "
+        "the cost model can see between them is coefficient arithmetic, since stages and order "
+        "match.",
+        "Each pair of bars is one method; blue is m0plus_fast (a Cortex-M0+ with the "
+        "single-cycle multiplier option), orange is m0plus_slow (the same core with the 32-cycle "
+        "iterative multiplier). Under the fast multiplier rk4's simpler coefficients cost less; "
+        "under the slow multiplier rk38's shift-friendly eighths pull ahead, so the cheaper "
+        "method swaps between the two models. That swap is the sanity check the whole model "
+        "hangs on.",
+        "The table below repeats the numbers for one, two and four state variables."))
     parts.append("<table><tr><th>tableau</th><th>n_states</th><th>m0plus_fast</th><th>m0plus_slow</th></tr>")
     for name in ("rk4", "rk38"):
         t = classical.get(name)
@@ -706,6 +939,18 @@ def render_costmodel() -> str:
         parts.append(f"<tr><td>{name}</td><td>{len(t.b)}</td><td>{fast}</td><td>{slow}</td>"
                      f"<td>{avr}</td><td>{_esc(AVR_NOTE)}</td></tr>")
     parts.append("</table></div>")
+    parts.append(_explain(
+        "Each row is one classical reference " + _gloss("tableau", "tableau") + ". stages is "
+        "the number of derivative evaluations per step; the three cycle columns are analytic "
+        "per-step costs for a one-state problem under each model. avr_approx is a rough model "
+        "of an 8-bit AVR doing 16-bit arithmetic; it is reported for context and never drives "
+        "the search or the archive grids.",
+        "A coefficient is charged the cheaper of two implementations: a chain of shifts and "
+        "adds whose length is the coefficient's " + _gloss("csd-weight", "CSD weight") + " (the "
+        "minimum number of signed powers of two that sum to the multiplier m), or a single "
+        "hardware multiply. Trivial coefficients (0, 1, -1) need no arithmetic beyond a move, "
+        "so a tableau full of simple " + _gloss("dyadic-rational", "dyadic") + " values can be "
+        "much cheaper than its stage count suggests."))
     parts.append("<h2>Model parameters</h2>")
     parts.append("<table><tr><th>model</th><th>mul</th><th>add</th><th>shift</th><th>load</th><th>store</th></tr>")
     for m in (costmodel.M0PLUS_FAST, costmodel.M0PLUS_SLOW, costmodel.AVR_APPROX):
@@ -713,6 +958,14 @@ def render_costmodel() -> str:
         parts.append(f"<tr><td>{m.name}</td><td>{cy.get('mul')}</td><td>{cy.get('add')}</td>"
                      f"<td>{cy.get('shift')}</td><td>{cy.get('load')}</td><td>{cy.get('store')}</td></tr>")
     parts.append("</table>")
+    parts.append(_explain(
+        "The per-instruction cycle costs each model assigns. m0plus_fast and m0plus_slow are "
+        "the two Cortex-M0+ configurations, identical except for the multiplier: the core is "
+        "sold with either a single-cycle or a 32-cycle iterative multiply, which is exactly the "
+        "hardware difference this project studies. avr_approx approximates an AVR-class 8-bit "
+        "part and is advisory only.",
+        "Every cycle count on this site is these five numbers applied to an instruction "
+        "sequence derived from the tableau; nothing is measured on hardware."))
     return _page("cost model comparison", "\n".join(parts), active="costmodel.html",
                  subtitle="Analytic cycle counts; no compiler in the loop.")
 
@@ -741,11 +994,29 @@ def _render_value(v) -> str:
 
 
 def render_falsification(data: dict | None) -> str:
+    lead = (
+        '<p class="lead">This page reports the kill-or-proceed measurement that ran before any '
+        "searching. The premise of the whole project is only worth testing if coefficient "
+        "arithmetic is a meaningful share of step cost and Q15 roundoff matters at practical "
+        "step sizes; this experiment checked both on fixed classical methods, with the verdict "
+        "computed by code.</p>")
+    protocol = _explain(
+        "The protocol fixes two classical methods, rk4 and heun2, on the damped oscillator "
+        "problem and measures two things. One: the fraction of one step's cycle count spent on "
+        "coefficient arithmetic rather than derivative evaluation, under both primary cost "
+        "models. Two: a step-size sweep at n = 8, 16, ..., 4096 steps comparing the Q15 "
+        "integrator against float64 on identical steps, looking for the step size where "
+        + _gloss("floor-rounding", "roundoff") + " overtakes truncation error.",
+        "The verdict is mechanical. proceed requires every coefficient fraction to reach at "
+        "least 0.30 and at least one crossover inside the practical range 1e-3 &le; h &le; 1.0. "
+        "kill requires every fraction below 0.15 and no practical crossover. Anything in "
+        "between reads mixed. A proceed verdict means searching over coefficients can plausibly "
+        "matter; it does not by itself establish that any searched method is good.")
     if data is None:
-        body = "<p>falsification experiment not run (work_dir()/falsification.json absent)</p>"
+        body = lead + "\n" + protocol + "\n<p>falsification experiment not run (work_dir()/falsification.json absent)</p>"
     else:
         verdict = data.get("verdict")
-        parts = []
+        parts = [lead, protocol]
         if verdict is not None:
             parts.append(f'<p>verdict: <strong>{_esc(verdict)}</strong></p>')
         methods = data.get("methods")
@@ -762,6 +1033,16 @@ def render_falsification(data: dict | None) -> str:
                     if chart:
                         parts.append('<div class="panel">' + chart + "</div>")
             parts.append("</div>")
+            parts.append(_explain(
+                "Each chart is one method's sweep. Both lines run the same tableau over the "
+                "same steps; only the arithmetic differs. In float64 (orange), halving the step "
+                "size keeps cutting the truncation error at the method's order. In "
+                + _gloss("q15", "Q15") + " (blue), each step also loses up to one "
+                + _gloss("lsb", "LSB") + " to floor rounding, and more steps mean more losses, "
+                "so past some h the total error turns back up.",
+                "The dashed vertical line marks that crossover. A crossover inside the "
+                "practical step-size range is evidence that coefficient choices which reduce "
+                "roundoff can pay for themselves; hover any point for its exact values."))
         rest = {k: v for k, v in data.items() if k != "verdict"}
         parts.append("<h2>Raw data</h2>")
         parts.append(_render_value(rest))
@@ -771,13 +1052,32 @@ def render_falsification(data: dict | None) -> str:
 
 
 def render_literature(digests: list[dict]) -> str:
-    parts = [f'<p class="note">{_esc(_MODEL_NOTE)}</p>']
+    parts = [
+        '<p class="lead">Digests of published work the model researched on the web during the '
+        "run, newest at the top. They exist to inform the "
+        + _gloss("directive", "directive") + " and "
+        + _gloss("hypothesis-ledger", "hypothesis") + " prompts; nothing on this page is a "
+        "measurement from this project. Click an entry for its full text and sources.</p>",
+        f'<p class="note">{_esc(_MODEL_NOTE)}</p>',
+        _explain(
+            "Each entry is one digest: the model was given a topic, searched the web, and wrote "
+            "the summary and key points itself, attaching the sources it found. The stored text "
+            "is shown as written (after a vocabulary pass that keeps this site's banned words "
+            "out), with its stored UTC collection time displayed in US Central alongside the "
+            "run cycle it fed into.",
+            "Because both the summaries and the citations are model-collected, treat them as "
+            "leads to verify against the linked sources, not as established results. The "
+            "measured pages of this site never depend on anything written here."),
+    ]
     if not digests:
         parts.append("<p>no literature digests yet</p>")
-    for d in reversed(digests):
-        entry = ['<article class="entry">']
-        entry.append(f"<h2>{_esc(d.get('topic', ''))}</h2>")
-        entry.append(f'<p class="when">collected {_esc(d.get("ts", ""))} at cycle {int(d.get("cycle", 0))}</p>')
+    for i, d in enumerate(reversed(digests)):
+        open_attr = " open" if i == 0 else ""
+        entry = [f'<details class="fold entry"{open_attr}>']
+        entry.append(f"<summary><strong>{_esc(d.get('topic', ''))}</strong> "
+                     f'<span class="when">collected {_esc(_ct(d.get("ts")))}, '
+                     f'cycle {int(d.get("cycle", 0))}</span></summary>')
+        entry.append("<div>")
         for para in str(d.get("summary", "")).split("\n\n"):
             if para.strip():
                 entry.append(f"<p>{_esc(para.strip())}</p>")
@@ -789,27 +1089,198 @@ def render_literature(digests: list[dict]) -> str:
             items = "".join(f'<li><a href="{_esc(x.get("url", ""))}">{_esc(x.get("title", "") or x.get("url", ""))}</a></li>'
                             for x in srcs)
             entry.append(f"<p>sources:</p><ul>{items}</ul>")
-        entry.append("</article>")
+        entry.append("</div></details>")
         parts.append("\n".join(entry))
     return _page("literature digest", "\n".join(parts), active="literature.html",
                  subtitle="Web-researched background that feeds the directive and hypothesis prompts.")
 
 
 def render_interpretation(entries: list[dict]) -> str:
-    parts = [f'<p class="note">{_esc(_MODEL_NOTE)}</p>']
+    parts = [
+        '<p class="lead">Model-written readings of the archive at points during the run, newest '
+        "at the top. Each entry is commentary on the numbers as they stood at that cycle; the "
+        "tables and charts on the other pages stay authoritative, and where text and tables "
+        "disagree, trust the tables. Click an entry for its full text.</p>",
+        f'<p class="note">{_esc(_MODEL_NOTE)}</p>',
+        _explain(
+            "At intervals the run hands the model a snapshot of the archive and asks it to "
+            "write what it sees: coverage, gaps, apparent patterns, things worth testing next. "
+            "The text is stored verbatim (after the same vocabulary pass as the literature "
+            "page) with its stored UTC write time, displayed here in US Central.",
+            "These readings can be wrong in ways the code cannot check, since unlike "
+            + _gloss("hypothesis-ledger", "hypotheses") + " they carry no machine-checkable "
+            "predicate. They are kept because they explain what the search was steering toward "
+            "at each point in the run."),
+    ]
     if not entries:
         parts.append("<p>no interpretation yet</p>")
-    for e in reversed(entries):
-        entry = ['<article class="entry">']
-        entry.append(f"<h2>cycle {int(e.get('cycle', 0))}</h2>")
-        entry.append(f'<p class="when">written {_esc(e.get("ts", ""))}</p>')
+    for i, e in enumerate(reversed(entries)):
+        open_attr = " open" if i == 0 else ""
+        entry = [f'<details class="fold entry"{open_attr}>']
+        entry.append(f"<summary><strong>cycle {int(e.get('cycle', 0))}</strong> "
+                     f'<span class="when">written {_esc(_ct(e.get("ts")))}</span></summary>')
+        entry.append("<div>")
         for para in str(e.get("text", "")).split("\n\n"):
             if para.strip():
                 entry.append(f"<p>{_esc(para.strip())}</p>")
-        entry.append("</article>")
+        entry.append("</div></details>")
         parts.append("\n".join(entry))
     return _page("interpretation", "\n".join(parts), active="interpretation.html",
                  subtitle="Model-written readings of the archive; the numbers stay authoritative.")
+
+
+# Glossary terms: (anchor id, display term, definition paragraphs). Kept in
+# alphabetical order of the display term; every definition is grounded in the
+# pinned code (fixedpoint, coeffrep, costmodel, archive, ledger, verifier_hash).
+_GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("anchor-methods", "anchor methods", (
+        "rk4 and rk38: two classical four-stage, order-4 tableaus with the same stability "
+        "polynomial. Because stages and order match, the only cost difference between them is "
+        "coefficient arithmetic. For one state, rk4 costs 33 cycles per step under m0plus_fast "
+        "and 85 under m0plus_slow; rk38 costs 36 and 64. The cheaper of the two swaps between "
+        "the multiplier models, and the cost model page uses that swap as its sanity check.",
+    )),
+    ("cohens-d", "Cohen's d", (
+        "The effect size the hypothesis ledger attaches to a verdict: the absolute difference "
+        "of two cell populations' means divided by their pooled standard deviation. When a "
+        "predicate compares two populations and d is below 0.2, the verdict is inconclusive "
+        "regardless of which way the comparison came out, so a true-but-tiny difference cannot "
+        "be claimed as a finding.",
+    )),
+    ("cost-bucket", "cost bucket (cycle bucket)", (
+        "A log2-spaced bin of cycles per step under m0plus_fast, used as one axis of the "
+        "archive grids. Fewer than 16 cycles is bucket 0; 16 to 31 is bucket 1; 32 to 63 is "
+        "bucket 2; the range doubles each bucket up to bucket 7, which collects everything at "
+        "1024 cycles or more.",
+    )),
+    ("csd-weight", "CSD weight", (
+        "The minimum number of nonzero signed power-of-two terms needed to write an integer "
+        "multiplier m (its nonadjacent form). A multiply by m can be replaced by a chain of "
+        "CSD-weight shifts and one fewer adds, so the cost model charges each coefficient the "
+        "cheaper of that chain and a single hardware multiply. Under a 32-cycle multiplier, "
+        "low-CSD-weight coefficients are what make a method cheap.",
+    )),
+    ("cycle-budget", "cycle budget", (
+        "The fixed compute allowance every evaluation gets: 65536 cycles per problem per cost "
+        "model. A method takes as many steps as fit, steps = budget // cycles_per_step, so a "
+        "cheaper method integrates with more, smaller steps. All errors on this site are "
+        "equal-budget comparisons, never equal-step-count ones.",
+    )),
+    ("directive", "directive", (
+        "A JSON search instruction from the planning model: an id (D- prefix), a target order, "
+        "stage counts, coefficient constraints, island count and a time budget, plus a "
+        "rationale. Directives are validated against a strict schema before use and their id "
+        "is stamped on every record they produce. Ids starting with D-E mark exhaustive "
+        "enumeration cycles, whose elites are optimal within the enumerated space rather than "
+        "search results.",
+    )),
+    ("dyadic-rational", "dyadic rational", (
+        "A number of the form m / 2^s. These are exactly the values binary fixed-point "
+        "hardware can represent and apply without error, which is why the search snaps A "
+        "entries to dyadics and why every coefficient is stored and applied as an (m, s) pair. "
+        "The b weights are instead solved exactly as fractions from the order conditions, "
+        "since snapping them would make order 3 and above unreachable.",
+    )),
+    ("elite", "elite", (
+        "The single record occupying one cell of a MAP-Elites grid: the verified tableau with "
+        "the lowest held-out error seen so far for that (order, stages, cost bucket) "
+        "combination. A new record displaces the incumbent only by a strictly lower held-out "
+        "error; ties keep the earlier record.",
+    )),
+    ("floor-rounding", "floor rounding (ASRS)", (
+        "The rounding rule of the Q15 arithmetic: a multiply computes (a * b) >> 15 with an "
+        "arithmetic right shift, which rounds toward negative infinity, matching the ARM ASRS "
+        "instruction. Every product loses up to one LSB, always downward, an average bias of "
+        "about half an LSB per multiply that accumulates over thousands of steps. This is a "
+        "deliberate modeling choice from the handoff, and its consequences are treated as "
+        "findings to measure, not as bugs to fix.",
+    )),
+    ("held-out-set", "held-out set", (
+        "The four problems that decide archive fitness but that the optimizer never sees "
+        "during search: pendulum, dc_motor, rc_thermal and quaternion. The search set it does "
+        "see is dahlquist, damped_osc and vanderpol_mild. heldout_error, the root-mean-square "
+        "error over the held-out set at the fixed cycle budget, is what a record must lower to "
+        "claim a grid cell, so overfitting to the search set does not pay.",
+    )),
+    ("hypothesis-ledger", "hypothesis ledger", (
+        "An append-only JSONL file of falsifiable statements about the archive. Each "
+        "hypothesis carries an id (H- prefix), a statement, a proposed mechanism, a control, a "
+        "machine-checkable predicate over cell statistics, and a min_samples threshold. "
+        "Resolution lines are appended by code once the referenced cells have enough records; "
+        "verdicts (supported, refuted, inconclusive) are computed from the data and the model "
+        "never writes one.",
+    )),
+    ("lsb", "LSB", (
+        "Least significant bit: the smallest increment the Q15 format can represent, 2^-15, "
+        "about 3.05e-5. It is the natural unit for quantization effects; floor rounding costs "
+        "up to one LSB per multiply.",
+    )),
+    ("map-elites", "MAP-Elites archive", (
+        "The quality-diversity structure the search fills instead of chasing a single winner: "
+        "one grid per algebraic order 1 to 4, with cells keyed by (stage count 2 to 6, cost "
+        "bucket 0 to 7) and each cell keeping only its elite. The output of the project is "
+        "coverage of this grid, a map of what accuracy is available at each shape and cost, "
+        "rather than one recommended method.",
+    )),
+    ("order", "order (measured vs algebraic)", (
+        "Algebraic order is the largest p whose order conditions the exact coefficients "
+        "satisfy, checked symbolically; it keys the archive grids. Measured order is the slope "
+        "of a log-log fit of float64 final-state error against step size on the dahlquist "
+        "problem, taken over the longest usable run of points (order_fit_points reports how "
+        "many). The two can differ: algebraic order is a property of the fractions, measured "
+        "order is evidence about actual convergence, and Q15 effects belong to neither.",
+    )),
+    ("q15", "Q15", (
+        "Signed 16-bit fixed point: an integer q in [-32768, 32767] representing the value "
+        "q / 32768, so the format covers [-1, 1) in steps of 2^-15. All problem states are "
+        "stored and updated in Q15; overflow is never saturated but raises an error, which the "
+        "verifier turns into a rejection. Coefficients are not Q15: they are dyadic (m, s) "
+        "pairs applied by multiply and shift.",
+    )),
+    ("stage", "stage", (
+        "One derivative evaluation inside a single step: an s-stage explicit method calls the "
+        "problem right-hand side s times per step, each call fed by a weighted combination of "
+        "the earlier stage results. Stage count is a major cost driver and one axis of the "
+        "archive grids.",
+    )),
+    ("tableau", "tableau", (
+        "The Butcher tableau (A, b, c) that defines a Runge-Kutta method. A is a strictly "
+        "lower triangular matrix weighting earlier stage derivatives into each stage input "
+        "(strict lower triangularity is what makes the method explicit), c holds each stage's "
+        "time offset as a fraction of the step, and b weights the stage derivatives in the "
+        "final update. On this site tableaus are always exact fractions, hashed by content.",
+    )),
+    ("tiers", "tier names", (
+        "Every record carries one of three tier strings, assigned mechanically when it enters "
+        "its cell. heldout_verified: it improved on the incumbent elite's search error and "
+        "held-out error, with improvements in at least two problem families. search_only: it "
+        "improved on search error but not on held-out error. unreplicated: everything else, "
+        "including any record that landed in a previously empty cell, which has no incumbent "
+        "to compare against.",
+    )),
+    ("verifier-hash", "verifier hash", (
+        "A sha256 over ten pinned files in fixed order: the six scoring modules (coeffrep, "
+        "orderconditions, verifier, costmodel, evaluator, problems) and four fixtures. Any "
+        "byte changed in any of them changes the hash, and the container refuses to start if "
+        "the computed hash differs from the pinned one. Every record stores the hash that was "
+        "active when it was scored, so scores from different code can never be silently mixed.",
+    )),
+)
+
+
+def render_glossary() -> str:
+    parts = [
+        '<p class="lead">Definitions for the terms used across this site, in alphabetical '
+        "order. Each heading is an anchor, so other pages deep-link straight to a term; every "
+        "definition states what the code actually does rather than the textbook general "
+        "case.</p>"
+    ]
+    for anchor, term, paras in _GLOSSARY:
+        parts.append(f'<h2 id="{_esc(anchor)}">{_esc(term)}</h2>')
+        for p in paras:
+            parts.append(f"<p>{_esc(p)}</p>")
+    return _page("glossary", "\n".join(parts), active="glossary.html",
+                 subtitle="Plain-language definitions of the terms this site relies on.")
 
 
 # ----------------------------------------------------------------------------
@@ -855,6 +1326,13 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
     pages["interpretation.html"] = render_interpretation(literature_mod.load_interpretations())
     pages["costmodel.html"] = render_costmodel()
     pages["falsification.html"] = render_falsification(_load_falsification())
+    pages["glossary.html"] = render_glossary()
+    try:
+        from rk_harness import methodology
+    except ImportError:
+        pass
+    else:
+        pages["methodology.html"] = methodology.render_page(_page)
     for name in sorted(pages.keys()):
         check_banned(pages[name])
     out_dir.mkdir(parents=True, exist_ok=True)
