@@ -589,14 +589,21 @@ href="#meth-ref-16">[16]</a></sup>.</p>
 
 <h3>Credentials</h3>
 
-<p>Secrets live in a gitignored .env file on the host and are never baked into the
-container image; the harness reads them through a small module that never logs
-values. The GitHub token is a fine-grained personal access token with write access
-to the two writable repositories (rk-work and rk-findings) only, and one of the
-canary checks requires that a write to rk-harness with that token actually returns
-HTTP 403. In the operational setup, pushes are performed from the host by the
-watchdog, so the token does not need to enter the container at
-all<sup class="meth-cite"><a href="#meth-ref-14">[14]</a><a
+<p>All pushes are performed from the host: the watchdog pushes the work and
+findings repositories on a timer with the owner's own git credentials, and the
+container pushes nothing. The GitHub credential never enters the container at all.
+The env file the container receives is filtered on the host to drop the token
+before docker run, the runner only commits into the mounted work and findings
+checkouts, and a pre-flight check verifies the boundary directly: the filtered file
+carries no token, and the environment inside a container started from it shows
+none. The token itself is the owner's general-purpose fine-grained personal access
+token with write access to all three repositories, harness included, which is why
+the guarantee is placed at the container wall rather than in the token's scope; a
+probe that exercises the token against the harness repository still runs, but as
+an advisory check reported for information, not as a gate. Other secrets live in a
+gitignored .env file on the host, are never baked into the container image, and
+are read through a small module that never logs
+values<sup class="meth-cite"><a href="#meth-ref-14">[14]</a><a
 href="#meth-ref-21">[21]</a></sup>.</p>
 
 <h3>Quarantine</h3>
@@ -657,18 +664,20 @@ href="#meth-ref-17">[17]</a></sup>.</p>
 
 <h3>Suites</h3>
 
-<p>The pytest suite is organised in five tiers, one file per tier, each written
+<p>The pytest suite is organised in seven tiers, one file per tier, each written
 against the frozen interface specification before or independently of the
 implementation. Tier 1 covers fixedpoint, coeffrep, tableau construction, and the
 cost model (95 test functions); tier 2 covers order conditions, problems, simulation,
 the evaluator, and the verifier (105); tier 3 covers the archive, surrogate,
 encourager, search, enumeration, directives, prompts, and the import-graph canaries
 (149); tier 4 covers the ledger, quarantine, runner, recovery, site generator, and
-dashboard (71); tier 5 covers the operational configuration and watch layer (10).
-That is about 430 test functions in all, several of them parameterised over the
-classical methods or fixture rows, so the executed count is higher. Expensive
-computations (full evaluations, convergence studies) run once per module through
-shared fixtures and are marked slow<sup class="meth-cite"><a
+dashboard (83); tier 5 covers the operational configuration and watch layer (10);
+tier 6 covers the timestamp display formatting used across the site (8); and tier 7
+covers this methodology page itself (14). That is 464 test functions in all; many
+are parameterised over the classical methods or fixture rows, so collecting the
+full suite yields 987 test cases. Expensive computations (full evaluations,
+convergence studies) run once per module through shared fixtures and are marked
+slow<sup class="meth-cite"><a
 href="#meth-ref-17">[17]</a></sup>.</p>
 
 <h3>Preflight</h3>
@@ -767,7 +776,7 @@ _REFS = """
 <li id="meth-ref-14">rk_harness/verifier_hash.py, VERIFIER_HASH, rk_harness/credentials.py; HANDOFF sections 4.11 and 2.2.</li>
 <li id="meth-ref-15">rk_harness/directive.py, rk_harness/runner.py; HANDOFF section 5 (directive schema and validation).</li>
 <li id="meth-ref-16">entrypoint.sh; HANDOFF section 13.1 (start-up order: probe, hash, golden gate).</li>
-<li id="meth-ref-17">tests/test_t1_fixedpoint_coeff_cost.py through tests/test_t5_config_watch.py; HANDOFF section 14 (acceptance criteria G, F, V, C, K, R, E).</li>
+<li id="meth-ref-17">tests/test_t1_fixedpoint_coeff_cost.py through tests/test_t7_methodology.py; HANDOFF section 14 (acceptance criteria G, F, V, C, K, R, E).</li>
 <li id="meth-ref-18">scripts/preflight.py and docs/REVIEW-REPORT.md (executed review checklist).</li>
 <li id="meth-ref-19">rk_harness/falsification.py; HANDOFF section 15 (criteria and sweep).</li>
 <li id="meth-ref-20">rk_harness/sitegen.py; HANDOFF section 17 (auto-publish rules, determinism, labels).</li>

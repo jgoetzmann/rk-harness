@@ -406,7 +406,7 @@ def events_panel(events: list[dict], n: int) -> Panel:
         detail = {k: v for k, v in e.items() if k not in ("ts", "kind")}
         s = json.dumps(detail, default=str)
         ct = to_ct(e.get("ts"))
-        t.add_row(ct.strftime("%H:%M:%S") if ct else "", str(e.get("kind")), s[:150])
+        t.add_row(ct.strftime("%Y-%m-%d %H:%M:%S") if ct else "", str(e.get("kind")), s[:150])
     return Panel(t, title=f"last {n} events")
 
 

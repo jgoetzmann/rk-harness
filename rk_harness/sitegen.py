@@ -31,10 +31,14 @@ from rk_harness.types import ArchiveState, Record
 
 BANNED_WORDS = ("novel", "first", "beats", "outperforms", "breakthrough", "proves",
                 "state-of-the-art", "best-ever")
-BANNER = "Automatically generated. Not reviewed by a human. See rk-overview for interpretation."
+# Provenance line, rendered quietly in the footer of every page. The footer's link to
+# the rk-overview site completes the sentence, so the constant ends mid-phrase.
+BANNER = ("Generated from run data by the harness; no human review. "
+          "Human interpretation is at")
+OVERVIEW_URL = "https://jgoetzmann.github.io/rk-overview/"
 AVR_NOTE = "Cost model approximate; see HANDOFF §4.5."
 
-_EXHAUSTIVE_LABEL = "exhaustive — optimal within the enumerated space"
+_EXHAUSTIVE_LABEL = "exhaustive: optimal within the enumerated space"
 _SEARCH_LABEL = "search result"
 _MODEL_NOTE = ("Model-written text. Sources are model-collected citations; verify them before "
                "relying on them. See rk-overview for the human view.")
@@ -73,32 +77,32 @@ _STYLE = """
 body{margin:0;background:var(--surface-0);color:var(--text-1);
   font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:1180px;margin:0 auto;padding:0 20px 48px}
-header.site{background:var(--surface-1);border-bottom:1px solid var(--line);margin-bottom:24px}
-header.site .wrap{padding-top:18px;padding-bottom:0}
-h1{font-size:24px;margin:6px 0 2px;letter-spacing:-.01em}
-h2{font-size:17px;margin:32px 0 10px;letter-spacing:-.01em}
-h3{font-size:14px;margin:18px 0 6px;color:var(--text-2)}
+header.site{background:var(--surface-1);border-bottom:1px solid var(--line);margin-bottom:28px}
+header.site .wrap{padding-top:22px;padding-bottom:0}
+h1{font-size:26px;margin:6px 0 2px;letter-spacing:-.015em}
+h2{font-size:18px;margin:36px 0 12px;letter-spacing:-.01em}
+h3{font-size:14px;margin:20px 0 6px;color:var(--text-2)}
 p{max-width:76ch}
-.sub{color:var(--text-2);margin:0 0 12px}
-p.banner{border:1px solid var(--banner-line);border-left:4px solid var(--banner-line);
-  background:var(--banner-bg);color:var(--text-1);padding:8px 12px;border-radius:6px;
-  font-size:13px;max-width:none;margin:14px 0}
-nav.tabs{display:flex;gap:2px;flex-wrap:wrap;margin:10px 0 0}
+.sub{color:var(--text-2);margin:0 0 14px;font-size:14px}
+nav.tabs{display:flex;gap:2px;flex-wrap:wrap;margin:14px 0 0}
 nav.tabs a{padding:8px 14px;border-radius:8px 8px 0 0;color:var(--text-2);
   text-decoration:none;font-size:13.5px;border:1px solid transparent;border-bottom:none}
 nav.tabs a:hover{color:var(--text-1);background:var(--surface-0)}
-nav.tabs a.on{background:var(--surface-0);border-color:var(--line);color:var(--text-1);font-weight:600}
+nav.tabs a.on{background:var(--surface-0);border-color:var(--line);color:var(--text-1);
+  font-weight:600;box-shadow:0 1px 0 var(--surface-0)}
 a{color:var(--s1)}
-.cards{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0;align-items:stretch}
 .card{background:var(--surface-1);border:1px solid var(--line);border-radius:10px;
-  padding:12px 16px;min-width:132px;flex:0 1 auto}
-.card .k{font-size:12px;color:var(--text-2);letter-spacing:.02em}
-.card .v{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
-.card .d{font-size:12px;color:var(--text-3)}
+  padding:12px 16px;min-width:148px;flex:0 1 auto;display:flex;flex-direction:column}
+.card .k{font-size:11px;color:var(--text-2);letter-spacing:.06em;text-transform:uppercase}
+.card .v{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums;
+  letter-spacing:-.01em;line-height:1.25;margin:2px 0}
+.card .d{font-size:12px;color:var(--text-3);margin-top:auto}
 .panel{background:var(--surface-1);border:1px solid var(--line);border-radius:10px;
-  padding:14px 16px;margin:14px 0}
+  padding:16px 18px;margin:16px 0}
 figure{margin:0}
-figure figcaption{font-size:13px;color:var(--text-2);margin:4px 0 8px}
+figure figcaption{font-size:13px;color:var(--text-2);margin:0 0 10px;max-width:72ch;
+  line-height:1.5}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--text-2);margin:2px 0 6px}
 .legend .sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;
   vertical-align:-1px}
@@ -117,7 +121,9 @@ th,td{border-bottom:1px solid var(--line);padding:6px 10px;text-align:left;verti
 th{background:var(--surface-0);color:var(--text-2);font-weight:600;font-size:12px;
   letter-spacing:.02em;white-space:nowrap}
 tr:last-child td{border-bottom:none}
+tr:hover>td{background:var(--grid)}
 td{font-variant-numeric:tabular-nums}
+th.num,td.num{text-align:right}
 .tier,.badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11.5px;
   font-weight:600;white-space:nowrap}
 .tier-heldout_verified{background:var(--good-bg);color:var(--good-fg)}
@@ -153,7 +159,10 @@ details.fold>summary{cursor:pointer;padding:10px 16px;font-size:13.5px}
 details.fold>summary:hover{color:var(--text-1)}
 details.fold[open]>summary{border-bottom:1px solid var(--line)}
 details.fold>div{padding:6px 16px 12px}
-footer{margin-top:40px;font-size:12px;color:var(--text-3)}
+footer{margin-top:48px;padding-top:14px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--text-3)}
+footer p{margin:3px 0;max-width:none}
+footer p.prov a{color:var(--text-2)}
 """
 
 
@@ -254,13 +263,15 @@ def _page(title: str, body: str, active: str = "", subtitle: str = "") -> str:
         f"<title>{_esc(title)}</title>\n"
         f"<style>{_STYLE}</style>\n</head>\n<body>\n"
         '<header class="site"><div class="wrap">\n'
-        f'<p class="banner">{_esc(BANNER)}</p>\n'
         f"<h1>{_esc(title)}</h1>\n{sub}\n"
         f"{_nav(active)}\n"
         "</div></header>\n"
         '<div class="wrap">\n'
         f"{body}\n"
-        "<footer>rk-harness findings — Q15 fixed point, equal cycle budget, Cortex-M0+ cost models.</footer>\n"
+        "<footer>\n"
+        "<p>rk-harness findings: Q15 fixed point, equal cycle budget, Cortex-M0+ cost models.</p>\n"
+        f'<p class="prov">{_esc(BANNER)} <a href="{OVERVIEW_URL}">the rk-overview site</a>.</p>\n'
+        "</footer>\n"
         "</div>\n</body>\n</html>\n"
     )
 
@@ -368,7 +379,7 @@ def _elite_scatter(arch: ArchiveState) -> str:
     pl.frame()
     for order, stg, bucket, rec, cyc, err in elites:
         title = (f"order {order}, {stg} stages, bucket {bucket}: {_num(err)} held-out at {int(cyc)} cycles "
-                 f"({rec.tier}) — {rec.tableau_hash[:12]}")
+                 f"({rec.tier}); {rec.tableau_hash[:12]}")
         pl.parts.append(
             f'<a href="{_cell_file(order, stg, bucket)}"><circle cx="{_fmt(pl.x(cyc))}" cy="{_fmt(pl.y(err))}" '
             f'r="5" fill="var(--s1)" class="cellstroke"><title>{_esc(title)}</title></circle></a>')
@@ -382,8 +393,10 @@ def _elite_scatter(arch: ArchiveState) -> str:
             f'<title>{_esc(name)}: {_num(err)} held-out at {int(cyc)} cycles</title></path>')
         pl.parts.append(f'<text class="lbl" x="{_fmt(px + 8)}" y="{_fmt(py - 6)}">{_esc(name)}</text>')
     fig = pl.svg("Scatter of held-out error against cycles per step for archive elites and classical baselines")
-    return ('<figure><figcaption>Held-out error vs cost, both log scales. Lower-left is better; '
-            "hover a mark for its cell.</figcaption>"
+    return ('<figure><figcaption>One mark per method: blue dots are archive elites, orange '
+            "diamonds are classical baselines. The x axis is analytic cycles per step under "
+            "m0plus_fast and the y axis is held-out error at the fixed budget; both scales are "
+            "log.</figcaption>"
             + _legend([("var(--s1)", "archive elite (links to its cell)"), ("var(--s2)", "classical baseline")])
             + fig + "</figure>")
 
@@ -403,15 +416,18 @@ def _heat_step(err: float, lo: float, hi: float) -> int:
 def _grid_heatmap(order: int, grid: dict) -> str:
     errs = [rec.score.heldout_error for rec in grid.values() if _finite_pos(rec.score.heldout_error)]
     lo, hi = (min(errs), max(errs)) if errs else (1e-3, 1.0)
+    # Rows cover the default stage range unioned with every stage actually occupied in
+    # this grid, so an elite outside 2..6 (order 1's single-stage cell, say) stays visible.
+    stage_rows = tuple(sorted(set(_HEAT_STAGES) | {s for (s, _b) in grid.keys()}))
     cw, ch, ml, mt = 52, 34, 58, 22
     w = ml + cw * len(_HEAT_BUCKETS) + 8
-    h = mt + ch * len(_HEAT_STAGES) + 26
+    h = mt + ch * len(stage_rows) + 26
     parts = []
     for j, b in enumerate(_HEAT_BUCKETS):
         parts.append(f'<text x="{_fmt(ml + cw * j + cw / 2)}" y="{mt - 7}" text-anchor="middle">b{b}</text>')
-    for i, s in enumerate(_HEAT_STAGES):
+    for i, s in enumerate(stage_rows):
         parts.append(f'<text x="{ml - 8}" y="{_fmt(mt + ch * i + ch / 2 + 3.5)}" text-anchor="end">s={s}</text>')
-    for i, s in enumerate(_HEAT_STAGES):
+    for i, s in enumerate(stage_rows):
         for j, b in enumerate(_HEAT_BUCKETS):
             x, y = ml + cw * j, mt + ch * i
             rec = grid.get((s, b))
@@ -428,11 +444,15 @@ def _grid_heatmap(order: int, grid: dict) -> str:
                 f'<a href="{_cell_file(order, s, b)}"><rect x="{x}" y="{y}" width="{cw}" height="{ch}" rx="4" '
                 f'fill="var(--q{step})" class="cellstroke"><title>{_esc(title)}</title></rect>'
                 f'<text class="lbl" x="{_fmt(x + cw / 2)}" y="{_fmt(y + ch / 2 + 3.5)}" '
-                f'text-anchor="middle">{_num(err) if _finite_pos(err) else "?"}</text></a>')
-    parts.append(f'<text x="{ml}" y="{h - 6}">cycle bucket (m0plus_fast) — deeper fill = lower held-out error</text>')
+                f'text-anchor="middle">{f"{float(err):.3g}" if _finite_pos(err) else "?"}</text></a>')
+    parts.append(f'<text x="{ml}" y="{h - 6}">cycle bucket (m0plus_fast)</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            f'aria-label="Order {order} elite grid heatmap">' + "".join(parts) + "</svg>")
-    return f'<figure><figcaption>Order {order} — elites by (stages, cycle bucket)</figcaption>{svg}</figure>'
+    return (f"<figure><figcaption>Order {order} elites: rows are stage counts, columns are "
+            "m0plus_fast cycle buckets, and each filled cell prints the held-out error of its "
+            "elite to 3 significant figures; hover a cell or open it for the exact value. "
+            "Deeper blue is lower error.</figcaption>"
+            f"{svg}</figure>")
 
 
 def _round_top_bar(x: float, y: float, w: float, h: float, fill: str, title: str, r: float = 4) -> str:
@@ -473,8 +493,9 @@ def _anchor_bars() -> str:
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            'aria-label="Cycles per step for rk4 and rk38 under the fast and slow multiplier models">'
            + "".join(parts) + "</svg>")
-    return ("<figure><figcaption>The anchor result: the cheaper method swaps between the two "
-            "multiplier models (same ISA, same stability polynomial).</figcaption>"
+    return ("<figure><figcaption>Analytic cycles per step for rk4 and rk38 under the fast and "
+            "slow multiplier cost models. Bar height is per-step cost; the printed number is "
+            "the exact cycle count.</figcaption>"
             + _legend([("var(--s1)", "m0plus_fast (1-cycle multiplier)"), ("var(--s2)", "m0plus_slow (32-cycle multiplier)")])
             + svg + "</figure>")
 
@@ -507,7 +528,16 @@ def _sweep_chart(name: str, method: dict) -> str:
             pl.parts.append(f'<circle cx="{_fmt(pl.x(hv))}" cy="{_fmt(pl.y(ev))}" r="4" fill="{sw}" '
                             f'class="cellstroke"><title>{_esc(name)} {key} at h={_num(hv)}: {_num(ev)}</title></circle>')
     svg = pl.svg(f"{name}: Q15 and float64 error against step size, log-log")
-    return f"<figure><figcaption>{_esc(name)}</figcaption>{svg}</figure>"
+    return (f"<figure><figcaption>{_esc(name)}: final-state error against step size h, both "
+            "axes log scale, for the Q15 and float64 integrations over identical steps. The "
+            "dashed vertical line, where present, marks the measured crossover step "
+            "size.</figcaption>"
+            f"{svg}</figure>")
+
+
+# Estimated advance width of one character of an 11px semibold .lbl value label,
+# used to keep bar-value labels inside the drawable width. Deliberately conservative.
+_LBL_CHAR_W = 6.6
 
 
 def _per_problem_bars(sv) -> str:
@@ -531,10 +561,20 @@ def _per_problem_bars(sv) -> str:
         parts.append(f'<text x="{ml - 6}" y="{_fmt(y + 13)}" text-anchor="end">{_esc(k)}</text>')
         parts.append(f'<rect x="{ml}" y="{y}" width="{_fmt(max(bw, 2))}" height="18" rx="4" fill="var(--s1)" '
                      f'class="cellstroke"><title>{_esc(k)}: {_num(v)}</title></rect>')
-        parts.append(f'<text class="lbl" x="{_fmt(ml + max(bw, 2) + 6)}" y="{_fmt(y + 13)}">{_num(v)}</text>')
+        # Value label: outside the bar end unless it would run past the drawable width,
+        # in which case it sits end-anchored inside the bar (the .lbl halo keeps it legible).
+        label = _num(v)
+        bar_end = ml + max(bw, 2)
+        if bar_end + 6 + len(label) * _LBL_CHAR_W > w - 6:
+            parts.append(f'<text class="lbl" x="{_fmt(bar_end - 6)}" y="{_fmt(y + 13)}" '
+                         f'text-anchor="end">{label}</text>')
+        else:
+            parts.append(f'<text class="lbl" x="{_fmt(bar_end + 6)}" y="{_fmt(y + 13)}">{label}</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            'aria-label="Per-problem error, log scale">' + "".join(parts) + "</svg>")
-    return ('<figure><figcaption>Per-problem error under m0plus_fast (log scale)</figcaption>'
+    return ('<figure><figcaption>Final-state error of this tableau on each problem, integrated '
+            "in Q15 under m0plus_fast at the fixed cycle budget. Bar length is error on a log "
+            "scale; the printed value is exact.</figcaption>"
             + svg + "</figure>")
 
 
@@ -575,8 +615,8 @@ def _coeff_rep_details(rec: Record) -> str:
     for label, x in entries:
         r = coeffrep.to_rep(x)
         rows.append(f'<tr><td class="mono">{_esc(label)}</td><td class="mono">{_frac(x)}</td>'
-                    f"<td>{r.m}</td><td>{r.s}</td><td class=\"mono\">{r.m}/2^{r.s}</td>"
-                    f"<td>{'yes' if r.exact else 'no'}</td><td>{r.csd_weight}</td></tr>")
+                    f'<td class="num">{r.m}</td><td class="num">{r.s}</td><td class="mono">{r.m}/2^{r.s}</td>'
+                    f"<td>{'yes' if r.exact else 'no'}</td><td class=\"num\">{r.csd_weight}</td></tr>")
     body = [
         "<p>The Q15 integrator applies each nonzero A and b entry to a state value v as "
         "(v * m) &gt;&gt; s, an arithmetic right shift that "
@@ -585,8 +625,8 @@ def _coeff_rep_details(rec: Record) -> str:
         "the record's coeff_quant_error. " + _gloss("csd-weight", "CSD weight")
         + " is the length of the shift-add chain the cost model may charge for the multiply "
         "by m.</p>",
-        '<div class="scroll"><table><tr><th>entry</th><th>exact value</th><th>m</th><th>s</th>'
-        "<th>m/2^s</th><th>exact</th><th>csd weight</th></tr>",
+        '<div class="scroll"><table><tr><th>entry</th><th>exact value</th><th class="num">m</th>'
+        '<th class="num">s</th><th>m/2^s</th><th>exact</th><th class="num">csd weight</th></tr>',
     ]
     body.extend(rows)
     body.append("</table></div>")
@@ -644,18 +684,17 @@ def render_index(arch: ArchiveState) -> str:
     parts.append("<h2>Cost against held-out error</h2>")
     parts.append('<div class="panel">' + _elite_scatter(arch) + "</div>")
     parts.append(_explain(
-        "Each blue dot is one archive record: a " + _gloss("tableau", "Butcher tableau")
-        + " that passed the pinned verifier, stored with its full score, provenance and timestamps. "
-        "The horizontal axis is the analytic cycle count of one step under the m0plus_fast cost "
-        "model for a one-state problem, on a log scale.",
-        "The vertical axis, also log, is held-out error: the root-mean-square final-state error "
-        "over the four " + _gloss("held-out-set", "held-out problems") + ", integrated in Q15 at a "
-        "fixed " + _gloss("cycle-budget", "cycle budget") + " of 65536 cycles. Cheaper methods get "
+        "A dot earns its place by passing the pinned verifier: each is a "
+        + _gloss("tableau", "Butcher tableau") + " stored with its full score, provenance and "
+        "timestamps. The cycle count is analytic, computed for a one-state problem, never "
+        "measured on hardware.",
+        "Held-out error is the root-mean-square final-state error over the four "
+        + _gloss("held-out-set", "held-out problems") + ", integrated in Q15 at a fixed "
+        + _gloss("cycle-budget", "cycle budget") + " of 65536 cycles. Cheaper methods get "
         "more, smaller steps inside the same budget, so the plot shows the cost-accuracy trade "
-        "directly. Down and to the left is better on both axes.",
-        "Orange diamonds are classical baseline methods at the same budget; a baseline gets a "
-        "vertical position only when a record with the identical tableau is in the archive. "
-        "Every dot links to the detail page of its grid cell."))
+        "directly and down-left is better on both axes.",
+        "A baseline diamond gets a vertical position only when a record with the identical "
+        "tableau is in the archive. Every dot links to the detail page of its grid cell."))
     parts.append("<h2>Elite grids</h2>")
     parts.append(_explain(
         "The archive is a " + _gloss("map-elites", "MAP-Elites") + " structure: one grid per "
@@ -663,12 +702,14 @@ def render_index(arch: ArchiveState) -> str:
         "cycle bucket). A cell holds at most one record, its " + _gloss("elite", "elite") + ": the "
         "verified tableau with the lowest held-out error seen so far for that shape and cost; ties "
         "keep the earlier record.",
-        "Rows are " + _gloss("stage", "stage") + " counts 2 to 6. Columns are "
-        + _gloss("cost-bucket", "cycle buckets") + " computed from the m0plus_fast cycles per "
-        "step: bucket 0 means fewer than 16 cycles, bucket 1 is 16 to 31, bucket 2 is 32 to 63, "
-        "doubling each column, and bucket 7 collects everything at 1024 cycles or more.",
-        "Deeper blue means lower held-out error within that grid; the printed number is the error "
-        "itself. An empty cell means no verified tableau has landed there yet. Click any filled "
+        _gloss("stage", "Stage") + " rows span 2 to 6 by default, extended with a row for any "
+        "other stage count that holds an elite (order 1's single-stage cell appears as s=1), "
+        "and the " + _gloss("cost-bucket", "cycle buckets") + " are log2-spaced bins of the m0plus_fast "
+        "cycles per step: bucket 0 means fewer than 16 cycles, bucket 1 is 16 to 31, bucket 2 "
+        "is 32 to 63, doubling each column, and bucket 7 collects everything at 1024 cycles or "
+        "more.",
+        "The blue ramp is scaled within each grid, so shades compare cells of the same order "
+        "only. An empty cell means no verified tableau has landed there yet. Click any filled "
         "cell to open its detail page."))
     parts.append('<div class="charts">')
     for order in sorted(arch.grids.keys()):
@@ -696,8 +737,9 @@ def render_index(arch: ArchiveState) -> str:
             continue
         parts.append(table_explain)
         parts.append('<div class="scroll"><table>\n<tr><th>stages</th><th>bucket</th><th>tableau_hash</th><th>tier</th>'
-                     "<th>heldout_error</th><th>search_error</th><th>cycles fast</th><th>cycles slow</th>"
-                     "<th>measured_order</th><th>label</th><th>verifier_hash</th></tr>")
+                     '<th class="num">heldout_error</th><th class="num">search_error</th>'
+                     '<th class="num">cycles fast</th><th class="num">cycles slow</th>'
+                     '<th class="num">measured_order</th><th>label</th><th>verifier_hash</th></tr>')
         for (stg, bucket) in sorted(grid.keys()):
             rec = grid[(stg, bucket)]
             link = _cell_file(order, stg, bucket)
@@ -707,9 +749,9 @@ def render_index(arch: ArchiveState) -> str:
                 f"<td>{stg}</td><td>{bucket}</td>"
                 f'<td class="hash"><a href="{link}">{_esc(rec.tableau_hash)}</a></td>'
                 f"<td>{_tier_badge(rec.tier)}</td>"
-                f"<td>{_num(sv.heldout_error)}</td><td>{_num(sv.search_error)}</td>"
-                f"<td>{_num(sv.cycles.get('m0plus_fast'))}</td><td>{_num(sv.cycles.get('m0plus_slow'))}</td>"
-                f"<td>{_num(sv.measured_order)}</td>"
+                f'<td class="num">{_num(sv.heldout_error)}</td><td class="num">{_num(sv.search_error)}</td>'
+                f'<td class="num">{_num(sv.cycles.get("m0plus_fast"))}</td><td class="num">{_num(sv.cycles.get("m0plus_slow"))}</td>'
+                f'<td class="num">{_num(sv.measured_order)}</td>'
                 f"<td>{_esc(_phase_label(rec))}</td>"
                 f'<td class="hash">{_esc(rec.verifier_hash)}</td>'
                 "</tr>"
@@ -760,21 +802,21 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
     parts.append("<h2>Per problem</h2>")
     parts.append('<div class="panel">' + _per_problem_bars(sv) + "</div>")
     parts.append(_explain(
-        "One bar per problem: the final-state error of this tableau on that problem, integrated "
-        "in Q15 under m0plus_fast at the fixed " + _gloss("cycle-budget", "cycle budget")
-        + ", log scale. dahlquist, damped_osc and vanderpol_mild are the search set the "
-        "optimizer was allowed to see; pendulum, dc_motor, rc_thermal and quaternion are the "
-        + _gloss("held-out-set", "held-out set") + " that decides archive fitness.",
+        "dahlquist, damped_osc and vanderpol_mild are the search set the optimizer was allowed "
+        "to see; pendulum, dc_motor, rc_thermal and quaternion are the "
+        + _gloss("held-out-set", "held-out set") + " that decides archive fitness. The "
+        + _gloss("cycle-budget", "cycle budget") + " is the same fixed 65536 cycles for every "
+        "bar.",
         "Errors on several problems are dominated by Q15 quantization rather than by the "
         "method: " + _gloss("floor-rounding", "floor rounding") + " loses up to one "
         + _gloss("lsb", "LSB") + " per multiply, always downward, so bars can look similar "
         "across very different tableaus. The table further down lists the same measurements "
         "under the other cost models."))
     parts.append("<h2>Cycle counts (n_states = 1)</h2>")
-    parts.append("<table><tr><th>model</th><th>cycles</th><th>note</th></tr>")
+    parts.append('<table><tr><th>model</th><th class="num">cycles</th><th>note</th></tr>')
     for name in ("m0plus_fast", "m0plus_slow", "avr_approx"):
-        note = _esc(AVR_NOTE) if name == "avr_approx" else ""
-        parts.append(f"<tr><td>{name}</td><td>{_num(sv.cycles.get(name))}</td><td>{note}</td></tr>")
+        note = f'<span class="note">{_esc(AVR_NOTE)}</span>' if name == "avr_approx" else ""
+        parts.append(f'<tr><td>{name}</td><td class="num">{_num(sv.cycles.get(name))}</td><td>{note}</td></tr>')
     parts.append("</table>")
     parts.append("<h2>Score</h2>")
     score_rows = [
@@ -789,9 +831,9 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
         ("heldout_error", sv.heldout_error),
         ("overflow_margin", sv.overflow_margin),
     ]
-    parts.append("<table><tr><th>metric</th><th>value</th></tr>")
+    parts.append('<table><tr><th>metric</th><th class="num">value</th></tr>')
     for k, v in score_rows:
-        parts.append(f"<tr><td>{k}</td><td>{_num(v)}</td></tr>")
+        parts.append(f'<tr><td>{k}</td><td class="num">{_num(v)}</td></tr>')
     parts.append("</table>")
     parts.append(_explain(
         "measured_order is the slope of a log-log fit of float64 final-state error against step "
@@ -809,10 +851,10 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
         "twice the nominal amplitude and must exceed 1.0, meaning a doubled signal still fits "
         "in " + _gloss("q15", "Q15") + " range."))
     parts.append("<h3>All per-problem keys</h3>")
-    parts.append('<div class="scroll"><table><tr><th>key</th><th>error</th><th>note</th></tr>')
+    parts.append('<div class="scroll"><table><tr><th>key</th><th class="num">error</th><th>note</th></tr>')
     for k in sorted(sv.per_problem.keys()):
-        note = _esc(AVR_NOTE) if str(k).startswith("avr_approx:") else ""
-        parts.append(f"<tr><td>{_esc(k)}</td><td>{_num(sv.per_problem[k])}</td><td>{note}</td></tr>")
+        note = f'<span class="note">{_esc(AVR_NOTE)}</span>' if str(k).startswith("avr_approx:") else ""
+        parts.append(f'<tr><td>{_esc(k)}</td><td class="num">{_num(sv.per_problem[k])}</td><td>{note}</td></tr>')
     parts.append("</table></div>")
     title = f"cell p{order} s{stages} b{bucket}"
     return _page(title, "\n".join(parts), active="index.html")
@@ -911,14 +953,14 @@ def render_costmodel() -> str:
         "four-stage, order-4 tableaus with the same stability polynomial. The only difference "
         "the cost model can see between them is coefficient arithmetic, since stages and order "
         "match.",
-        "Each pair of bars is one method; blue is m0plus_fast (a Cortex-M0+ with the "
-        "single-cycle multiplier option), orange is m0plus_slow (the same core with the 32-cycle "
-        "iterative multiplier). Under the fast multiplier rk4's simpler coefficients cost less; "
-        "under the slow multiplier rk38's shift-friendly eighths pull ahead, so the cheaper "
-        "method swaps between the two models. That swap is the sanity check the whole model "
-        "hangs on.",
+        "m0plus_fast is a Cortex-M0+ with the single-cycle multiplier option, m0plus_slow the "
+        "same core with the 32-cycle iterative multiplier. Under the fast multiplier rk4's "
+        "simpler coefficients cost less; under the slow multiplier rk38's shift-friendly "
+        "eighths pull ahead, so the cheaper method swaps between the two models. That swap is "
+        "the sanity check the whole model hangs on.",
         "The table below repeats the numbers for one, two and four state variables."))
-    parts.append("<table><tr><th>tableau</th><th>n_states</th><th>m0plus_fast</th><th>m0plus_slow</th></tr>")
+    parts.append('<table><tr><th>tableau</th><th class="num">n_states</th>'
+                 '<th class="num">m0plus_fast</th><th class="num">m0plus_slow</th></tr>')
     for name in ("rk4", "rk38"):
         t = classical.get(name)
         if t is None:
@@ -926,19 +968,22 @@ def render_costmodel() -> str:
         for n in (1, 2, 4):
             fast = costmodel.cycle_count(t, costmodel.M0PLUS_FAST, n)
             slow = costmodel.cycle_count(t, costmodel.M0PLUS_SLOW, n)
-            parts.append(f"<tr><td>{name}</td><td>{n}</td><td>{fast}</td><td>{slow}</td></tr>")
+            parts.append(f'<tr><td>{name}</td><td class="num">{n}</td>'
+                         f'<td class="num">{fast}</td><td class="num">{slow}</td></tr>')
     parts.append("</table>")
     parts.append("<h2>Classical tableaus (n_states = 1)</h2>")
-    parts.append('<div class="scroll"><table><tr><th>tableau</th><th>stages</th><th>m0plus_fast</th><th>m0plus_slow</th>'
-                 "<th>avr_approx</th><th>note</th></tr>")
+    parts.append('<div class="scroll"><table><tr><th>tableau</th><th class="num">stages</th>'
+                 '<th class="num">m0plus_fast</th><th class="num">m0plus_slow</th>'
+                 '<th class="num">avr_approx</th></tr>')
     for name in sorted(classical.keys()):
         t = classical[name]
         fast = costmodel.cycle_count(t, costmodel.M0PLUS_FAST, 1)
         slow = costmodel.cycle_count(t, costmodel.M0PLUS_SLOW, 1)
         avr = costmodel.cycle_count(t, costmodel.AVR_APPROX, 1)
-        parts.append(f"<tr><td>{name}</td><td>{len(t.b)}</td><td>{fast}</td><td>{slow}</td>"
-                     f"<td>{avr}</td><td>{_esc(AVR_NOTE)}</td></tr>")
+        parts.append(f'<tr><td>{name}</td><td class="num">{len(t.b)}</td><td class="num">{fast}</td>'
+                     f'<td class="num">{slow}</td><td class="num">{avr}</td></tr>')
     parts.append("</table></div>")
+    parts.append(f'<p class="note">avr_approx: {_esc(AVR_NOTE)}</p>')
     parts.append(_explain(
         "Each row is one classical reference " + _gloss("tableau", "tableau") + ". stages is "
         "the number of derivative evaluations per step; the three cycle columns are analytic "
@@ -952,11 +997,13 @@ def render_costmodel() -> str:
         "so a tableau full of simple " + _gloss("dyadic-rational", "dyadic") + " values can be "
         "much cheaper than its stage count suggests."))
     parts.append("<h2>Model parameters</h2>")
-    parts.append("<table><tr><th>model</th><th>mul</th><th>add</th><th>shift</th><th>load</th><th>store</th></tr>")
+    parts.append('<table><tr><th>model</th><th class="num">mul</th><th class="num">add</th>'
+                 '<th class="num">shift</th><th class="num">load</th><th class="num">store</th></tr>')
     for m in (costmodel.M0PLUS_FAST, costmodel.M0PLUS_SLOW, costmodel.AVR_APPROX):
         cy = m.cycles
-        parts.append(f"<tr><td>{m.name}</td><td>{cy.get('mul')}</td><td>{cy.get('add')}</td>"
-                     f"<td>{cy.get('shift')}</td><td>{cy.get('load')}</td><td>{cy.get('store')}</td></tr>")
+        parts.append(f'<tr><td>{m.name}</td><td class="num">{cy.get("mul")}</td><td class="num">{cy.get("add")}</td>'
+                     f'<td class="num">{cy.get("shift")}</td><td class="num">{cy.get("load")}</td>'
+                     f'<td class="num">{cy.get("store")}</td></tr>')
     parts.append("</table>")
     parts.append(_explain(
         "The per-instruction cycle costs each model assigns. m0plus_fast and m0plus_slow are "
@@ -1022,9 +1069,6 @@ def render_falsification(data: dict | None) -> str:
         methods = data.get("methods")
         if isinstance(methods, dict) and methods:
             parts.append("<h2>Where roundoff overtakes truncation</h2>")
-            parts.append('<p class="note">Final-state error against step size, log-log. The float64 line keeps '
-                         "falling as h shrinks; the Q15 line turns back up once roundoff dominates — the dashed "
-                         "line marks the crossover.</p>")
             parts.append(_legend([("var(--s1)", "Q15 fixed point"), ("var(--s2)", "float64, same steps")]))
             parts.append('<div class="charts">')
             for name in sorted(methods.keys()):
@@ -1040,15 +1084,15 @@ def render_falsification(data: dict | None) -> str:
                 + _gloss("q15", "Q15") + " (blue), each step also loses up to one "
                 + _gloss("lsb", "LSB") + " to floor rounding, and more steps mean more losses, "
                 "so past some h the total error turns back up.",
-                "The dashed vertical line marks that crossover. A crossover inside the "
-                "practical step-size range is evidence that coefficient choices which reduce "
-                "roundoff can pay for themselves; hover any point for its exact values."))
+                "A crossover inside the practical step-size range is evidence that coefficient "
+                "choices which reduce roundoff can pay for themselves; hover any point for its "
+                "exact values."))
         rest = {k: v for k, v in data.items() if k != "verdict"}
         parts.append("<h2>Raw data</h2>")
         parts.append(_render_value(rest))
         body = "\n".join(parts)
     return _page("falsification experiment", body, active="falsification.html",
-                 subtitle="HANDOFF §15 — the kill/proceed measurement, run before the search.")
+                 subtitle="HANDOFF §15: the kill/proceed measurement, run before the search.")
 
 
 def render_literature(digests: list[dict]) -> str:
@@ -1058,7 +1102,6 @@ def render_literature(digests: list[dict]) -> str:
         + _gloss("directive", "directive") + " and "
         + _gloss("hypothesis-ledger", "hypothesis") + " prompts; nothing on this page is a "
         "measurement from this project. Click an entry for its full text and sources.</p>",
-        f'<p class="note">{_esc(_MODEL_NOTE)}</p>',
         _explain(
             "Each entry is one digest: the model was given a topic, searched the web, and wrote "
             "the summary and key points itself, attaching the sources it found. The stored text "
@@ -1068,6 +1111,7 @@ def render_literature(digests: list[dict]) -> str:
             "Because both the summaries and the citations are model-collected, treat them as "
             "leads to verify against the linked sources, not as established results. The "
             "measured pages of this site never depend on anything written here."),
+        f'<p class="note">{_esc(_MODEL_NOTE)}</p>',
     ]
     if not digests:
         parts.append("<p>no literature digests yet</p>")
@@ -1101,7 +1145,6 @@ def render_interpretation(entries: list[dict]) -> str:
         "at the top. Each entry is commentary on the numbers as they stood at that cycle; the "
         "tables and charts on the other pages stay authoritative, and where text and tables "
         "disagree, trust the tables. Click an entry for its full text.</p>",
-        f'<p class="note">{_esc(_MODEL_NOTE)}</p>',
         _explain(
             "At intervals the run hands the model a snapshot of the archive and asks it to "
             "write what it sees: coverage, gaps, apparent patterns, things worth testing next. "
@@ -1111,10 +1154,28 @@ def render_interpretation(entries: list[dict]) -> str:
             + _gloss("hypothesis-ledger", "hypotheses") + " they carry no machine-checkable "
             "predicate. They are kept because they explain what the search was steering toward "
             "at each point in the run."),
+        f'<p class="note">{_esc(_MODEL_NOTE)}</p>',
     ]
     if not entries:
         parts.append("<p>no interpretation yet</p>")
-    for i, e in enumerate(reversed(entries)):
+    # One top-level entry per cycle: the newest draft (latest ts, ties broken by stored
+    # position) speaks for its cycle, and older same-cycle drafts fold inside it.
+    by_cycle: dict[int, list[tuple[int, dict]]] = {}
+    for idx, e in enumerate(entries):
+        by_cycle.setdefault(int(e.get("cycle", 0)), []).append((idx, e))
+    tops: list[tuple[dict, list[dict]]] = []
+    seen_cycles: set[int] = set()
+    for idx in range(len(entries) - 1, -1, -1):
+        cyc = int(entries[idx].get("cycle", 0))
+        if cyc in seen_cycles:
+            continue
+        seen_cycles.add(cyc)
+        group = by_cycle[cyc]
+        newest_idx, newest = max(group, key=lambda p: (str(p[1].get("ts", "")), p[0]))
+        older = sorted((p for p in group if p[0] != newest_idx),
+                       key=lambda p: (str(p[1].get("ts", "")), p[0]), reverse=True)
+        tops.append((newest, [d for _i, d in older]))
+    for i, (e, drafts) in enumerate(tops):
         open_attr = " open" if i == 0 else ""
         entry = [f'<details class="fold entry"{open_attr}>']
         entry.append(f"<summary><strong>cycle {int(e.get('cycle', 0))}</strong> "
@@ -1123,6 +1184,15 @@ def render_interpretation(entries: list[dict]) -> str:
         for para in str(e.get("text", "")).split("\n\n"):
             if para.strip():
                 entry.append(f"<p>{_esc(para.strip())}</p>")
+        if drafts:
+            entry.append('<details class="fold"><summary>superseded same-cycle drafts '
+                         f"({len(drafts)})</summary><div>")
+            for d in drafts:
+                entry.append(f'<p class="when">written {_esc(_ct(d.get("ts")))}</p>')
+                for para in str(d.get("text", "")).split("\n\n"):
+                    if para.strip():
+                        entry.append(f"<p>{_esc(para.strip())}</p>")
+            entry.append("</div></details>")
         entry.append("</div></details>")
         parts.append("\n".join(entry))
     return _page("interpretation", "\n".join(parts), active="interpretation.html",

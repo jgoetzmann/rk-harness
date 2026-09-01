@@ -203,19 +203,19 @@ def _runstate(**over) -> RunState:
 
 
 class _Collector(HTMLParser):
-    """Collects text, tags, banner paragraphs and script tags from a page."""
+    """Collects text, tags, footer provenance paragraphs and script tags from a page."""
 
     def __init__(self):
         super().__init__()
         self.text: list[str] = []
         self.tags: list[str] = []
-        self.banner_p = 0
+        self.prov_p = 0
         self.scripts = 0
 
     def handle_starttag(self, tag, attrs):
         self.tags.append(tag)
-        if tag == "p" and dict(attrs).get("class") == "banner":
-            self.banner_p += 1
+        if tag == "p" and dict(attrs).get("class") == "prov":
+            self.prov_p += 1
         if tag == "script":
             self.scripts += 1
 
@@ -1025,7 +1025,7 @@ def test_E3_index_parses_and_shows_every_elite_tier_next_to_its_hash(monkeypatch
     col.close()
     text = " ".join(col.text)
     assert "title" in col.tags
-    assert col.banner_p >= 1
+    assert col.prov_p >= 1
     assert col.scripts == 0
     assert BANNER in text
     assert html.lower().lstrip().startswith("<!doctype html>")
@@ -1127,7 +1127,7 @@ def test_E4_render_hypotheses_output_is_subject_to_check_banned():
         check_banned(html)
 
 
-def test_B61_every_page_has_banner_title_doctype_and_no_javascript(monkeypatch, tmp_path):
+def test_B61_every_page_has_provenance_title_doctype_and_no_javascript(monkeypatch, tmp_path):
     _work, arch = _site_archive(monkeypatch, tmp_path)
     out = tmp_path / "docs"
     build(arch, out)
@@ -1138,7 +1138,7 @@ def test_B61_every_page_has_banner_title_doctype_and_no_javascript(monkeypatch, 
         assert html.lower().lstrip().startswith("<!doctype html>"), f.name
         assert "<title>" in html.lower(), f.name
         assert BANNER in html, f.name
-        assert '<p class="banner">' in html, f.name
+        assert '<p class="prov">' in html, f.name
         assert "<script" not in html.lower(), f.name
         assert "javascript:" not in html.lower(), f.name
 
@@ -1197,7 +1197,7 @@ def test_B61_render_cell_direct():
     html = render_cell(4, 4, 2, rec)
     assert isinstance(html, str)
     assert html.lower().lstrip().startswith("<!doctype html>")
-    assert BANNER in html and '<p class="banner">' in html
+    assert BANNER in html and '<p class="prov">' in html
     assert rec.tableau_hash in html and rec.verifier_hash in html and rec.tier in html
     assert "exhaustive" in html
     assert "1/6" in html
@@ -1285,6 +1285,21 @@ def test_B61_major_pages_carry_collapsed_explanations(monkeypatch, tmp_path):
         assert "How to read this" in html, name
 
 
+def test_B61_every_chart_opens_with_a_visible_caption(monkeypatch, tmp_path):
+    _work, arch = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    build(arch, out)
+    saw_figures = 0
+    for f in out.rglob("*.html"):
+        html = f.read_text(encoding="utf-8")
+        n = html.count("<figure>")
+        saw_figures += n
+        assert n == html.count("<figcaption>"), f.name
+        # every figure leads with its always-visible caption
+        assert "<figure>" not in html.replace("<figure><figcaption>", ""), f.name
+    assert saw_figures >= 3  # scatter + heatmaps + per-problem bars at minimum
+
+
 def test_B61_hypotheses_page_folds_each_hypothesis_with_provenance():
     hyps = [
         _hyp(id="H-001", verdict="supported", n_samples=250, effect_size=1.5, resolved_cycle=7),
@@ -1332,6 +1347,67 @@ def test_B61_literature_and_interpretation_entries_fold_with_ct_dates():
     assert '<details class="fold entry" open>' in interp
     assert "cycle 6" in interp and "2026-09-21 05:01 CT" in interp and "reading two." in interp
     check_banned(interp)
+
+
+def test_B61_heatmap_rows_extend_to_occupied_stage_counts_outside_the_default_range():
+    """Design review fix 1: an order-1 elite at stages=1 must get a heatmap row."""
+    c = _classical_8()
+    rec = _rec(c["euler"], _sv(13, 13, 0.005, 0.5942853, 1.0), "unreplicated", 1, None)
+    arch = ArchiveState(n_records=1, last_cycle_id=1,
+                        grids={1: {(1, 0): rec}, 2: {}, 3: {}, 4: {}},
+                        open_hypotheses=(), refuted_hypotheses=())
+    html = render_index(arch)
+    i = html.index('aria-label="Order 1 elite grid heatmap"')
+    svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i)]
+    assert ">s=1<" in svg                          # the occupied row is rendered
+    assert 'href="cell-p1-s1-b0.html"' in svg      # with its linked, filled cell
+    assert ">0.594<" in svg                        # cell label at 3 significant figures
+    assert "0.594285" in svg                       # full-precision value in the tooltip
+    for s in (2, 3, 4, 5, 6):
+        assert f">s={s}<" in svg                   # default rows still render
+    assert "counts run 2 to 6" not in html         # the old fixed-range claim is gone
+    check_banned(html)
+
+
+def test_B61_cell_bar_value_labels_stay_inside_the_viewbox():
+    """Design review fix 2: a label after a long bar moves end-anchored inside the bar."""
+    c = _classical_8()
+    rec = _rec(c["euler"], _sv(13, 13, 4.53999e-05, 0.5942853, 1.0), "unreplicated", 1, None)
+    html = render_cell(1, 1, 0, rec)
+    i = html.index('aria-label="Per-problem error, log scale"')
+    svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i)]
+    labels = re.findall(
+        r'<text class="lbl" x="([\d.]+)" y="[\d.]+"( text-anchor="end")?>([^<]+)</text>', svg)
+    assert labels
+    saw_inside = False
+    for x, end_anchor, txt in labels:
+        end_x = float(x) if end_anchor else float(x) + len(txt) * 6.6
+        assert end_x <= 560, (txt, end_x)          # estimated end within the viewBox
+        saw_inside = saw_inside or bool(end_anchor)
+    assert saw_inside                              # the longest bar's label sits inside
+    check_banned(html)
+
+
+def test_B61_interpretation_folds_superseded_same_cycle_drafts():
+    """Design review fix 4: one top-level entry per cycle; older drafts fold inside."""
+    entries = [
+        {"ts": "2026-09-21T08:00:00Z", "cycle": 5, "text": "cycle five reading."},
+        {"ts": "2026-09-21T10:01:00Z", "cycle": 6, "text": "draft reading."},
+        {"ts": "2026-09-21T10:05:00Z", "cycle": 6, "text": "final reading."},
+    ]
+    html = render_interpretation(entries)
+    assert html.count('<details class="fold entry"') == 2   # one entry per cycle
+    assert html.count("<summary><strong>cycle 6</strong>") == 1
+    assert "2026-09-21 05:05 CT" in html                    # newest draft speaks for cycle 6
+    assert "superseded same-cycle drafts (1)" in html
+    i_top = html.index("final reading.")
+    i_fold = html.index("superseded same-cycle drafts")
+    i_draft = html.index("draft reading.")
+    assert i_top < i_fold < i_draft                         # older draft folded below
+    assert html.index("cycle 6</strong>") < html.index("cycle 5</strong>")
+    assert html.count('<details class="fold entry" open>') == 1
+    assert render_interpretation(entries) == render_interpretation(entries)
+    check_banned(html)
 
 
 def test_B61_falsification_page_reflects_falsification_json(monkeypatch, tmp_path):

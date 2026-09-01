@@ -100,3 +100,10 @@ A2 (fine-grained PAT in `.env`, then `scripts/check_pat.ps1`), A11 (`scripts/net
 WSL, then curl from the container), E4 (`docker pause` 60 s mid-evaluation), E6 (pull the
 power once), F1–F4, F7, F8, G1 (dashboard cap screenshot), G6 (Codex `auth.json` on the host).
 Everything else is executed by the script.
+
+## Banner demotion (owner-directed, 2026-09-01)
+HANDOFF §17 specified a visible "Automatically generated. Not reviewed by a human." banner
+on every findings page. The owner directed its removal for a resume-facing site; the same
+disclosure now lives as a one-line provenance note in each page footer, linked to the
+rk-overview human interpretation site. Model-written-text captions on the literature and
+interpretation pages remain. The banned-words guard and check_banned gate are unchanged.

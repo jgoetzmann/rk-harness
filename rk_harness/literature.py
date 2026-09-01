@@ -35,7 +35,9 @@ TOPICS: tuple[str, ...] = (
     "backward error analysis of floating- and fixed-point ODE solvers",
 )
 
-# Softening map: the site's BANNED_WORDS (claims of priority) -> neutral phrasing.
+# Softening map: the site's BANNED_WORDS (claims of priority) -> neutral phrasing,
+# plus vocabulary that trips site style ("cost landscape" is a phrase replacement on
+# purpose; a bare "landscape" is fine in most contexts and is left alone).
 _SOFTEN: tuple[tuple[str, str], ...] = (
     ("state-of-the-art", "leading"),
     ("best-ever", "record"),
@@ -45,14 +47,24 @@ _SOFTEN: tuple[tuple[str, str], ...] = (
     ("proves", "shows"),
     ("novel", "new"),
     ("first", "earliest"),
+    ("cost landscape", "cost structure"),
+    ("delve", "dig"),
+    ("pivotal", "central"),
+    ("showcases", "shows"),
+    ("leverages", "uses"),
 )
 
 
 def soften(text: str) -> str:
-    """Replace the site's banned words (case-insensitive, whole word) with neutral phrasing."""
+    """Replace the site's banned words (case-insensitive, whole word) with neutral
+    phrasing, then normalise em/en dashes: ", " when the dash sits between word
+    characters, " - " otherwise (site style forbids em dashes in published prose)."""
     out = str(text)
     for bad, good in _SOFTEN:
         out = re.sub(rf"(?i)\b{re.escape(bad)}\b", good, out)
+    out = re.sub("(?<=\\w)[\u2013\u2014](?=\\w)", ", ", out)
+    out = out.replace("\u2013", " - ").replace("\u2014", " - ")
+    out = re.sub(" {2,}", " ", out)
     return out
 
 
