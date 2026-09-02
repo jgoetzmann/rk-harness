@@ -19,16 +19,9 @@ from rk_harness import sitegen
 
 
 SECTION_IDS = (
-    "meth-number-system",
-    "meth-test-problems",
-    "meth-simulation",
-    "meth-measured-order",
-    "meth-cost-model",
-    "meth-search",
-    "meth-enumeration",
-    "meth-archive",
-    "meth-ledger",
-    "meth-falsification",
+    "meth-setup",
+    "meth-measurement",
+    "meth-protocol",
     "meth-trust",
     "meth-testing",
     "meth-reproducibility",
@@ -36,20 +29,13 @@ SECTION_IDS = (
 )
 
 SECTION_TITLES = (
-    "1. Number system",
-    "2. Test problems",
-    "3. Simulation and evaluation",
-    "4. Measured order",
-    "5. Cost model",
-    "6. Search",
-    "7. Exhaustive enumeration",
-    "8. Archive",
-    "9. Hypothesis ledger",
-    "10. Falsification protocol",
-    "11. Model integration and trust boundaries",
-    "12. Testing",
-    "13. Reproducibility",
-    "14. Limitations",
+    "1. Experimental setup",
+    "2. Measurement",
+    "3. Statistical protocol",
+    "4. Verification and trust",
+    "5. Testing",
+    "6. Reproducibility",
+    "7. Limitations",
 )
 
 
@@ -73,7 +59,7 @@ def real_html() -> str:
 # --------------------------------------------------------------------- interface
 
 def test_title_constant():
-    assert methodology.TITLE == "Methodology"
+    assert methodology.TITLE == "methodology"
 
 
 def test_render_page_passes_frozen_arguments():
@@ -87,7 +73,7 @@ def test_render_page_passes_frozen_arguments():
     assert out == "ok"
     assert len(calls) == 1
     title, body, active, subtitle = calls[0]
-    assert title == "Methodology"
+    assert title == "methodology"
     assert active == "methodology.html"
     assert isinstance(body, str) and len(body) > 5000
     assert isinstance(subtitle, str) and subtitle
@@ -144,13 +130,19 @@ def test_toc_links_every_section(fake_html):
 
 # ---------------------------------------------------------------------- sections
 
-def test_all_fourteen_sections_present(fake_html):
+def test_all_seven_sections_present(fake_html):
     _, ids = _hrefs_and_ids(fake_html)
     for sid in SECTION_IDS:
         assert sid in ids, f"missing section id {sid}"
     assert "meth-references" in ids
     for heading in SECTION_TITLES:
         assert heading in fake_html, f"missing heading {heading!r}"
+
+
+def test_practical_validation_subsection_present(fake_html):
+    _, ids = _hrefs_and_ids(fake_html)
+    assert "meth-practical" in ids
+    assert "Practical validation" in fake_html
 
 
 def test_reference_targets_present(fake_html):
@@ -175,5 +167,5 @@ def test_deterministic_output(real_html):
 
 def test_real_page_is_full_document(real_html):
     assert real_html.startswith("<!doctype html>")
-    assert "<title>Methodology</title>" in real_html
+    assert "<title>methodology</title>" in real_html
     assert sitegen.BANNER in real_html

@@ -13,10 +13,19 @@ param(
     [int]$CpuHigh = 50,             # pause when non-container host CPU stays above this ...
     [int]$CpuLow = 30,              # ... unpause when it stays below this ...
     [int]$CpuSustainSeconds = 30,   # ... for this long
+    [int]$SaturationCheckSeconds = 1800,  # epoch-saturation orchestrator cadence (0 = off)
+    [switch]$NoSaturation,
     [switch]$NoBatteryGuard,
     [switch]$Once
 )
 $ErrorActionPreference = "Continue"
+
+# Epoch saturation orchestrator (owner-delegated, 2026-09-02; rule in docs/ROADMAP.md).
+# The decision state lives on disk in rk-work (python side), never in this process.
+$HarnessRoot = Split-Path $PSScriptRoot -Parent
+$VenvPython = Join-Path $HarnessRoot ".venv/Scripts/python.exe"
+$lastSatCheck = [datetime]::MinValue
+$freezePending = $false
 
 # Battery guard (owner's rule, 2026-08-29): never run on battery. On battery -> docker pause;
 # back on AC -> docker unpause. Pause is atomic, so the run resumes exactly where it was.
@@ -97,6 +106,37 @@ while ($true) {
         Push-Repo $Work
         Push-Repo $Findings
         $lastPush = Get-Date
+    }
+
+    # 0c. Epoch saturation: ask rk_harness.saturation every $SaturationCheckSeconds whether
+    # the epoch has stopped producing; on the freeze threshold, drop STOP for a graceful
+    # stop, then mark the epoch frozen and push once the container has exited.
+    if (-not $NoSaturation -and $SaturationCheckSeconds -gt 0 -and ((Get-Date) - $lastSatCheck).TotalSeconds -ge $SaturationCheckSeconds -and (Test-Path $VenvPython)) {
+        $lastSatCheck = Get-Date
+        $env:RK_WORK_DIR = $Work
+        $env:PYTHONPATH = $HarnessRoot
+        $satRaw = & $VenvPython -m rk_harness.saturation --check 2>$null
+        $sat = $null
+        try { $sat = $satRaw | ConvertFrom-Json } catch {}
+        if ($sat -and $sat.action -eq "freeze") {
+            Write-Host "$(Get-Date -Format s) SATURATION freeze threshold met ($($sat.consecutive)/$($sat.consecutive_needed) checks, last progress $($sat.hours_since_progress)h ago); dropping STOP for a graceful epoch freeze"
+            Set-Content -Path (Join-Path $Work "STOP") -Value "stop" -Encoding ascii
+            $freezePending = $true
+        } elseif ($sat -and $sat.verdict -ne "FROZEN") {
+            Write-Host "$(Get-Date -Format s) saturation: $($sat.verdict) (progress $($sat.hours_since_progress)h ago, checks $($sat.consecutive)/$($sat.consecutive_needed))"
+        }
+    }
+    if ($freezePending) {
+        $stF = docker inspect -f "{{.State.Status}}" $Container 2>$null
+        if ($stF -ne "running" -and $stF -ne "paused") {
+            $env:RK_WORK_DIR = $Work
+            $env:PYTHONPATH = $HarnessRoot
+            & $VenvPython -m rk_harness.saturation --mark-frozen "no archive progress past the window and falsification concluded" | Out-Null
+            Push-Repo $Work
+            Push-Repo $Findings
+            Write-Host "$(Get-Date -Format s) EPOCH 1 FROZEN: run stopped cleanly, EPOCH_STATUS.json written and pushed"
+            $freezePending = $false
+        }
     }
 
     # Pause state is derived from docker every poll, never trusted from this process's own

@@ -33,6 +33,14 @@ TOPICS: tuple[str, ...] = (
     "control: fixed cycle budgets, low-precision solvers, energy-conserving integrators",
     "roundoff versus truncation error trade-offs at large step counts; probabilistic and "
     "backward error analysis of floating- and fixed-point ODE solvers",
+    "implicit Runge-Kutta families for embedded use: SDIRK, Radau IIA, Rosenbrock methods, "
+    "fixed iteration counts, and their cost structure on small MCUs",
+    "embedded Runge-Kutta pairs and step-size control: Bogacki-Shampine, Dormand-Prince, "
+    "PI controllers, and step control implemented in fixed-point arithmetic",
+    "stability regions of low-stage explicit Runge-Kutta methods and stiffness limits at "
+    "fixed cycle budgets; when implicit methods pay for themselves",
+    "how production ODE libraries implement their integrators: SciPy solve_ivp, boost "
+    "odeint, SUNDIALS CVODE; data layouts, error norms, controller defaults",
 )
 
 # Softening map: the site's BANNED_WORDS (claims of priority) -> neutral phrasing,
@@ -116,8 +124,25 @@ def load_digests(limit: int | None = None) -> list[dict]:
     return out[-limit:] if limit else out
 
 
+# Track rotation (owner-directed, 2026-09-02): ~70% of literature attention on the lead
+# track, ~15% on each side track, so all three research tracks show steady progress.
+# A = current scored epoch and its paper analysis, B = adaptive/embedded pairs,
+# C = implicit/stiff. Indices refer to TOPICS above; re-map when the lead track changes.
+TRACK_TOPICS: dict[str, tuple[int, ...]] = {
+    "A": (0, 1, 2, 3, 4, 8),
+    "B": (6,),
+    "C": (5, 7),
+}
+# 20-slot deterministic schedule: 14 A, 3 B, 3 C (70/15/15), evenly interleaved.
+TRACK_SCHEDULE = "AABAACAAABAACAAABAAC"
+
+
 def next_topic(n_existing: int) -> str:
-    return TOPICS[n_existing % len(TOPICS)]
+    track = TRACK_SCHEDULE[n_existing % len(TRACK_SCHEDULE)]
+    pool = TRACK_TOPICS[track]
+    used = sum(1 for i in range(n_existing)
+               if TRACK_SCHEDULE[i % len(TRACK_SCHEDULE)] == track)
+    return TOPICS[pool[used % len(pool)]]
 
 
 def digest_for_prompt(max_chars: int = 2600) -> str:

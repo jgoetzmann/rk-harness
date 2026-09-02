@@ -37,7 +37,7 @@ from rk_harness.verifier_hash import compute_verifier_hash
 from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
     render_hypotheses, render_costmodel, render_falsification, render_glossary,
-    render_literature, render_interpretation, check_banned,
+    render_literature, render_interpretation, render_validation, check_banned,
 )
 from rk_harness.dashboard import read_events, build_layout, render
 from rk_harness.tableau import make_tableau, content_hash
@@ -1267,6 +1267,7 @@ def test_B61_build_writes_glossary_and_index_deep_links_it(monkeypatch, tmp_path
 
 
 def test_B61_nav_lists_every_page_in_order():
+    # Without a validation results file, the validation tab is absent everywhere.
     html = render_costmodel()
     nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
     assert re.findall(r'href="([^"]+)"', nav) == [
@@ -1274,15 +1275,36 @@ def test_B61_nav_lists_every_page_in_order():
         "hypotheses.html", "literature.html", "interpretation.html", "glossary.html"]
 
 
-def test_B61_major_pages_carry_collapsed_explanations(monkeypatch, tmp_path):
+def test_B61_folds_kept_only_where_depth_remains(monkeypatch, tmp_path):
+    """Less-is-more: captions + glossary links replaced most "How to read this" folds.
+
+    A fold survives only where it carries multi-paragraph interpretive depth: the
+    archive-grid structure (index), the score-metric definitions (cell pages), the
+    hypothesis grammar, and the falsification protocol.
+    """
     _work, arch = _site_archive(monkeypatch, tmp_path)
+    append_hypothesis(_hyp())
+    arch = replay()
     out = tmp_path / "docs"
     build(arch, out)
-    for name in ("index.html", "costmodel.html", "falsification.html", "hypotheses.html",
-                 "literature.html", "interpretation.html", "cell-p4-s4-b2.html"):
+    keeps = {"index.html": 1, "cell-p4-s4-b2.html": 1, "hypotheses.html": 1,
+             "falsification.html": 1}
+    for name, n in keeps.items():
         html = (out / name).read_text(encoding="utf-8")
-        assert '<details class="explain">' in html, name
+        assert html.count('<details class="explain">') == n, name
         assert "How to read this" in html, name
+    for name in ("costmodel.html", "literature.html", "interpretation.html",
+                 "glossary.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert '<details class="explain">' not in html, name
+    # the load-bearing sentences moved into always-visible captions and notes
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "down-left is better" in index          # scatter fold merged into its caption
+    assert "overfitting to the visible search set" in index   # table fold became a note
+    cm = (out / "costmodel.html").read_text(encoding="utf-8")
+    assert "swaps between the multiplier models" in cm        # anchor fold merged
+    cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
+    assert "held-out set" in cell                  # per-problem fold merged into caption
 
 
 def test_B61_every_chart_opens_with_a_visible_caption(monkeypatch, tmp_path):
@@ -1420,6 +1442,164 @@ def test_B61_falsification_page_reflects_falsification_json(monkeypatch, tmp_pat
     page = (out / "falsification.html").read_text(encoding="utf-8")
     assert BANNER in page
     assert "proceed" in page
+
+
+def _validation_fixture() -> dict:
+    """A minimal but structurally faithful validation results.json."""
+    disc = "11e898cb" + "0" * 56
+    return {
+        "budget_cycles": 65536,
+        "cost_model": "m0plus_fast",
+        "rounding": "floor (ASRS), per HANDOFF 4.2",
+        "generated_from": {"archive_records": 45973, "champion_hash": disc,
+                           "verifier_hash": VH},
+        "methods": [
+            {"kind": "classical", "name_or_hash": "euler", "order": 1, "stages": 1,
+             "roles": ["anchor"], "cycles_per_step": {"buck_converter": 10},
+             "steps": {"buck_converter": 6553}},
+            {"kind": "classical", "name_or_hash": "rk38", "order": 4, "stages": 4,
+             "roles": ["anchor"], "cycles_per_step": {"buck_converter": 36},
+             "steps": {"buck_converter": 1820}},
+            {"kind": "discovered", "name_or_hash": disc, "order": 2, "stages": 3,
+             "roles": ["champion"], "cycles_per_step": {"buck_converter": 44},
+             "steps": {"buck_converter": 1489},
+             "archive": {"cycle_id": 33, "tier": "unreplicated",
+                         "heldout_error": 0.0286, "search_error": 0.0114,
+                         "verifier_hash": VH}},
+        ],
+        "problems": [
+            {"name": "buck_converter", "domain": "power electronics",
+             "family": "oscillatory", "n_states": 2, "t_end": 25.0,
+             "equation": "x1' = D - x2; x2' = x1 - x2/Qf",
+             "reference": "closed form via matrix exponential",
+             "source": "Averaged CCM buck converter model, Erickson and Maksimovic, 2001.",
+             "scale": 0.25, "deriv_scale": 1.0, "peak": 0.6018,
+             "per_state_peaks": [0.4685, 0.6018], "y0": [0.0, 0.0]},
+            {"name": "pll_lock", "domain": "communications / clocking",
+             "family": "nonlinear", "n_states": 2, "t_end": 40.0,
+             "equation": "type-2 PLL with PI filter",
+             "reference": "mpmath odefun at dps 30",
+             "source": "Second-order type-2 analog PLL.",
+             "scale": 0.25, "deriv_scale": 1.0, "peak": 1.0,
+             "per_state_peaks": [1.0, 0.5], "y0": [0.0, 0.0]},
+        ],
+        "results": [
+            {"problem": "buck_converter", "method": "euler", "steps": 6553,
+             "cycles_per_step": 10, "q15_error": 0.0254, "float_error": 7.5e-05,
+             "max_abs_q": 4743},
+            {"problem": "buck_converter", "method": "rk38", "steps": 1820,
+             "cycles_per_step": 36, "q15_error": 0.0208, "float_error": 2.1e-09,
+             "max_abs_q": 4700},
+            {"problem": "buck_converter", "method": disc, "steps": 1489,
+             "cycles_per_step": 44, "q15_error": 0.00198, "float_error": 9.7e-07,
+             "max_abs_q": 4699},
+            {"problem": "pll_lock", "method": "euler", "steps": 6553,
+             "cycles_per_step": 10, "q15_error": 0.0482, "float_error": 1.2e-05,
+             "max_abs_q": 20130},
+            {"problem": "pll_lock", "method": "rk38", "steps": 1820,
+             "cycles_per_step": 36, "q15_error": 0.0128, "float_error": 3.3e-10,
+             "max_abs_q": 20101},
+            {"problem": "pll_lock", "method": disc, "steps": 1489,
+             "cycles_per_step": 44, "q15_error": 0.0159, "float_error": 8.8e-07,
+             "max_abs_q": 20098},
+        ],
+        "verdicts": {
+            "problems_compared": 2,
+            "problems_won_by_discovered": 1,
+            "median_ratio_discovered_over_classical": 0.6678,
+            "overall": "On this suite the best discovered method has lower Q15 error than "
+                       "the best classical anchor on 1 of 2 problems.",
+            "per_problem": {
+                "buck_converter": {
+                    "winner": disc, "winner_kind": "discovered",
+                    "winner_q15_error": 0.00198, "best_classical": "rk38",
+                    "best_classical_q15_error": 0.0208, "best_discovered": disc,
+                    "best_discovered_q15_error": 0.00198,
+                    "ratio_discovered_over_classical": 0.0952},
+                "pll_lock": {
+                    "winner": "rk38", "winner_kind": "classical",
+                    "winner_q15_error": 0.0128, "best_classical": "rk38",
+                    "best_classical_q15_error": 0.0128, "best_discovered": disc,
+                    "best_discovered_q15_error": 0.0159,
+                    "ratio_discovered_over_classical": 1.2404},
+            },
+        },
+    }
+
+
+def _write_validation(work: Path, data: dict) -> None:
+    vdir = work / "validation"
+    vdir.mkdir(parents=True, exist_ok=True)
+    (vdir / "results.json").write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+
+def test_B64_validation_page_built_from_results_json(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _validation_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    page = out / "validation.html"
+    assert page.is_file()
+    html = page.read_text(encoding="utf-8")
+    assert html.lower().lstrip().startswith("<!doctype html>")
+    assert BANNER in html and "<script" not in html.lower()
+    check_banned(html)
+    # the honest verdict line, verbatim from the results file
+    assert "lower Q15 error than" in html and "1 of 2 problems" in html
+    # chart with per-method dots, plus the always-visible caption leading the figure
+    assert 'aria-label="Q15 final-state error per method' in html
+    assert "<figure><figcaption>" in html
+    # per-problem verdicts, the float-vs-Q15 comparison, and provenance as plain text
+    assert "buck_converter" in html and "pll_lock" in html
+    assert "float64 error" in html and "0.0254" in html and "7.5e-05" in html
+    assert "power electronics" in html                       # problem domain
+    assert "Erickson and Maksimovic" in html                 # problem source
+    assert "11e898cb" in html                                # discovered method label
+    assert "unreplicated" in html                            # archive provenance of champion
+    # classical hold-out stays visible: pll_lock's winner row names rk38
+    assert "rk38" in html
+
+
+def test_B64_validation_nav_entry_present_only_with_results(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    out1 = tmp_path / "docs1"
+    build(arch, out1)
+    assert not (out1 / "validation.html").exists()
+    index = (out1 / "index.html").read_text(encoding="utf-8")
+    assert 'href="validation.html"' not in index
+    _write_validation(work, _validation_fixture())
+    out2 = tmp_path / "docs2"
+    build(arch, out2)
+    assert (out2 / "validation.html").is_file()
+    for name in ("index.html", "costmodel.html", "methodology.html", "validation.html"):
+        html = (out2 / name).read_text(encoding="utf-8")
+        nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
+        assert re.findall(r'href="([^"]+)"', nav) == [
+            "index.html", "methodology.html", "costmodel.html", "falsification.html",
+            "validation.html", "hypotheses.html", "literature.html",
+            "interpretation.html", "glossary.html"], name
+    # the active tab lands on the validation page itself
+    val = (out2 / "validation.html").read_text(encoding="utf-8")
+    assert '<a href="validation.html" class="on">validation</a>' in val
+
+
+def test_B64_validation_build_is_deterministic_and_flag_resets(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _validation_fixture())
+    d1, d2 = tmp_path / "v1", tmp_path / "v2"
+    build(arch, d1)
+    build(arch, d2)
+    assert _snapshot(d1) == _snapshot(d2)
+    # the nav flag never leaks out of build(): a direct render afterwards has no tab
+    html = render_costmodel()
+    assert 'href="validation.html"' not in html
+
+
+def test_B64_render_validation_direct_is_banned_word_safe():
+    html = render_validation(_validation_fixture())
+    assert "<title>" in html.lower()
+    check_banned(html)
+    assert render_validation(_validation_fixture()) == render_validation(_validation_fixture())
 
 
 def test_B62_build_is_deterministic_and_creates_missing_out_dir(monkeypatch, tmp_path):

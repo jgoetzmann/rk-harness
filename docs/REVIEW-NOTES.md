@@ -107,3 +107,13 @@ on every findings page. The owner directed its removal for a resume-facing site;
 disclosure now lives as a one-line provenance note in each page footer, linked to the
 rk-overview human interpretation site. Model-written-text captions on the literature and
 interpretation pages remain. The banned-words guard and check_banned gate are unchanged.
+
+## Out-of-band practical validation and epoch orchestration (owner-directed, 2026-09-02)
+The scored problem suite stays frozen under the pinned verifier hash. New practical
+equations (buck converter, 2RC battery, vehicle lateral dynamics, PLL, glucose minimal
+model; sources in rk-work/validation/results.json) are evaluated OUT OF BAND by
+rk_harness/validation.py using the pinned solver machinery read-only, at the same
+65,536-cycle budget. Epoch freezes are decided by rk_harness/saturation.py (48 h without
+archive progress + falsification present, six consecutive half-hourly checks) and executed
+by the watchdog via the STOP killfile; see docs/ROADMAP.md for the epoch model and the
+70/15/15 attention rotation.

@@ -52,6 +52,7 @@ SCHEMA: dict[str, tuple] = {
     "watchdog.cpu_pause_high_percent": (50, int, (5, 100), "watchdog", "pause when non-container host CPU stays above this"),
     "watchdog.cpu_pause_low_percent":  (30, int, (0, 99), "watchdog", "unpause when host CPU stays below this"),
     "watchdog.cpu_pause_sustain_seconds": (30, int, (5, 3600), "watchdog", "how long the CPU condition must hold before pausing/unpausing"),
+    "watchdog.saturation_check_seconds": (1800, int, (0, 86400), "watchdog", "epoch-saturation orchestrator cadence in seconds, 0 disables; freeze rule in rk-harness/docs/ROADMAP.md"),
     "watcher.refresh_seconds":    (5, int, (1, 300), "watcher", "watcher window refresh interval"),
     "watcher.events_tail":        (25, int, (5, 200), "watcher", "how many recent events the watcher shows"),
 }
