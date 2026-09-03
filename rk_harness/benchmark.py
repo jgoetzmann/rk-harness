@@ -32,6 +32,14 @@ Honesty rules baked into the document:
 The analytic cycle model is checked against reality with a Pearson correlation
 between analytic cycles per step (m0plus_fast) and measured seconds per step
 across the fixed-step Q15 runs.
+
+The ``speedup`` section makes the wall-clock claim concrete as an explicit
+measured head-to-head: for every problem, the champion tableau and classical
+rk4 through the identical pinned ``solve_q15`` path (same arithmetic, only the
+tableau differs), with measured seconds per step, their ratio next to the
+cycle-model predicted ratio, seconds to complete the shared budget, the Q15
+errors cited from the fixed-step table, a geometric-mean measured speedup, and
+per-method median microseconds per step for direct charting.
 """
 from __future__ import annotations
 
@@ -341,6 +349,174 @@ def cycles_time_correlation(fixed_rows: list[dict]) -> dict:
     return out
 
 
+# ------------------------------------------------------------------- speedup
+
+
+SPEEDUP_BASELINE = "rk4"
+
+_SPEEDUP_REGIME = (
+    "Fixed-step Q15 at the shared cycle budget: the champion and rk4 both run "
+    "the identical pinned solve_q15 path with the same 16-bit floor "
+    "arithmetic and the same per-step machinery; only the tableau "
+    "coefficients differ, so the per-step wall-clock ratio isolates tableau "
+    "cost. Ratios above 1.0 mean the champion needs less time per step."
+)
+
+_SPEEDUP_CAVEAT = (
+    "This head-to-head is valid because both sides run the identical "
+    "solve_q15 path in the same interpreter: same arithmetic, same per-step "
+    "machinery, only the tableau differs, so the per-step ratio compares "
+    "like against like. Budget wall-clock totals also carry constant Python "
+    "per-step overhead, which favors methods that take fewer, larger steps "
+    "inside the budget; on the Cortex-M0+ target the analytic cycle count is "
+    "the time, and the predicted ratio column states what that model expects "
+    "of the measured ratio beside it."
+)
+
+
+def champion_hash(methods: list[dict]) -> str:
+    """The discovered method carrying the champion role (fallback: the first
+    discovered entry)."""
+    disc = [m for m in methods if m["kind"] == "discovered"]
+    for m in disc:
+        if "champion" in m.get("roles", []):
+            return m["name_or_hash"]
+    return disc[0]["name_or_hash"]
+
+
+def _geomean(vals: list[float]):
+    if not vals:
+        return None
+    return _fin(math.exp(sum(math.log(v) for v in vals) / len(vals)))
+
+
+def per_method_us_per_step(fixed_rows: list[dict]) -> dict:
+    """Absolute measured time per method: median microseconds per step across
+    the problems whose Q15 run finished, plus the per-problem values, so a
+    site can chart measured time directly."""
+    per: dict[str, dict[str, float]] = {}
+    for r in fixed_rows:
+        q = r["q15"]
+        if q.get("status") == "ok" and "per_step_median_s" in q:
+            per.setdefault(r["method"], {})[r["problem"]] = round(
+                q["per_step_median_s"] * 1e6, 3)
+    out: dict[str, dict] = {}
+    for m, vals in per.items():
+        us = sorted(vals.values())
+        out[m] = {
+            "per_problem_us_per_step": vals,
+            "median_us_per_step": _fin(statistics.median(us)),
+            "min_us_per_step": us[0],
+            "max_us_per_step": us[-1],
+            "n_problems": len(us),
+        }
+    return out
+
+
+def build_speedup(fixed_rows: list[dict], champion: str) -> dict:
+    """The measured head-to-head: champion vs classical rk4 through the same
+    solve_q15 path, per problem, with the cycle-model prediction beside the
+    measurement and the Q15 errors cited from the fixed-step table."""
+    cells = {(r["method"], r["problem"]): r for r in fixed_rows}
+    rows: list[dict] = []
+    measured: list[float] = []
+    predicted: list[float] = []
+    err_ratios: list[float] = []
+    lower = 0
+    err_pairs = 0
+    for name in PROBLEM_NAMES:
+        c = cells[(champion, name)]
+        k = cells[(SPEEDUP_BASELINE, name)]
+        row: dict = {
+            "problem": name,
+            "champion_cycles_per_step": c["cycles_per_step"],
+            "rk4_cycles_per_step": k["cycles_per_step"],
+            "predicted_ratio_rk4_over_champion":
+                k["cycles_per_step"] / c["cycles_per_step"],
+            "champion_n_steps": c["n_steps"],
+            "rk4_n_steps": k["n_steps"],
+            "champion_total_cycles": c["total_cycles"],
+            "rk4_total_cycles": k["total_cycles"],
+        }
+        cq, kq = c["q15"], k["q15"]
+        ok = cq.get("status") == "ok" and kq.get("status") == "ok"
+        row["status"] = "ok" if ok else "incomplete"
+        if not ok:
+            row["reason"] = (f"champion q15 status {cq.get('status')!r}, "
+                             f"rk4 q15 status {kq.get('status')!r}")
+        if cq.get("status") == "ok":
+            row["champion_per_step_median_s"] = cq["per_step_median_s"]
+            row["champion_us_per_step"] = round(cq["per_step_median_s"] * 1e6, 3)
+            row["champion_budget_seconds"] = cq["timing"]["median_s"]
+            row["champion_error"] = cq["error"]
+        if kq.get("status") == "ok":
+            row["rk4_per_step_median_s"] = kq["per_step_median_s"]
+            row["rk4_us_per_step"] = round(kq["per_step_median_s"] * 1e6, 3)
+            row["rk4_budget_seconds"] = kq["timing"]["median_s"]
+            row["rk4_error"] = kq["error"]
+        if ok:
+            ratio = _fin(kq["per_step_median_s"] / cq["per_step_median_s"])
+            row["measured_ratio_rk4_over_champion"] = ratio
+            if ratio is not None:
+                measured.append(ratio)
+                predicted.append(row["predicted_ratio_rk4_over_champion"])
+            row["champion_error_lower"] = cq["error"] < kq["error"]
+            err_pairs += 1
+            if row["champion_error_lower"]:
+                lower += 1
+            if kq["error"] > 0:
+                er = _fin(cq["error"] / kq["error"])
+                row["error_ratio_champion_over_rk4"] = er
+                if er is not None:
+                    err_ratios.append(er)
+        rows.append(row)
+
+    g_meas = _geomean(measured)
+    g_pred = _geomean(predicted)
+    med_er = _fin(statistics.median(err_ratios)) if err_ratios else None
+
+    if g_meas is not None:
+        prose = (
+            f"Measured head-to-head in the fixed-step Q15 regime: across "
+            f"{len(measured)} problems the geometric-mean measured per-step "
+            f"speedup of the champion over classical rk4 is {g_meas:.3f}x, "
+            f"next to a cycle-model prediction of {g_pred:.3f}x under "
+            f"{COST_MODEL.name}."
+        )
+        if err_pairs and med_er is not None:
+            acc = (
+                f" At the same {BUDGET_CYCLES}-cycle budget the champion "
+                f"reaches the lower held-out Q15 error in {lower} of "
+                f"{err_pairs} problems with a median error ratio (champion "
+                f"over rk4) of {med_er:.3g}"
+            )
+            if med_er < 1.0 and 2 * lower >= err_pairs:
+                acc += (", so the per-step time saving is not bought with "
+                        "accuracy.")
+            else:
+                acc += ("; accuracy and speed trade off here, so read the "
+                        "per-problem rows.")
+            prose += acc
+    else:
+        prose = "No comparable timed cells for a speedup table."
+
+    return {
+        "champion": champion,
+        "baseline": SPEEDUP_BASELINE,
+        "regime": _SPEEDUP_REGIME,
+        "rows": rows,
+        "n_problems_compared": len(measured),
+        "geomean_measured_speedup_rk4_over_champion": g_meas,
+        "geomean_predicted_speedup_rk4_over_champion": g_pred,
+        "champion_error_lower_count": lower,
+        "error_comparisons": err_pairs,
+        "median_error_ratio_champion_over_rk4": med_er,
+        "per_method_us_per_step": per_method_us_per_step(fixed_rows),
+        "caveat": _SPEEDUP_CAVEAT,
+        "prose": prose,
+    }
+
+
 # ------------------------------------------------------------------ verdicts
 
 
@@ -512,6 +688,17 @@ _SCHEMA_DOC: dict[str, str] = {
                    "measured seconds per step across the ok fixed-step Q15 "
                    "runs, with the point count and median seconds per analytic "
                    "cycle",
+    "speedup": "the measured head-to-head: champion vs classical rk4 through "
+               "the identical pinned solve_q15 path, one row per problem with "
+               "measured seconds and microseconds per step for both, the "
+               "measured per-step ratio beside the cycle-model predicted "
+               "ratio (rk4 over champion; above 1.0 means the champion needs "
+               "less time per step), seconds to complete the shared budget, "
+               "and the Q15 errors cited from fixed_step_results; plus the "
+               "geometric-mean measured and predicted speedups, the count of "
+               "problems where the champion error is lower, and "
+               "per_method_us_per_step (median measured microseconds per step "
+               "per method across problems) for direct charting",
     "verdicts": "per_problem best library and best Q15 entries with error "
                 "ratios, the two median ratios, and honest prose for the "
                 "matched-tolerance table, the fixed-step table, the cycle "
@@ -622,6 +809,7 @@ def build_results(validation_doc: dict | None = None,
         "adaptive_results": adaptive_rows,
         "fixed_step_results": fixed_rows,
         "correlation": corr,
+        "speedup": build_speedup(fixed_rows, champion_hash(methods)),
         "verdicts": build_verdicts(adaptive_rows, fixed_rows, corr),
         "caveats": _CAVEATS,
     }
@@ -653,7 +841,7 @@ def validate_results(doc: dict) -> None:
     for key in ("schema", "budget_cycles", "cost_model", "tolerance_rule",
                 "rounding", "generated_from", "environment", "timing_protocol",
                 "problems", "methods", "adaptive_results", "fixed_step_results",
-                "correlation", "verdicts", "caveats"):
+                "correlation", "speedup", "verdicts", "caveats"):
         if key not in doc:
             fail(f"missing top-level key {key!r}")
     if doc["budget_cycles"] != BUDGET_CYCLES:
@@ -749,13 +937,99 @@ def validate_results(doc: dict) -> None:
     if corr["pearson_r"] is not None and not -1.0 <= corr["pearson_r"] <= 1.0:
         fail("correlation pearson_r outside [-1, 1]")
 
+    sp = doc["speedup"]
+    for k in ("champion", "baseline", "regime", "rows", "n_problems_compared",
+              "geomean_measured_speedup_rk4_over_champion",
+              "geomean_predicted_speedup_rk4_over_champion",
+              "champion_error_lower_count", "error_comparisons",
+              "median_error_ratio_champion_over_rk4",
+              "per_method_us_per_step", "caveat", "prose"):
+        if k not in sp:
+            fail(f"speedup missing {k!r}")
+    if sp["baseline"] != SPEEDUP_BASELINE:
+        fail(f"speedup baseline must be {SPEEDUP_BASELINE!r}")
+    if sp["champion"] not in mnames:
+        fail(f"speedup champion {sp['champion']!r} not among methods")
+    sp_names = [r["problem"] for r in sp["rows"]]
+    if sorted(sp_names) != sorted(pnames):
+        fail(f"speedup rows must cover {sorted(pnames)}, got {sp_names}")
+    cells = {(r["method"], r["problem"]): r for r in doc["fixed_step_results"]}
+    sp_meas: list[float] = []
+    sp_pred: list[float] = []
+    lower_expect = 0
+    for row in sp["rows"]:
+        c = cells.get((sp["champion"], row["problem"]))
+        k = cells.get((SPEEDUP_BASELINE, row["problem"]))
+        if c is None or k is None:
+            fail(f"speedup row {row['problem']!r} has no matching fixed rows")
+        if (row["champion_cycles_per_step"] != c["cycles_per_step"]
+                or row["rk4_cycles_per_step"] != k["cycles_per_step"]):
+            fail(f"speedup row {row['problem']!r} cycles_per_step mismatch")
+        pred = k["cycles_per_step"] / c["cycles_per_step"]
+        if not math.isclose(row["predicted_ratio_rk4_over_champion"], pred,
+                            rel_tol=1e-12):
+            fail(f"speedup row {row['problem']!r} predicted ratio inconsistent "
+                 "with cycles_per_step")
+        for side, cell in (("champion", c["q15"]), ("rk4", k["q15"])):
+            if cell.get("status") != "ok":
+                continue
+            if row.get(f"{side}_per_step_median_s") != cell["per_step_median_s"]:
+                fail(f"speedup row {row['problem']!r} {side} per-step seconds "
+                     "do not match the fixed-step table")
+            if row.get(f"{side}_error") != cell["error"]:
+                fail(f"speedup row {row['problem']!r} {side} error does not "
+                     "match the fixed-step table")
+            if row.get(f"{side}_budget_seconds") != cell["timing"]["median_s"]:
+                fail(f"speedup row {row['problem']!r} {side} budget seconds "
+                     "do not match the fixed-step table")
+            us = row.get(f"{side}_us_per_step")
+            if us is None or abs(us - cell["per_step_median_s"] * 1e6) > 5e-4:
+                fail(f"speedup row {row['problem']!r} {side} us_per_step "
+                     "inconsistent with per-step seconds")
+        if row.get("status") == "ok":
+            expect = (k["q15"]["per_step_median_s"]
+                      / c["q15"]["per_step_median_s"])
+            got = row.get("measured_ratio_rk4_over_champion")
+            if got is None or not math.isclose(got, expect, rel_tol=1e-9):
+                fail(f"speedup row {row['problem']!r} measured ratio "
+                     "inconsistent with the timing rows")
+            sp_meas.append(got)
+            sp_pred.append(row["predicted_ratio_rk4_over_champion"])
+            if row.get("champion_error_lower"):
+                lower_expect += 1
+        elif "reason" not in row:
+            fail(f"non-ok speedup row {row['problem']!r} missing reason")
+    if sp["n_problems_compared"] != len(sp_meas):
+        fail("speedup n_problems_compared inconsistent with its rows")
+    if sp["champion_error_lower_count"] != lower_expect:
+        fail("speedup champion_error_lower_count inconsistent with its rows")
+    for key, vals in (("geomean_measured_speedup_rk4_over_champion", sp_meas),
+                      ("geomean_predicted_speedup_rk4_over_champion", sp_pred)):
+        got = sp[key]
+        if vals:
+            expect = math.exp(sum(math.log(v) for v in vals) / len(vals))
+            if got is None or not math.isclose(got, expect, rel_tol=1e-9):
+                fail(f"speedup {key} inconsistent with its rows")
+        elif got is not None:
+            fail(f"speedup {key} must be null with no compared rows")
+    for m, s in sp["per_method_us_per_step"].items():
+        if m not in mnames:
+            fail(f"per_method_us_per_step references unknown method {m!r}")
+        vals = list(s["per_problem_us_per_step"].values())
+        if not vals or s["n_problems"] != len(vals):
+            fail(f"per_method_us_per_step {m!r} n_problems inconsistent")
+        if not math.isclose(s["median_us_per_step"], statistics.median(vals),
+                            rel_tol=1e-9):
+            fail(f"per_method_us_per_step {m!r} median inconsistent")
+
     v = doc["verdicts"]
     for k in ("per_problem", "matched_tolerance", "fixed_step", "cycle_model",
               "overall"):
         if k not in v:
             fail(f"verdicts missing {k!r}")
     prose = [v["matched_tolerance"], v["fixed_step"], v["cycle_model"],
-             v["overall"], *doc["caveats"]]
+             v["overall"], sp["regime"], sp["caveat"], sp["prose"],
+             *doc["caveats"]]
     for text in prose:
         low = str(text).lower()
         for w in _BANNED:
@@ -795,6 +1069,24 @@ def main() -> None:
           f"{v['median_ratio_q15_over_float_rk4_at_matched_steps']}")
     print(f"cycles vs time pearson r: {doc['correlation']['pearson_r']} "
           f"over {doc['correlation']['n_points']} runs")
+    sp = doc["speedup"]
+    print(f"speedup {sp['champion'][:12]} vs rk4 (per step, geomean over "
+          f"{sp['n_problems_compared']} problems): measured "
+          f"{sp['geomean_measured_speedup_rk4_over_champion']} predicted "
+          f"{sp['geomean_predicted_speedup_rk4_over_champion']}; champion "
+          f"error lower in {sp['champion_error_lower_count']} of "
+          f"{sp['error_comparisons']}, median error ratio "
+          f"{sp['median_error_ratio_champion_over_rk4']}")
+    pm = sp["per_method_us_per_step"]
+    for mname in (sp["champion"], sp["baseline"]):
+        if mname in pm:
+            print(f"  {mname[:12]}: median {pm[mname]['median_us_per_step']} "
+                  f"us/step over {pm[mname]['n_problems']} problems")
+    for row in sp["rows"]:
+        print(f"  {row['problem']}: champ {row.get('champion_us_per_step')} "
+              f"us/step vs rk4 {row.get('rk4_us_per_step')} us/step, measured "
+              f"{row.get('measured_ratio_rk4_over_champion')} predicted "
+              f"{row['predicted_ratio_rk4_over_champion']:.3f}")
     for name, entry in v["per_problem"].items():
         print(f"  {name}: best library {entry.get('best_library')} "
               f"err {entry.get('best_library_error')}, best q15 "

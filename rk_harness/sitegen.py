@@ -244,20 +244,24 @@ _NAV_ITEMS = (
     ("costmodel.html", "cost model"),
     ("falsification.html", "falsification"),
     ("validation.html", "validation"),
+    ("benchmark.html", "benchmark"),
     ("hypotheses.html", "hypotheses"),
     ("literature.html", "literature"),
     ("interpretation.html", "interpretation"),
     ("glossary.html", "glossary"),
 )
 
-# validation.html exists only when work_dir()/validation/results.json does; build()
-# raises this flag (and restores it) so every page's nav matches the pages written.
+# validation.html exists only when work_dir()/validation/results.json does, and
+# benchmark.html only when work_dir()/benchmark/results.json does; build() raises
+# these flags (and restores them) so every page's nav matches the pages written.
 _HAS_VALIDATION = False
+_HAS_BENCHMARK = False
 
 
 def _nav(active: str) -> str:
     items = [(href, label) for href, label in _NAV_ITEMS
-             if href != "validation.html" or _HAS_VALIDATION]
+             if (href != "validation.html" or _HAS_VALIDATION)
+             and (href != "benchmark.html" or _HAS_BENCHMARK)]
     links = "".join(
         f'<a href="{href}"{" class=" + chr(34) + "on" + chr(34) if href == active else ""}>{_esc(label)}</a>'
         for href, label in items)
@@ -309,6 +313,19 @@ def _pow_label(v: float) -> str:
     return f"1e{e}" if abs(10 ** e - v) / v < 1e-6 else f"{v:g}"
 
 
+def _tick_stride(n_ticks: int, span_px: float, needed_px: float) -> int:
+    """Label every k-th tick so labeled neighbors sit at least needed_px apart.
+
+    Chart-fit rule: an 11px tick label needs its pitch to clear the label's own
+    footprint plus a 4px gutter, otherwise adjacent labels collide (the audit
+    flags any pair closer than 4px). Gridlines are unaffected; only labels thin.
+    """
+    if n_ticks < 2 or span_px <= 0:
+        return 1
+    pitch = span_px / (n_ticks - 1)
+    return max(1, math.ceil(needed_px / pitch))
+
+
 class _LogLog:
     """A log-log plot area with recessive grid + axes."""
 
@@ -329,17 +346,30 @@ class _LogLog:
         return self.h - self.mb - (math.log10(v) - math.log10(self.ylo)) / span * (self.h - self.mt - self.mb)
 
     def frame(self) -> None:
-        for tv in _log_ticks(self.xlo, self.xhi):
+        xticks = _log_ticks(self.xlo, self.xhi)
+        yticks = _log_ticks(self.ylo, self.yhi)
+        # Chart-fit audit fixes. Labels thin to every k-th decade when the pitch is
+        # too tight (gridlines keep every decade); the bottom y label nudges up to
+        # clear the x tick row in the axis corner; the x-axis title sits 2px lower
+        # so its box clears the tick labels by the 4px minimum.
+        xw = max((len(_pow_label(t)) for t in xticks), default=1) * 7.0 + 4.0
+        xk = _tick_stride(len(xticks), self.w - self.ml - self.mr, xw)
+        # 21px keeps labeled y neighbors 4px clear even of the nudged bottom label.
+        yk = _tick_stride(len(yticks), self.h - self.mt - self.mb, 21.0)
+        for i, tv in enumerate(xticks):
             px = self.x(tv)
             self.parts.append(f'<line class="gridline" x1="{_fmt(px)}" y1="{self.mt}" x2="{_fmt(px)}" y2="{self.h - self.mb}"/>')
-            self.parts.append(f'<text x="{_fmt(px)}" y="{self.h - self.mb + 14}" text-anchor="middle">{_pow_label(tv)}</text>')
-        for tv in _log_ticks(self.ylo, self.yhi):
+            if i % xk == 0:
+                self.parts.append(f'<text x="{_fmt(px)}" y="{self.h - self.mb + 14}" text-anchor="middle">{_pow_label(tv)}</text>')
+        for i, tv in enumerate(yticks):
             py = self.y(tv)
             self.parts.append(f'<line class="gridline" x1="{self.ml}" y1="{_fmt(py)}" x2="{self.w - self.mr}" y2="{_fmt(py)}"/>')
-            self.parts.append(f'<text x="{self.ml - 6}" y="{_fmt(py + 3.5)}" text-anchor="end">{_pow_label(tv)}</text>')
+            if i % yk == 0:
+                ly = min(py + 3.5, self.h - self.mb - 2.0)
+                self.parts.append(f'<text x="{self.ml - 6}" y="{_fmt(ly)}" text-anchor="end">{_pow_label(tv)}</text>')
         self.parts.append(f'<line class="axis" x1="{self.ml}" y1="{self.h - self.mb}" x2="{self.w - self.mr}" y2="{self.h - self.mb}"/>')
         self.parts.append(f'<line class="axis" x1="{self.ml}" y1="{self.mt}" x2="{self.ml}" y2="{self.h - self.mb}"/>')
-        self.parts.append(f'<text x="{_fmt((self.ml + self.w - self.mr) / 2)}" y="{self.h - 6}" text-anchor="middle">{_esc(self.xlabel)}</text>')
+        self.parts.append(f'<text x="{_fmt((self.ml + self.w - self.mr) / 2)}" y="{self.h - 4}" text-anchor="middle">{_esc(self.xlabel)}</text>')
         self.parts.append(f'<text x="12" y="{_fmt((self.mt + self.h - self.mb) / 2)}" text-anchor="middle" '
                           f'transform="rotate(-90 12 {_fmt((self.mt + self.h - self.mb) / 2)})">{_esc(self.ylabel)}</text>')
 
@@ -785,7 +815,7 @@ def _epoch_panel(data: dict | None = None) -> str:
 # pages
 # ----------------------------------------------------------------------------
 
-def render_index(arch: ArchiveState) -> str:
+def render_index(arch: ArchiveState, benchmark: dict | None = None) -> str:
     parts = [
         '<p class="lead">This page summarizes the archive of an automated search for explicit '
         "Runge-Kutta methods that hold up in " + _gloss("q15", "Q15") + " fixed-point arithmetic "
@@ -798,6 +828,9 @@ def render_index(arch: ArchiveState) -> str:
     parts.append(_stat_cards(arch))
     parts.append('<p class="note">Fitness is heldout_error under m0plus_fast at equal cycle budget; '
                  "lower is better and nothing more is claimed. Cells are (stages, cycle bucket).</p>")
+    speed = _speed_sentence(benchmark)
+    if speed:
+        parts.append(f"<p>{speed}</p>")
     parts.append("<h2>Cost against held-out error</h2>")
     parts.append('<div class="panel">' + _elite_scatter(arch) + "</div>")
     parts.append("<h2>Elite grids</h2>")
@@ -1520,7 +1553,7 @@ def _best_table(names: list[str], per: dict, stiff_cols: bool) -> list[str]:
     return parts
 
 
-def render_validation(data: dict) -> str:
+def render_validation(data: dict, benchmark: dict | None = None) -> str:
     verdicts = data.get("verdicts") or {}
     per = verdicts.get("per_problem") or {}
     problems = data.get("problems") or []
@@ -1594,6 +1627,9 @@ def render_validation(data: dict) -> str:
     overall = verdicts.get("overall")
     if overall:
         parts.append(f"<p>{_esc(overall)}</p>")
+    speed = _speed_sentence(benchmark)
+    if speed:
+        parts.append(f"<p>{speed}</p>")
     if has_stiff:
         parts.append("<h2>Q15 error per problem: practical (non-stiff)</h2>")
         chart = _validation_chart(_filter_validation(data, set(practical_names)))
@@ -1711,6 +1747,324 @@ def render_validation(data: dict) -> str:
 
 
 # ----------------------------------------------------------------------------
+# benchmark page (rendered only when work_dir()/benchmark/results.json exists)
+# ----------------------------------------------------------------------------
+
+def _nice_step(raw: float) -> float:
+    """The smallest of 1, 2, 2.5, 5, 10 times a power of ten at or above raw."""
+    mag = 10 ** math.floor(math.log10(raw))
+    for m in (1.0, 2.0, 2.5, 5.0):
+        if raw <= m * mag:
+            return m * mag
+    return 10.0 * mag
+
+
+def _bench_us_chart(sp: dict, methods: list) -> str:
+    """Measured microseconds per Q15 step, one row per method: median bar plus
+    one dot per problem, on a linear axis."""
+    per = sp.get("per_method_us_per_step")
+    if not isinstance(per, dict):
+        return ""
+    kind_of = {str(m.get("name_or_hash")): str(m.get("kind", "")) for m in methods}
+    order = [str(m.get("name_or_hash")) for m in methods
+             if str(m.get("name_or_hash")) in per]
+    order += sorted(k for k in per if k not in set(order))
+    rows = []
+    for name in order:
+        d = per.get(name)
+        if isinstance(d, dict) and _finite_pos(d.get("median_us_per_step")):
+            rows.append((name, d))
+    if not rows:
+        return ""
+    hi = 0.0
+    for _name, d in rows:
+        hi = max(hi, float(d["median_us_per_step"]))
+        for v in (d.get("per_problem_us_per_step") or {}).values():
+            if _finite_pos(v):
+                hi = max(hi, float(v))
+    step = _nice_step(hi / 5.0)
+    top = step * math.ceil(hi / step)
+    row_h, ml, w = 30, 118, 640
+    h = 14 + row_h * len(rows) + 30
+    px_per_us = (w - ml - 16) / top
+
+    def fx(v: float) -> float:
+        return ml + v * px_per_us
+
+    parts = []
+    tv = 0.0
+    while tv <= top * 1.0001:
+        px = fx(tv)
+        parts.append(f'<line class="gridline" x1="{_fmt(px)}" y1="10" x2="{_fmt(px)}" y2="{h - 26}"/>')
+        parts.append(f'<text x="{_fmt(px)}" y="{h - 12}" text-anchor="middle">{tv:g}</text>')
+        tv += step
+    for i, (name, d) in enumerate(rows):
+        y = 12 + row_h * i
+        kind = kind_of.get(name, "")
+        sw = "var(--s1)" if kind == "discovered" else "var(--s2)"
+        label = _vlabel(name, kind)
+        med = float(d["median_us_per_step"])
+        bw = med * px_per_us
+        parts.append(f'<text x="{ml - 8}" y="{_fmt(y + 15)}" text-anchor="end">{_esc(label)}</text>')
+        title = (f"{label} ({kind}): median {_num(med)} us per Q15 step over "
+                 f"{_num(d.get('n_problems'))} problems; min {_num(d.get('min_us_per_step'))}, "
+                 f"max {_num(d.get('max_us_per_step'))}")
+        parts.append(f'<rect x="{ml}" y="{y}" width="{_fmt(max(bw, 2))}" height="20" rx="4" '
+                     f'fill="{sw}" class="cellstroke"><title>{_esc(title)}</title></rect>')
+        for prob in sorted((d.get("per_problem_us_per_step") or {}).keys()):
+            v = d["per_problem_us_per_step"][prob]
+            if _finite_pos(v):
+                parts.append(f'<circle cx="{_fmt(fx(float(v)))}" cy="{_fmt(y + 10)}" r="3.5" '
+                             f'fill="{sw}" class="cellstroke">'
+                             f'<title>{_esc(f"{label} / {prob}: {_num(v)} us per step")}</title></circle>')
+        vtxt = _num(med)
+        if bw > len(vtxt) * _LBL_CHAR_W + 12:
+            parts.append(f'<text class="lbl" x="{_fmt(ml + bw - 6)}" y="{_fmt(y + 15)}" '
+                         f'text-anchor="end">{vtxt}</text>')
+        else:
+            parts.append(f'<text class="lbl" x="{_fmt(ml + bw + 6)}" y="{_fmt(y + 15)}">{vtxt}</text>')
+    svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
+           'aria-label="Measured microseconds per Q15 step, per method">'
+           + "".join(parts) + "</svg>")
+    return ('<figure><figcaption>Measured wall clock per Q15 step for each method, linear '
+            "axis in microseconds. The bar length and printed value are the median across "
+            "the benchmark problems; each dot is one problem. Every method runs the same "
+            "pinned solve_q15 path, so row differences isolate tableau cost. Blue is a "
+            "discovered method, orange a classical anchor; hover any mark for exact "
+            "values.</figcaption>"
+            + _legend([("var(--s1)", "discovered (archive)"), ("var(--s2)", "classical anchor")])
+            + svg + "</figure>")
+
+
+def _speed_sentence(bench) -> str:
+    """One measured-speed sentence for verdict spots, traced to the speedup section.
+
+    Returns an empty string when the benchmark file (or any cited field) is absent,
+    so no page states a wall-clock figure it cannot trace to results.json.
+    """
+    if not isinstance(bench, dict):
+        return ""
+    sp = bench.get("speedup")
+    if not isinstance(sp, dict):
+        return ""
+    champ = str(sp.get("champion") or "")
+    base = str(sp.get("baseline") or "")
+    per = sp.get("per_method_us_per_step")
+    if not champ or not base or not isinstance(per, dict):
+        return ""
+    cm = per.get(champ, {}).get("median_us_per_step") if isinstance(per.get(champ), dict) else None
+    bm = per.get(base, {}).get("median_us_per_step") if isinstance(per.get(base), dict) else None
+    gm = sp.get("geomean_measured_speedup_rk4_over_champion")
+    if not (_finite_pos(cm) and _finite_pos(bm) and _finite_pos(gm)):
+        return ""
+    return ("Measured wall clock agrees with the cycle model: in the benchmark head-to-head "
+            f"the champion tableau ({_esc(champ[:8])}) runs in {_num(cm)} us per Q15 step "
+            f"against {_num(bm)} us for {_esc(base)} (medians across "
+            f"{_num(sp.get('n_problems_compared'))} problems, geometric-mean per-step "
+            f'speedup {float(gm):.3f}x); details on the <a href="benchmark.html">benchmark '
+            "page</a>.")
+
+
+def render_benchmark(data: dict) -> str:
+    sp = data.get("speedup") if isinstance(data.get("speedup"), dict) else {}
+    methods = data.get("methods") or []
+    verdicts = data.get("verdicts") if isinstance(data.get("verdicts"), dict) else {}
+    corr = data.get("correlation") if isinstance(data.get("correlation"), dict) else {}
+    env = data.get("environment") if isinstance(data.get("environment"), dict) else {}
+    caveats = [str(c) for c in (data.get("caveats") or [])]
+    kind_of = {str(m.get("name_or_hash")): str(m.get("kind", "")) for m in methods}
+    champ = str(sp.get("champion") or "")
+    base = str(sp.get("baseline") or "")
+    parts = [
+        '<p class="lead">This page reports the library benchmark: measured wall-clock '
+        "timings of the benchmark methods on a desktop Python environment, next to the "
+        "analytic cycle model the rest of this site ranks by. The fixed-step rows run the "
+        "identical pinned Q15 path at the shared "
+        + _gloss("cycle-budget", "cycle budget") + f" of {_num(data.get('budget_cycles'))} "
+        "cycles; the scipy adaptive integrators are accuracy context in a different regime. "
+        "Accuracy numbers are deterministic; timing numbers are measured on one machine and "
+        "vary run to run.</p>"
+    ]
+    # headline cards, all cited from the speedup and correlation sections
+    cards: list[tuple[str, str, str]] = []
+    gm_m = sp.get("geomean_measured_speedup_rk4_over_champion")
+    gm_p = sp.get("geomean_predicted_speedup_rk4_over_champion")
+    if _finite_pos(gm_m):
+        cards.append(("measured speedup", f"{float(gm_m):.3f}x",
+                      f"geometric mean, {base or 'baseline'} over champion, per step"))
+    if _finite_pos(gm_p):
+        cards.append(("predicted speedup", f"{float(gm_p):.3f}x",
+                      f"cycle-model quotient under {data.get('cost_model')}"))
+    per = sp.get("per_method_us_per_step")
+    if isinstance(per, dict):
+        for name, head in ((champ, "champion"), (base, str(base))):
+            d = per.get(name)
+            if isinstance(d, dict) and _finite_pos(d.get("median_us_per_step")):
+                cards.append((head, f"{_num(d['median_us_per_step'])} us/step",
+                              "median across problems, measured"))
+    if _finite_pos(corr.get("pearson_r")):
+        cards.append(("cycles against time", f"r = {float(corr['pearson_r']):.3f}",
+                      f"Pearson r over {_num(corr.get('n_points'))} fixed-step Q15 runs"))
+    if cards:
+        parts.append('<div class="cards">' + "".join(
+            f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
+            f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>")
+
+    chart = _bench_us_chart(sp, methods)
+    if chart:
+        parts.append("<h2>Measured time per step</h2>")
+        parts.append('<div class="panel">' + chart + "</div>")
+        parts.append('<div class="scroll"><table><tr><th>method</th><th>kind</th>'
+                     '<th class="num">order</th><th class="num">stages</th>'
+                     '<th class="num">min us/step</th><th class="num">median us/step</th>'
+                     '<th class="num">max us/step</th></tr>')
+        pm = sp.get("per_method_us_per_step") or {}
+        for m in methods:
+            name = str(m.get("name_or_hash"))
+            d = pm.get(name)
+            if not isinstance(d, dict):
+                continue
+            parts.append(
+                "<tr>"
+                f'<td class="hash">{_esc(_vlabel(name, str(m.get("kind", ""))))}</td>'
+                f"<td>{_esc(str(m.get('kind', '')))}</td>"
+                f'<td class="num">{_num(m.get("order"))}</td>'
+                f'<td class="num">{_num(m.get("stages"))}</td>'
+                f'<td class="num">{_num(d.get("min_us_per_step"))}</td>'
+                f'<td class="num">{_num(d.get("median_us_per_step"))}</td>'
+                f'<td class="num">{_num(d.get("max_us_per_step"))}</td>'
+                "</tr>")
+        parts.append("</table></div>")
+
+    rows = [r for r in (sp.get("rows") or []) if isinstance(r, dict)]
+    if rows:
+        champ_label = _vlabel(champ, kind_of.get(champ, "discovered")) if champ else "champion"
+        parts.append(f"<h2>Champion against {_esc(base or 'the baseline')}: predicted and measured</h2>")
+        if sp.get("regime"):
+            parts.append(f"<p>{_esc(str(sp.get('regime')))}</p>")
+        parts.append('<div class="scroll"><table><tr><th>problem</th>'
+                     '<th class="num">champion cycles/step</th><th class="num">rk4 cycles/step</th>'
+                     '<th class="num">predicted ratio</th><th class="num">measured ratio</th>'
+                     '<th class="num">champion us/step</th><th class="num">rk4 us/step</th>'
+                     '<th class="num">champion Q15 error</th><th class="num">rk4 Q15 error</th>'
+                     '<th>lower error</th>'
+                     '<th class="num">champion budget s</th><th class="num">rk4 budget s</th></tr>')
+        def _ratio(v) -> str:
+            return f"{float(v):.3f}" if isinstance(v, (int, float)) else "n/a"
+
+        def _secs(v) -> str:
+            return f"{float(v):.3g}" if isinstance(v, (int, float)) else "n/a"
+
+        for r in rows:
+            lower = champ_label if r.get("champion_error_lower") else (base or "baseline")
+            parts.append(
+                "<tr>"
+                f"<td>{_esc(str(r.get('problem')))}</td>"
+                f'<td class="num">{_num(r.get("champion_cycles_per_step"))}</td>'
+                f'<td class="num">{_num(r.get("rk4_cycles_per_step"))}</td>'
+                f'<td class="num">{_ratio(r.get("predicted_ratio_rk4_over_champion"))}</td>'
+                f'<td class="num">{_ratio(r.get("measured_ratio_rk4_over_champion"))}</td>'
+                f'<td class="num">{_num(r.get("champion_us_per_step"))}</td>'
+                f'<td class="num">{_num(r.get("rk4_us_per_step"))}</td>'
+                f'<td class="num">{_num(r.get("champion_error"))}</td>'
+                f'<td class="num">{_num(r.get("rk4_error"))}</td>'
+                f"<td>{_esc(lower)}</td>"
+                f'<td class="num">{_secs(r.get("champion_budget_seconds"))}</td>'
+                f'<td class="num">{_secs(r.get("rk4_budget_seconds"))}</td>'
+                "</tr>")
+        parts.append("</table></div>")
+        summary_bits = []
+        if _finite_pos(gm_m) and _finite_pos(gm_p):
+            summary_bits.append(
+                f"Geometric mean over the rows: measured {float(gm_m):.3f}, predicted "
+                f"{float(gm_p):.3f}; ratios above 1.0 mean the champion needs less time per step.")
+        if isinstance(sp.get("champion_error_lower_count"), int):
+            summary_bits.append(
+                f"At the same budget the champion reaches the lower Q15 error in "
+                f"{_num(sp.get('champion_error_lower_count'))} of "
+                f"{_num(sp.get('error_comparisons'))} problems; the median error ratio "
+                f"(champion over {base or 'baseline'}) is "
+                f"{_num(sp.get('median_error_ratio_champion_over_rk4'))}.")
+        if summary_bits:
+            parts.append("<p>" + " ".join(summary_bits) + "</p>")
+        if verdicts.get("cycle_model"):
+            parts.append(f"<p>{_esc(str(verdicts.get('cycle_model')))}</p>")
+        if sp.get("caveat"):
+            parts.append(f'<p class="note">{_esc(str(sp.get("caveat")))}</p>')
+
+    adaptive = [r for r in (data.get("adaptive_results") or []) if isinstance(r, dict)]
+    if adaptive:
+        parts.append("<h2>Library accuracy at matched tolerance (adaptive regime)</h2>")
+        prob_order = {str(p.get("name")): i for i, p in enumerate(data.get("problems") or [])}
+        never_same_work = next(
+            (c for c in caveats if "same-work" in c),
+            "Adaptive integrators choose their own step counts; their wall clock is "
+            "reported for context and is never a same-work comparison with any "
+            "fixed-step run.")
+        table = ['<div class="scroll"><table><tr><th>problem</th><th>integrator</th>'
+                 '<th class="num">error</th><th class="num">rtol</th><th class="num">atol</th>'
+                 '<th class="num">accepted steps</th><th class="num">rhs evaluations</th>'
+                 '<th class="num">median s per solve</th><th>status</th></tr>']
+        for r in sorted(adaptive, key=lambda r: (prob_order.get(str(r.get("problem")), 99),
+                                                 str(r.get("problem")), str(r.get("integrator")))):
+            timing = r.get("timing") if isinstance(r.get("timing"), dict) else {}
+            table.append(
+                "<tr>"
+                f"<td>{_esc(str(r.get('problem')))}</td>"
+                f"<td>{_esc(str(r.get('integrator')))}</td>"
+                f'<td class="num">{_num(r.get("error"))}</td>'
+                f'<td class="num">{_num(r.get("rtol"))}</td>'
+                f'<td class="num">{_num(r.get("atol"))}</td>'
+                f'<td class="num">{_num(r.get("n_steps_accepted"))}</td>'
+                f'<td class="num">{_num(r.get("nfev"))}</td>'
+                f'<td class="num">{_num(timing.get("median_s"))}</td>'
+                f"<td>{_esc(str(r.get('status')))}</td>"
+                "</tr>")
+        table.append("</table></div>")
+        parts.append("<figure><figcaption>" + _esc(never_same_work) + "</figcaption>"
+                     + "\n".join(table) + "</figure>")
+        if data.get("tolerance_rule"):
+            parts.append(f'<p class="note">{_esc(str(data.get("tolerance_rule")))}</p>')
+        if verdicts.get("matched_tolerance"):
+            parts.append(f"<p>{_esc(str(verdicts.get('matched_tolerance')))}</p>")
+
+    if verdicts.get("overall"):
+        parts.append("<h2>Verdict</h2>")
+        parts.append(f"<p>{_esc(str(verdicts.get('overall')))}</p>")
+
+    env_bits = []
+    if env.get("implementation") or env.get("python"):
+        env_bits.append(f"{env.get('implementation', 'Python')} {env.get('python', '')}".strip())
+    if env.get("os"):
+        env_bits.append(f"{env.get('os')} ({env.get('machine', '')})".replace(" ()", ""))
+    for lib in ("scipy", "numpy"):
+        if env.get(lib):
+            env_bits.append(f"{lib} {env.get(lib)}")
+    if env.get("cpu"):
+        env_bits.append(f"CPU {env.get('cpu')}")
+    if env_bits:
+        parts.append('<p class="note">Environment: ' + _esc("; ".join(env_bits)) + ".</p>")
+    if env.get("timing_caveat"):
+        parts.append(f'<p class="note">{_esc(str(env.get("timing_caveat")))}</p>')
+
+    gen = data.get("generated_from")
+    if isinstance(gen, dict):
+        parts.append("<h2>Provenance</h2>")
+        rows_out = []
+        for k in sorted(gen.keys(), key=str):
+            v = gen[k]
+            if isinstance(v, list):
+                shown = ", ".join(str(x) for x in v)
+            else:
+                shown = str(v)
+            rows_out.append(f'<dt>{_esc(str(k))}</dt><dd><span class="hash">{_esc(shown)}</span></dd>')
+        parts.append('<dl class="meta">\n' + "\n".join(rows_out) + "\n</dl>")
+    return _page("library benchmark", "\n".join(parts), active="benchmark.html",
+                 subtitle="Measured wall clock next to the analytic cycle model, on one "
+                          "desktop machine.")
+
+
+# ----------------------------------------------------------------------------
 # banned words + build
 # ----------------------------------------------------------------------------
 
@@ -1751,14 +2105,28 @@ def _load_validation() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _load_benchmark() -> dict | None:
+    path = work_dir() / "benchmark" / "results.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def build(arch: ArchiveState, out_dir: Path) -> None:
-    global _HAS_VALIDATION
+    global _HAS_VALIDATION, _HAS_BENCHMARK
     out_dir = Path(out_dir)
     validation = _load_validation()
+    benchmark = _load_benchmark()
     _HAS_VALIDATION = validation is not None
+    _HAS_BENCHMARK = benchmark is not None
     try:
         pages: dict[str, str] = {}
-        pages["index.html"] = render_index(arch)
+        pages["index.html"] = render_index(arch, benchmark=benchmark)
         for order in sorted(arch.grids.keys()):
             grid = arch.grids[order]
             for (stg, bucket) in sorted(grid.keys()):
@@ -1770,7 +2138,9 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
         pages["costmodel.html"] = render_costmodel()
         pages["falsification.html"] = render_falsification(_load_falsification())
         if validation is not None:
-            pages["validation.html"] = render_validation(validation)
+            pages["validation.html"] = render_validation(validation, benchmark=benchmark)
+        if benchmark is not None:
+            pages["benchmark.html"] = render_benchmark(benchmark)
         pages["glossary.html"] = render_glossary()
         try:
             from rk_harness import methodology
@@ -1786,3 +2156,4 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
                 fh.write(pages[name].encode("utf-8"))
     finally:
         _HAS_VALIDATION = False
+        _HAS_BENCHMARK = False

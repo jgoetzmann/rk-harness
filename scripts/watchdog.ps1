@@ -15,6 +15,7 @@ param(
     [int]$CpuSustainSeconds = 30,   # ... for this long
     [int]$SaturationCheckSeconds = 1800,  # epoch-saturation orchestrator cadence (0 = off)
     [switch]$NoSaturation,
+    [switch]$AutoFreeze,   # without this, saturation checks are advisory: log only, never freeze
     [switch]$NoBatteryGuard,
     [switch]$Once
 )
@@ -118,10 +119,12 @@ while ($true) {
         $satRaw = & $VenvPython -m rk_harness.saturation --check 2>$null
         $sat = $null
         try { $sat = $satRaw | ConvertFrom-Json } catch {}
-        if ($sat -and $sat.action -eq "freeze") {
+        if ($sat -and $sat.action -eq "freeze" -and $AutoFreeze) {
             Write-Host "$(Get-Date -Format s) SATURATION freeze threshold met ($($sat.consecutive)/$($sat.consecutive_needed) checks, last progress $($sat.hours_since_progress)h ago); dropping STOP for a graceful epoch freeze"
             Set-Content -Path (Join-Path $Work "STOP") -Value "stop" -Encoding ascii
             $freezePending = $true
+        } elseif ($sat -and $sat.action -eq "freeze") {
+            Write-Host "$(Get-Date -Format s) saturation ADVISORY: freeze threshold met ($($sat.consecutive) checks) but auto-freeze is off (owner ruling 2026-09-03); run continues"
         } elseif ($sat -and $sat.verdict -ne "FROZEN") {
             Write-Host "$(Get-Date -Format s) saturation: $($sat.verdict) (progress $($sat.hours_since_progress)h ago, checks $($sat.consecutive)/$($sat.consecutive_needed))"
         }

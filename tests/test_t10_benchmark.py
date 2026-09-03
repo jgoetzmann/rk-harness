@@ -254,8 +254,10 @@ def test_verdicts_avoid_banned_words_and_em_dashes(doc):
         r"(?<![a-z0-9-])(novel|first|beats|outperforms|breakthrough|proves|"
         r"state-of-the-art|best-ever)(?![a-z0-9-])")
     v = doc["verdicts"]
+    sp = doc["speedup"]
     prose = [v["matched_tolerance"], v["fixed_step"], v["cycle_model"],
-             v["overall"], *doc["caveats"], *doc["schema"].values(),
+             v["overall"], sp["regime"], sp["caveat"], sp["prose"],
+             *doc["caveats"], *doc["schema"].values(),
              doc["tolerance_rule"]]
     for text in prose:
         assert not banned.search(str(text).lower()), text
@@ -270,6 +272,128 @@ def test_environment_recorded(doc):
         assert k in env
     assert env["python"].count(".") == 2
     assert isinstance(env["timing_caveat"], str) and env["timing_caveat"]
+
+
+# ------------------------------------------------------------------ speedup
+
+
+@pytest.mark.slow
+def test_speedup_section_present(doc):
+    """The measured head-to-head exists: champion vs rk4, one row per frozen
+    problem, per-step seconds and microseconds for both sides, budget wall
+    clock, cited errors, and per-method absolute timing summaries."""
+    sp = doc["speedup"]
+    assert sp["baseline"] == "rk4"
+    methods = {m["name_or_hash"]: m for m in doc["methods"]}
+    champ = methods[sp["champion"]]
+    assert champ["kind"] == "discovered"
+    assert "champion" in champ["roles"]
+    assert [r["problem"] for r in sp["rows"]] == list(B.PROBLEM_NAMES)
+    for r in sp["rows"]:
+        assert r["champion_cycles_per_step"] < r["rk4_cycles_per_step"]
+        assert r["champion_n_steps"] > r["rk4_n_steps"]
+        if r["status"] == "ok":
+            for k in ("champion_per_step_median_s", "rk4_per_step_median_s",
+                      "champion_us_per_step", "rk4_us_per_step",
+                      "champion_budget_seconds", "rk4_budget_seconds",
+                      "measured_ratio_rk4_over_champion",
+                      "champion_error", "rk4_error", "champion_error_lower"):
+                assert k in r, (r["problem"], k)
+    # the like-vs-like caveat names the shared solve path
+    assert "solve_q15" in sp["caveat"] and "solve_q15" in sp["regime"]
+    pm = sp["per_method_us_per_step"]
+    assert sp["champion"] in pm and "rk4" in pm
+    for s in pm.values():
+        assert s["median_us_per_step"] > 0
+        assert s["n_problems"] == len(s["per_problem_us_per_step"])
+        assert s["min_us_per_step"] <= s["median_us_per_step"] <= s["max_us_per_step"]
+
+
+@pytest.mark.slow
+def test_speedup_rows_consistent_with_timing_rows(doc):
+    """Every speedup number traces to the fixed-step table: per-step seconds,
+    budget seconds and errors are cited bit for bit, the measured ratio is the
+    quotient of the two per-step medians, and the microsecond renderings are
+    the seconds scaled by 1e6."""
+    sp = doc["speedup"]
+    cells = {(r["method"], r["problem"]): r for r in doc["fixed_step_results"]}
+    checked = 0
+    for row in sp["rows"]:
+        if row["status"] != "ok":
+            assert "reason" in row
+            continue
+        c = cells[(sp["champion"], row["problem"])]["q15"]
+        k = cells[("rk4", row["problem"])]["q15"]
+        assert row["champion_per_step_median_s"] == c["per_step_median_s"]
+        assert row["rk4_per_step_median_s"] == k["per_step_median_s"]
+        assert row["champion_budget_seconds"] == c["timing"]["median_s"]
+        assert row["rk4_budget_seconds"] == k["timing"]["median_s"]
+        assert row["champion_error"] == c["error"]
+        assert row["rk4_error"] == k["error"]
+        assert row["champion_error_lower"] == (c["error"] < k["error"])
+        assert math.isclose(row["measured_ratio_rk4_over_champion"],
+                            k["per_step_median_s"] / c["per_step_median_s"],
+                            rel_tol=1e-9)
+        assert math.isclose(row["champion_us_per_step"],
+                            c["per_step_median_s"] * 1e6, abs_tol=5e-4)
+        assert math.isclose(row["rk4_us_per_step"],
+                            k["per_step_median_s"] * 1e6, abs_tol=5e-4)
+        checked += 1
+    assert checked >= 1
+
+
+@pytest.mark.slow
+def test_speedup_predicted_ratio_matches_costmodel(doc):
+    """The predicted column is exactly the m0plus_fast cycle-count quotient of
+    the two tableaus, recomputed here from the cost model itself."""
+    from rk_harness.costmodel import M0PLUS_FAST, cycle_count
+    sp = doc["speedup"]
+    methods = {m["name_or_hash"]: m for m in doc["methods"]}
+    champ_t = make_tableau(**methods[sp["champion"]]["tableau"])
+    rk4_t = make_tableau(**methods["rk4"]["tableau"])
+    for row in sp["rows"]:
+        p = PROBLEMS[row["problem"]]
+        cc = cycle_count(champ_t, M0PLUS_FAST, p.n_states)
+        kc = cycle_count(rk4_t, M0PLUS_FAST, p.n_states)
+        assert row["champion_cycles_per_step"] == cc
+        assert row["rk4_cycles_per_step"] == kc
+        assert math.isclose(row["predicted_ratio_rk4_over_champion"], kc / cc,
+                            rel_tol=1e-12)
+
+
+@pytest.mark.slow
+def test_speedup_geomean_and_schema_guard(doc):
+    """The geometric means equal exp(mean(log ratio)) recomputed from the ok
+    rows, the error-lower count matches, and validate_results rejects a
+    tampered or missing speedup section."""
+    sp = doc["speedup"]
+    ratios = [r["measured_ratio_rk4_over_champion"] for r in sp["rows"]
+              if r["status"] == "ok"]
+    preds = [r["predicted_ratio_rk4_over_champion"] for r in sp["rows"]
+             if r["status"] == "ok"]
+    assert sp["n_problems_compared"] == len(ratios)
+    if ratios:
+        expect = math.exp(sum(math.log(v) for v in ratios) / len(ratios))
+        assert math.isclose(sp["geomean_measured_speedup_rk4_over_champion"],
+                            expect, rel_tol=1e-9)
+        expect = math.exp(sum(math.log(v) for v in preds) / len(preds))
+        assert math.isclose(sp["geomean_predicted_speedup_rk4_over_champion"],
+                            expect, rel_tol=1e-9)
+    lower = sum(1 for r in sp["rows"] if r.get("champion_error_lower"))
+    assert sp["champion_error_lower_count"] == lower
+
+    broken = copy.deepcopy(doc)
+    broken["speedup"]["rows"][0]["predicted_ratio_rk4_over_champion"] *= 2.0
+    with pytest.raises(ValueError, match="predicted ratio"):
+        B.validate_results(broken)
+    broken = copy.deepcopy(doc)
+    broken["speedup"]["geomean_measured_speedup_rk4_over_champion"] = 99.0
+    with pytest.raises(ValueError, match="geomean_measured"):
+        B.validate_results(broken)
+    broken = copy.deepcopy(doc)
+    del broken["speedup"]
+    with pytest.raises(ValueError, match="speedup"):
+        B.validate_results(broken)
 
 
 # -------------------------------------------------------------------- write

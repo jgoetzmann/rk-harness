@@ -34,7 +34,7 @@ the findings site carries an epoch-status panel on its index (epoch, active or f
 last progress event, saturation counter), rendered from the state files on disk so it
 stays deterministic and refreshes every cycle.
 
-## Epoch 1: explicit fixed-step (current, closing)
+## Epoch 1: explicit fixed-step (current; reopened)
 
 The running search over explicit fixed-step tableaus at a 65,536-cycle budget under Q15
 floor arithmetic. Its scientific yield is documented on the sites: the floor-bias
@@ -51,6 +51,13 @@ cycle boundary, final push, `EPOCH_STATUS.json`). State lives on disk, so watchd
 restarts adopt it. As of 2026-09-02 the run is past the window (last progress 54 h ago,
 falsification concluded), so epoch 1 is expected to freeze shortly. A manual restart after
 a freeze is deliberate and is left alone.
+
+Owner ruling (2026-09-03): the automatic freeze is OFF. Epoch 1 froze once on 2026-09-02
+(the archive state at that moment is preserved in git history) and the owner reopened it
+so the search keeps going through the space. The orchestrator still checks every half
+hour and logs an advisory when the freeze threshold is met, and the epoch panels on both
+sites show its verdict; actually freezing now requires the owner (set
+watchdog.auto_freeze true in config.json, or run stop.ps1).
 
 ## Out-of-band track (any time, no epoch break)
 

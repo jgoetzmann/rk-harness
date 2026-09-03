@@ -37,8 +37,8 @@ from rk_harness.verifier_hash import compute_verifier_hash
 from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
     render_hypotheses, render_costmodel, render_falsification, render_glossary,
-    render_literature, render_interpretation, render_validation, check_banned,
-    epoch_status_data,
+    render_literature, render_interpretation, render_validation, render_benchmark,
+    check_banned, epoch_status_data,
 )
 from rk_harness.dashboard import read_events, build_layout, render
 from rk_harness.tableau import make_tableau, content_hash
@@ -1411,6 +1411,86 @@ def test_B61_cell_bar_value_labels_stay_inside_the_viewbox():
     check_banned(html)
 
 
+def _svg_blocks(html: str) -> list[tuple[float, float, str]]:
+    """(viewBox width, viewBox height, body) for every inline SVG on a page."""
+    out = []
+    for m in re.finditer(r'<svg\b([^>]*)>(.*?)</svg>', html, re.S):
+        attrs = dict(re.findall(r'([a-zA-Z-]+)="([^"]*)"', m.group(1)))
+        vb = attrs.get("viewBox", "0 0 0 0").split()
+        out.append((float(vb[2]), float(vb[3]), m.group(2)))
+    return out
+
+
+def _svg_label_boxes(svg_body: str) -> list[tuple[float, float, float, float, str]]:
+    """Estimated (x0, x1, y0, y1, label) per non-rotated <text>: 7px/char at the
+    site's 11px font, anchor-aware, baseline box of one line. The same estimate
+    the chart-fit audit uses."""
+    boxes = []
+    for m in re.finditer(r'<text\b([^>]*)>([^<]*)</text>', svg_body):
+        attrs = dict(re.findall(r'([a-zA-Z-]+)="([^"]*)"', m.group(1)))
+        if "rotate" in attrs.get("transform", ""):
+            continue
+        label = m.group(2)
+        w = 7.0 * len(label)
+        x, y = float(attrs.get("x", 0)), float(attrs.get("y", 0))
+        anchor = attrs.get("text-anchor", "start")
+        x0 = x - w if anchor == "end" else (x - w / 2 if anchor == "middle" else x)
+        boxes.append((x0, x0 + w, y - 8.8, y + 2.2, label))
+    return boxes
+
+
+def _assert_chart_fit(html: str) -> None:
+    """The chart-fit audit as a regression check: every non-rotated SVG label stays
+    inside its viewBox width, and no two labels sit closer than 4px in both axes."""
+    for vb_w, _vb_h, body in _svg_blocks(html):
+        boxes = _svg_label_boxes(body)
+        for x0, x1, _y0, _y1, label in boxes:
+            assert -1e-9 <= x0 and x1 <= vb_w + 1e-9, (label, x0, x1, vb_w)
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                hgap = max(a[0], b[0]) - min(a[1], b[1])
+                vgap = max(a[2], b[2]) - min(a[3], b[3])
+                assert hgap >= 4.0 or vgap >= 4.0, (a[4], b[4], hgap, vgap)
+
+
+def test_B61_sweep_chart_y_labels_thin_and_clear_on_extreme_error_spans():
+    """Chart-fit audit regression, worst offender: a falsification sweep whose error
+    span covers 17 decades used to print a y tick label per decade at ~11px pitch
+    (boxes 0.6px apart) and let the corner x tick collide with the bottom y label.
+    Labels now thin to every k-th decade and the bottom label nudges clear."""
+    sweep = []
+    for k in range(8):
+        h = 10.0 ** -(k % 4 + 1)
+        sweep.append({"h": h, "n_steps": 8 * 2 ** k,
+                      "q15_error": 0.5 / (k + 1), "float_error": 3.0e-17 * 10 ** k})
+    data = {"verdict": "proceed",
+            "coefficient_fraction": {"rk4": {"m0plus_fast": 0.41}},
+            "methods": {"rk4": {"crossover_h": 0.01, "sweep": sweep}}}
+    html = render_falsification(data)
+    i = html.index("rk4: Q15 and float64 error against step size")
+    svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i) + 6]
+    # y tick labels are end-anchored in the left gutter; the span is 1e-17..1e0,
+    # so an unthinned axis would print 18 of them at ~15px pitch
+    ylabels = re.findall(r'<text x="50" y="([\d.]+)" text-anchor="end">(1e-?\d+)</text>', svg)
+    assert 2 <= len(ylabels) < 18
+    ys = sorted(float(y) for y, _t in ylabels)
+    assert min(b - a for a, b in zip(ys, ys[1:])) >= 15.0   # 11px box + 4px gap
+    assert max(ys) <= 300 - 34 - 2 + 1e-9                   # bottom label nudged clear
+    _assert_chart_fit(html)
+    check_banned(html)
+
+
+def test_B61_index_and_cell_charts_pass_the_fit_audit(monkeypatch, tmp_path):
+    """Chart-fit audit regression across the standing pages: the elite scatter's
+    axis-corner labels, heatmap cells and per-problem bars all keep 4px clearance."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    build(arch, out)
+    for name in ("index.html", "costmodel.html", "cell-p4-s4-b2.html"):
+        _assert_chart_fit((out / name).read_text(encoding="utf-8"))
+
+
 def test_B61_interpretation_folds_superseded_same_cycle_drafts():
     """Design review fix 4: one top-level entry per cycle; older drafts fold inside."""
     entries = [
@@ -1777,6 +1857,202 @@ def test_B66_stiff_grouped_render_is_deterministic_and_banned_word_safe():
     html = render_validation(_stiff_validation_fixture())
     assert html == render_validation(_stiff_validation_fixture())
     check_banned(html)
+
+
+# ======================================================================================
+# Benchmark page (B67): rendered from work_dir()/benchmark/results.json when present
+# ======================================================================================
+
+def _benchmark_fixture() -> dict:
+    """A minimal but structurally faithful benchmark results.json: two methods,
+    two problems, a speedup section, adaptive library rows and the environment."""
+    champ = "11e898cb" + "0" * 56
+    return {
+        "budget_cycles": 65536,
+        "cost_model": "m0plus_fast",
+        "rounding": "floor (ASRS), per HANDOFF 4.2",
+        "caveats": [
+            "Adaptive scipy integrators choose their own step counts; their wall clock "
+            "is reported for context and is never a same-work comparison with any "
+            "fixed-step run.",
+        ],
+        "correlation": {"pearson_r": 0.9802, "n_points": 4},
+        "environment": {"cpu": "TestCPU 9000", "implementation": "CPython",
+                        "python": "3.13.5", "scipy": "1.14.1", "numpy": "2.1.3",
+                        "os": "Windows 11", "machine": "AMD64",
+                        "timing_caveat": "All timings are Python-level wall clock on one "
+                                         "desktop machine."},
+        "timing_protocol": {"clock": "time.perf_counter", "n_repeats": 15, "warmup": 3},
+        "tolerance_rule": "rtol = 2**-15 and atol = 2**-15 / scale for every problem.",
+        "methods": [
+            {"kind": "classical", "name_or_hash": "rk4", "order": 4, "stages": 4,
+             "roles": ["anchor"]},
+            {"kind": "discovered", "name_or_hash": champ, "order": 2, "stages": 3,
+             "roles": ["champion"]},
+        ],
+        "problems": [
+            {"name": "dahlquist", "family": "linear", "n_states": 1, "t_end": 5.0},
+            {"name": "damped_osc", "family": "oscillatory", "n_states": 2, "t_end": 20.0},
+        ],
+        "adaptive_results": [
+            {"problem": "dahlquist", "integrator": "RK45", "error": 6.65e-06,
+             "rtol": 3.05e-05, "atol": 1.22e-04, "n_steps_accepted": 11, "nfev": 68,
+             "status": "ok", "timing": {"median_s": 0.000619}},
+            {"problem": "damped_osc", "integrator": "Radau", "error": 1.4e-05,
+             "rtol": 3.05e-05, "atol": 1.22e-04, "n_steps_accepted": 75, "nfev": 527,
+             "status": "ok", "timing": {"median_s": 0.02863}},
+        ],
+        "speedup": {
+            "baseline": "rk4",
+            "champion": champ,
+            "regime": "Fixed-step Q15 at the shared cycle budget; only the tableau "
+                      "coefficients differ.",
+            "caveat": "Both sides run the identical solve_q15 path; the per-step ratio "
+                      "compares like against like.",
+            "geomean_measured_speedup_rk4_over_champion": 1.45,
+            "geomean_predicted_speedup_rk4_over_champion": 1.5,
+            "champion_error_lower_count": 1,
+            "error_comparisons": 2,
+            "median_error_ratio_champion_over_rk4": 0.353,
+            "n_problems_compared": 2,
+            "per_method_us_per_step": {
+                "rk4": {"median_us_per_step": 51.671, "min_us_per_step": 35.701,
+                        "max_us_per_step": 80.993, "n_problems": 2,
+                        "per_problem_us_per_step": {"dahlquist": 35.701,
+                                                    "damped_osc": 56.399}},
+                champ: {"median_us_per_step": 36.293, "min_us_per_step": 22.729,
+                        "max_us_per_step": 54.632, "n_problems": 2,
+                        "per_problem_us_per_step": {"dahlquist": 22.729,
+                                                    "damped_osc": 33.994}},
+            },
+            "rows": [
+                {"problem": "dahlquist", "status": "ok",
+                 "champion_cycles_per_step": 22, "rk4_cycles_per_step": 33,
+                 "predicted_ratio_rk4_over_champion": 1.5,
+                 "measured_ratio_rk4_over_champion": 1.5707,
+                 "champion_us_per_step": 22.729, "rk4_us_per_step": 35.701,
+                 "champion_error": 0.000198741, "rk4_error": 0.00016747,
+                 "champion_error_lower": False,
+                 "champion_budget_seconds": 0.0677, "rk4_budget_seconds": 0.0709},
+                {"problem": "damped_osc", "status": "ok",
+                 "champion_cycles_per_step": 44, "rk4_cycles_per_step": 66,
+                 "predicted_ratio_rk4_over_champion": 1.5,
+                 "measured_ratio_rk4_over_champion": 1.6591,
+                 "champion_us_per_step": 33.994, "rk4_us_per_step": 56.399,
+                 "champion_error": 0.00393948, "rk4_error": 0.0159248,
+                 "champion_error_lower": True,
+                 "champion_budget_seconds": 0.0506, "rk4_budget_seconds": 0.0559},
+            ],
+        },
+        "verdicts": {
+            "cycle_model": "The correlation speaks to ordering, not to absolute scale.",
+            "matched_tolerance": "Library wall clocks are informative but never "
+                                 "same-work comparisons.",
+            "overall": "The float64 side holds the accuracy margin in both tables.",
+        },
+        "generated_from": {"champion_hashes": [champ], "scipy": "1.14.1",
+                           "validation_results": "rk-work/validation/results.json "
+                                                 "(methods[].tableau)"},
+    }
+
+
+def _write_benchmark(work: Path, data: dict) -> None:
+    bdir = work / "benchmark"
+    bdir.mkdir(parents=True, exist_ok=True)
+    (bdir / "results.json").write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+
+def test_B67_benchmark_page_built_from_results_json(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_benchmark(work, _benchmark_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    page = out / "benchmark.html"
+    assert page.is_file()
+    html = page.read_text(encoding="utf-8")
+    assert html.lower().lstrip().startswith("<!doctype html>")
+    assert BANNER in html and "<script" not in html.lower()
+    check_banned(html)
+    # the measured us/step chart, one row per method, with its visible caption
+    assert 'aria-label="Measured microseconds per Q15 step, per method"' in html
+    assert "<figure><figcaption>" in html
+    # the speedup table: predicted and measured ratio columns plus the accuracy columns
+    assert "predicted ratio" in html and "measured ratio" in html
+    assert "1.500" in html and "1.571" in html and "1.659" in html
+    assert "champion Q15 error" in html and "rk4 Q15 error" in html
+    assert "0.000198741" in html and "0.0159248" in html
+    assert "22.729" in html and "56.399" in html
+    # the library accuracy table with the never-same-work caveat as a visible caption
+    assert "never a same-work comparison" in html
+    assert "RK45" in html and "Radau" in html and "6.65e-06" in html
+    # the environment line as a muted note
+    assert '<p class="note">Environment: CPython 3.13.5' in html
+    assert "TestCPU 9000" in html and "scipy 1.14.1" in html
+    # every SVG on the page passes the chart-fit audit
+    _assert_chart_fit(html)
+
+
+def test_B67_benchmark_nav_entry_present_only_with_results(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    out1 = tmp_path / "docs1"
+    build(arch, out1)
+    assert not (out1 / "benchmark.html").exists()
+    assert 'href="benchmark.html"' not in (out1 / "index.html").read_text(encoding="utf-8")
+    # with both optional results files present, benchmark follows validation in the nav
+    _write_validation(work, _validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    out2 = tmp_path / "docs2"
+    build(arch, out2)
+    assert (out2 / "benchmark.html").is_file()
+    for name in ("index.html", "validation.html", "benchmark.html"):
+        html = (out2 / name).read_text(encoding="utf-8")
+        nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
+        assert re.findall(r'href="([^"]+)"', nav) == [
+            "index.html", "methodology.html", "costmodel.html", "falsification.html",
+            "validation.html", "benchmark.html", "hypotheses.html", "literature.html",
+            "interpretation.html", "glossary.html"], name
+    val = (out2 / "benchmark.html").read_text(encoding="utf-8")
+    assert '<a href="benchmark.html" class="on">benchmark</a>' in val
+
+
+def test_B67_benchmark_build_is_deterministic_and_flag_resets(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_benchmark(work, _benchmark_fixture())
+    d1, d2 = tmp_path / "b1", tmp_path / "b2"
+    build(arch, d1)
+    build(arch, d2)
+    assert _snapshot(d1) == _snapshot(d2)
+    # the nav flag never leaks out of build(): a direct render afterwards has no tab
+    html = render_costmodel()
+    assert 'href="benchmark.html"' not in html
+
+
+def test_B67_render_benchmark_direct_is_banned_word_safe():
+    html = render_benchmark(_benchmark_fixture())
+    assert "<title>" in html.lower()
+    check_banned(html)
+    assert render_benchmark(_benchmark_fixture()) == render_benchmark(_benchmark_fixture())
+
+
+def test_B67_index_and_validation_carry_the_measured_speed_sentence(monkeypatch, tmp_path):
+    """Verdict spots tie theory to measured time: with benchmark results present, the
+    index and validation pages carry one sentence with the real microseconds."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    for name in ("index.html", "validation.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert ("runs in 36.293 us per Q15 step against 51.671 us for rk4" in html), name
+        assert "speedup 1.450x" in html, name
+        assert 'href="benchmark.html"' in html, name
+    # without benchmark results, no page invents a wall-clock figure
+    out2 = tmp_path / "docs2"
+    (work / "benchmark" / "results.json").unlink()
+    build(arch, out2)
+    for name in ("index.html", "validation.html"):
+        assert "us per Q15 step" not in (out2 / name).read_text(encoding="utf-8"), name
 
 
 def test_B62_build_is_deterministic_and_creates_missing_out_dir(monkeypatch, tmp_path):
