@@ -38,6 +38,7 @@ from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
     render_hypotheses, render_costmodel, render_falsification, render_glossary,
     render_literature, render_interpretation, render_validation, check_banned,
+    epoch_status_data,
 )
 from rk_harness.dashboard import read_events, build_layout, render
 from rk_harness.tableau import make_tableau, content_hash
@@ -1600,6 +1601,182 @@ def test_B64_render_validation_direct_is_banned_word_safe():
     assert "<title>" in html.lower()
     check_banned(html)
     assert render_validation(_validation_fixture()) == render_validation(_validation_fixture())
+
+
+# ======================================================================================
+# Epoch-status panel (B65) and stiff validation grouping (B66)
+# ======================================================================================
+
+def _write_epoch_state(work: Path, *, consecutive=4, last_check="2026-09-21T09:30:00Z",
+                       last_verdict="SATURATING") -> None:
+    (work / "saturation_state.json").write_text(json.dumps({
+        "consecutive": consecutive, "last_check": last_check,
+        "last_verdict": last_verdict}), encoding="utf-8")
+
+
+def _write_progress_events(work: Path) -> None:
+    events = [
+        {"ts": "2026-09-19T08:00:00Z", "kind": "accepted", "order": 2, "stages": 2,
+         "bucket": 0, "tier": "unreplicated", "new_elite": False, "tableau_hash": "aa"},
+        {"ts": "2026-09-20T10:00:00Z", "kind": "accepted", "order": 2, "stages": 2,
+         "bucket": 0, "tier": "unreplicated", "new_elite": True, "tableau_hash": "bb"},
+        {"ts": "2026-09-21T09:00:00Z", "kind": "cycle_done", "cycle_id": 9},
+    ]
+    (work / "events.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+
+
+def test_B65_index_epoch_panel_shows_active_state_counter_and_progress(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    monkeypatch.setenv("RK_SAT_CONSECUTIVE", "6")
+    _write_progress_events(work)
+    _write_epoch_state(work)
+    (work / "falsification.json").write_text(json.dumps({"verdict": "mixed"}), encoding="utf-8")
+    out = tmp_path / "docs"
+    build(arch, out)
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "<strong>Epoch 1</strong>" in html
+    assert 'badge badge-active">active</span>' in html
+    # the newest progress event is the new_elite acceptance, displayed in Central time
+    assert "2026-09-20 05:00 CT: a cell elite improved its held-out error" in html
+    assert "(elite_improvement)" in html
+    assert "4 consecutive saturating checks; 6 trigger a freeze" in html
+    assert "2026-09-21 04:30 CT, verdict SATURATING" in html
+    assert "<dt>falsification file</dt><dd>present</dd>" in html
+    # absolute stamps only: no wall-clock delta phrasing anywhere in the panel
+    assert "hours ago" not in html and "hours since" not in html
+    check_banned(html)
+
+
+def test_B65_epoch_panel_is_deterministic_given_the_same_state_files(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_progress_events(work)
+    _write_epoch_state(work)
+    d1, d2 = tmp_path / "e1", tmp_path / "e2"
+    build(arch, d1)
+    build(arch, d2)
+    assert _snapshot(d1) == _snapshot(d2)
+
+
+def test_B65_epoch_panel_frozen_state_from_epoch_status_json(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_progress_events(work)
+    (work / "EPOCH_STATUS.json").write_text(json.dumps({
+        "epoch": 1, "frozen_at": "2026-09-21T12:00:00Z",
+        "reason": "saturation threshold reached"}), encoding="utf-8")
+    out = tmp_path / "docs"
+    build(arch, out)
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert 'badge badge-frozen">frozen</span>' in html
+    assert "<dt>frozen at</dt><dd>2026-09-21 07:00 CT</dd>" in html
+    assert "saturation threshold reached" in html
+    check_banned(html)
+
+
+def test_B65_epoch_status_data_defaults_on_a_fresh_work_dir(monkeypatch, tmp_path):
+    _setup_env(monkeypatch, tmp_path)
+    d = epoch_status_data()
+    assert d["epoch"] == 1 and d["state"] == "active"
+    assert d["last_progress_ts"] is None and d["last_progress_kind"] is None
+    assert d["consecutive"] == 0 and d["consecutive_needed"] >= 1
+    assert d["falsification_present"] is False
+    html = render_index(_empty_arch())
+    assert "no progress events recorded yet" in html
+    assert "0 consecutive saturating checks" in html
+    assert "not yet produced" in html
+    check_banned(html)
+
+
+def _stiff_validation_fixture() -> dict:
+    """The B64 fixture extended with stiffness labels and one stiff problem where no
+    discovered method finishes, mirroring the live results.json schema."""
+    data = _validation_fixture()
+    disc = data["methods"][2]["name_or_hash"]
+    for p in data["problems"]:
+        p["stiff"] = False
+        p["stiffness_ratio"] = 1.0
+        p["stiffness_basis"] = "single complex pole pair"
+    data["problems"].append(
+        {"name": "toy_stiff", "domain": "chemical kinetics", "family": "stiff",
+         "n_states": 2, "t_end": 8.0, "equation": "y1' = -300 y1; y2' = y1 - y2",
+         "reference": "mpmath odefun at dps 30", "source": "Local two-rate test system.",
+         "scale": 0.25, "deriv_scale": 1.0, "peak": 1.0, "per_state_peaks": [1.0, 0.6],
+         "y0": [1.0, 1.0], "stiff": True, "stiffness_ratio": 300.0,
+         "stiffness_basis": "fast eigenvalue over slow eigenvalue"})
+    data["results"] += [
+        {"problem": "toy_stiff", "method": "euler", "steps": 6553, "cycles_per_step": 10,
+         "q15_error": 0.19, "float_error": 0.002, "max_abs_q": 30011},
+        {"problem": "toy_stiff", "method": "rk38", "steps": 1820, "cycles_per_step": 36,
+         "q15_error": None, "float_error": 3.1e-09, "max_abs_q": None,
+         "note": "q15 run failed: Q15OverflowError"},
+        {"problem": "toy_stiff", "method": disc, "steps": 1489, "cycles_per_step": 44,
+         "q15_error": None, "float_error": 8.0e-07, "max_abs_q": None,
+         "note": "q15 run failed: Q15OverflowError"},
+    ]
+    v = data["verdicts"]
+    for name in ("buck_converter", "pll_lock"):
+        v["per_problem"][name]["stiff"] = False
+    v["per_problem"]["toy_stiff"] = {
+        "stiff": True, "winner": "euler", "winner_kind": "classical",
+        "winner_q15_error": 0.19, "methods_evaluated": 3,
+        "finishers_classical": 1, "finishers_discovered": 0}
+    v.update({
+        "practical_problems_total": 2, "practical_problems_compared": 2,
+        "practical_problems_won_by_discovered": 1,
+        "practical_median_ratio_discovered_over_classical": 0.6678,
+        "stiff_problems_total": 1, "stiff_problems_compared": 0,
+        "stiff_problems_won_by_discovered": 0,
+        "stiff_problems_with_no_discovered_finisher": 1,
+        "stiff_median_ratio_discovered_over_classical": None,
+        "overall": "On the 2 non-stiff practical problems the best discovered method has "
+                   "lower Q15 error on 1 of 2. On the 1 stiff problem no discovered "
+                   "method finishes; every one overflows in Q15.",
+    })
+    return data
+
+
+def test_B66_validation_page_groups_stiff_and_practical_problems(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _stiff_validation_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    html = (out / "validation.html").read_text(encoding="utf-8")
+    check_banned(html)
+    assert "<h2>Q15 error per problem: practical (non-stiff)</h2>" in html
+    assert "<h2>Q15 error per problem: stiff subset</h2>" in html
+    assert "<h3>Practical (non-stiff)</h3>" in html and "<h3>Stiff</h3>" in html
+    # grouped verdict cards from the practical_*/stiff_* keys
+    assert "1 of 2" in html                          # practical wins card
+    assert "no discovered finisher" in html
+    # the stiff table row: finisher counts, the no-finisher marker, and the winner
+    # standing in for the missing best_classical fields
+    assert "finishers (classical / discovered)" in html
+    assert "1 / 0" in html
+    assert "none finished" in html
+    assert html.index("toy_stiff") < html.index("none finished")
+    stiff_row = html[html.index("<h3>Stiff</h3>"):]
+    assert "euler" in stiff_row[:stiff_row.index("</table>")]
+    assert "0.19" in stiff_row[:stiff_row.index("</table>")]
+    # overflow rows surface their note verbatim in the full results table
+    assert "q15 run failed: Q15OverflowError" in html
+    # stiffness metadata reaches the problem descriptions
+    assert "stiffness ratio 300" in html
+    assert "fast eigenvalue over slow eigenvalue" in html
+
+
+def test_B66_validation_without_stiff_flags_keeps_the_flat_layout(monkeypatch, tmp_path):
+    html = render_validation(_validation_fixture())
+    assert "<h2>Q15 error per problem</h2>" in html
+    assert "stiff subset" not in html
+    assert "<h3>Stiff</h3>" not in html
+    assert "finishers (classical / discovered)" not in html
+    check_banned(html)
+
+
+def test_B66_stiff_grouped_render_is_deterministic_and_banned_word_safe():
+    html = render_validation(_stiff_validation_fixture())
+    assert html == render_validation(_stiff_validation_fixture())
+    check_banned(html)
 
 
 def test_B62_build_is_deterministic_and_creates_missing_out_dir(monkeypatch, tmp_path):

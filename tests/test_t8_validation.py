@@ -1,11 +1,16 @@
 """T8 tests: the practical validation suite (rk_harness/validation.py).
 
-Covers: the five practical problems stay inside Q15 bounds over their windows,
-reference solutions agree with an independent fine-step float integration,
-peaks match the fixture-convention measurement, the results document schema
-validates, one anchor evaluation is bit-for-bit reproducible, classical anchor
-identification is correct, and discovered-method selection follows the archive
-grid rule (synthetic archive, no dependence on the live one).
+Covers: the eight practical problems stay inside Q15 bounds over their windows
+(the stiff subset for the methods that finish there), reference solutions
+agree with an independent fine-step float integration, peaks match the
+fixture-convention measurement, the results document schema validates
+(including the stiff / stiffness_ratio labels), one anchor evaluation is
+bit-for-bit reproducible, classical anchor identification is correct,
+discovered-method selection follows the archive grid rule (synthetic archive,
+no dependence on the live one), and the moderately stiff subset shows the
+stability tax it exists to expose: cheap low-stage methods finish, expensive
+tableaus overflow where their affordable step size leaves the stability
+interval (rk4 and rk38 on robertson_scaled).
 """
 from __future__ import annotations
 
@@ -47,6 +52,12 @@ _T_A = make_tableau([["0", "0"], ["3/4", "0"]], ["1/3", "2/3"])
 _T_B = make_tableau([["0", "0"], ["1/4", "0"]], ["-1", "2"])
 # Discovered order-1 tableau: b sums to 1 but b.c = 1/6 != 1/2.
 _T_C = make_tableau([["0", "0"], ["1/3", "0"]], ["1/2", "1/2"])
+
+_NONSTIFF = tuple(n for n in V.VALIDATION_NAMES if not V.STIFF[n])
+# rk4 finishes everywhere except robertson_scaled, where its 661 affordable
+# steps put h*lambda_fast near 3.5 late in the window, outside its stability
+# interval, and the Q15 run overflows (asserted below).
+_RK4_FINISHERS = tuple(n for n in V.VALIDATION_NAMES if n != "robertson_scaled")
 
 
 @pytest.fixture(scope="module")
@@ -98,12 +109,18 @@ def test_scales_power_of_two_and_y0_roundtrip():
 
 # Upper bounds on max |q| from the research spec (verified over euler/heun2/
 # rk4/rk38 under both primary models); euler and rk4 under fast must stay <=.
+# The stiff-subset bounds come from the 2026-09-02 measurement: servo peaks
+# near 14013, enzyme and robertson start at |y0*scale| = 16384 and never
+# exceed it while stable.
 _MAXQ_BOUND = {
     "buck_converter": 4872,
     "battery_2rc": 20086,
     "bicycle_lateral": 9170,
     "pll_lock": 8332,
     "glucose_minimal": 11430,
+    "servo_load_step": 14600,
+    "enzyme_qssa": 16800,
+    "robertson_scaled": 16800,
 }
 
 
@@ -114,7 +131,7 @@ def test_q15_bounds_euler(euler_cells, name):
     assert 0 < cell["max_abs_q"] <= _MAXQ_BOUND[name]
 
 
-@pytest.mark.parametrize("name", V.VALIDATION_NAMES)
+@pytest.mark.parametrize("name", _RK4_FINISHERS)
 def test_q15_bounds_rk4(rk4_cells, name):
     cell = rk4_cells[name]
     assert cell["q15_error"] is not None, cell.get("note")
@@ -168,12 +185,78 @@ def test_euler_buck_error_in_expected_band(euler_cells):
     assert 0.015 < euler_cells["buck_converter"]["q15_error"] < 0.04
 
 
-@pytest.mark.parametrize("name", V.VALIDATION_NAMES)
+@pytest.mark.parametrize("name", _RK4_FINISHERS)
 def test_float_error_below_q15(rk4_cells, name):
     """Quantization cost must be visible: float64 rk4 at the same step count is
     orders of magnitude more accurate than the Q15 run."""
     cell = rk4_cells[name]
     assert cell["float_error"] < cell["q15_error"] / 100.0
+
+
+# --------------------------------------------------------------------------- stiffness
+
+def test_stiffness_labels():
+    assert set(V.STIFF) == set(V.VALIDATION_NAMES)
+    assert tuple(n for n in V.VALIDATION_NAMES if V.STIFF[n]) == V.STIFF_NAMES
+    assert set(V.STIFFNESS_RATIO) == set(V.VALIDATION_NAMES)
+    assert set(V.STIFFNESS_BASIS) == set(V.VALIDATION_NAMES)
+    for name in V.VALIDATION_NAMES:
+        r = V.STIFFNESS_RATIO[name]
+        assert r >= 1.0, name
+        if V.STIFF[name]:
+            # the moderately stiff band the subset was designed for
+            assert 50.0 <= r <= 2000.0, (name, r)
+        else:
+            assert r < 50.0, (name, r)
+        assert V.STIFFNESS_BASIS[name]
+
+
+def test_stiff_start_on_slow_manifold():
+    """The initial Q15 derivative stays small on every stiff problem (no fast
+    state is slewing at t = 0), so stiffness is felt through stability alone,
+    never through Q15 dynamic range."""
+    for name in V.STIFF_NAMES:
+        p = V.PROBLEMS[name]
+        k0 = p.f(0.0, p.y0)
+        assert all(abs(k) <= 8192 for k in k0), (name, k0)
+
+
+def test_enzyme_starts_on_qss_manifold():
+    # v(0) = u(0) / (u(0) + K) exactly, and both Q15-exact at scale 0.5
+    u0, v0 = V.Y0_PHYS["enzyme_qssa"]
+    assert v0 == u0 / (u0 + 1.0)
+    assert V.PROBLEMS["enzyme_qssa"].y0 == (16384, 8192)
+
+
+def test_robertson_conserves_mass():
+    """y1 + y2/10 + y3 is invariant under the float RHS (y2 is stored 10x)."""
+    for y in ((1.0, 0.0, 0.0), (0.5, 0.1, 0.49), (0.2, 0.05, 0.795)):
+        d = V.FLOAT_RHS["robertson_scaled"](0.0, y)
+        assert abs(d[0] + d[1] / 10.0 + d[2]) < 1e-15
+
+
+@pytest.mark.parametrize("name", V.STIFF_NAMES)
+def test_stiff_cheap_classical_methods_finish(cls, name):
+    """The stiff subset must not be vacuous: the one- and two-stage anchors
+    afford enough steps to stay inside their stability intervals and finish
+    with a bounded error on every stiff problem."""
+    for m in ("euler", "heun2", "midpoint"):
+        cell = V.evaluate_pair(cls[m], name)
+        assert cell["q15_error"] is not None, (name, m, cell.get("note"))
+        assert cell["q15_error"] < 0.5, (name, m, cell["q15_error"])
+        assert 0 < cell["max_abs_q"] <= _MAXQ_BOUND[name]
+
+
+def test_stability_tax_rk4_rk38_overflow_on_robertson(cls):
+    """rk4 affords 661 steps on the 3-state robertson_scaled and rk38 606; the
+    fast eigenvalue grows to about 11.7 late in the window, h*lambda leaves
+    their stability interval and the Q15 run overflows. This is the stability
+    tax the stiff subset exists to expose."""
+    for m in ("rk4", "rk38"):
+        cell = V.evaluate_pair(cls[m], "robertson_scaled")
+        assert cell["q15_error"] is None, (m, cell)
+        assert "failed" in cell.get("note", ""), (m, cell)
+        assert cell["float_error"] is None, (m, cell)
 
 
 def test_steps_match_fixture_convention(cls):
@@ -237,7 +320,13 @@ def test_results_schema_validates(synthetic_doc):
     kinds = {m["name_or_hash"]: m["kind"] for m in doc["methods"]}
     assert sum(1 for k in kinds.values() if k == "classical") == 5
     assert sum(1 for k in kinds.values() if k == "discovered") == 2
-    assert len(doc["results"]) == 7 * 5
+    assert len(doc["results"]) == 7 * len(V.VALIDATION_NAMES)
+    by_name = {p["name"]: p for p in doc["problems"]}
+    for name in V.VALIDATION_NAMES:
+        p = by_name[name]
+        assert p["stiff"] == V.STIFF[name]
+        assert p["stiffness_ratio"] == V.STIFFNESS_RATIO[name]
+        assert p["stiffness_basis"] == V.STIFFNESS_BASIS[name]
 
 
 def test_results_schema_rejects_bad_docs(synthetic_doc):
@@ -254,6 +343,14 @@ def test_results_schema_rejects_bad_docs(synthetic_doc):
     bad3["results"].pop()
     with pytest.raises(ValueError):
         V.validate_results(bad3)
+    bad4 = copy.deepcopy(synthetic_doc)
+    del bad4["problems"][0]["stiff"]
+    with pytest.raises(ValueError):
+        V.validate_results(bad4)
+    bad5 = copy.deepcopy(synthetic_doc)
+    del bad5["verdicts"]["stiff_problems_with_no_discovered_finisher"]
+    with pytest.raises(ValueError):
+        V.validate_results(bad5)
 
 
 _BANNED = re.compile(
@@ -266,14 +363,36 @@ def test_verdicts_consistent_and_site_safe(synthetic_doc):
     v = synthetic_doc["verdicts"]
     assert set(v["per_problem"]) == set(V.VALIDATION_NAMES)
     for name, entry in v["per_problem"].items():
-        assert entry["winner"] is not None, name
-        bc, bd = entry["best_classical_q15_error"], entry["best_discovered_q15_error"]
-        ratio = entry["ratio_discovered_over_classical"]
-        assert math.isclose(ratio, bd / bc, rel_tol=1e-12)
-        assert entry["winner_q15_error"] <= min(bc, bd)
+        assert entry["stiff"] == V.STIFF[name]
+        assert entry["finishers_classical"] + entry["finishers_discovered"] \
+            <= entry["methods_evaluated"]
+        if not V.STIFF[name]:
+            # the non-stiff subset always produces a full comparison
+            assert entry["winner"] is not None, name
+            assert "ratio_discovered_over_classical" in entry, name
+        if "ratio_discovered_over_classical" in entry:
+            bc = entry["best_classical_q15_error"]
+            bd = entry["best_discovered_q15_error"]
+            ratio = entry["ratio_discovered_over_classical"]
+            assert math.isclose(ratio, bd / bc, rel_tol=1e-12)
+            assert entry["winner_q15_error"] <= min(bc, bd)
+    # the split aggregates recompose into the totals
+    assert v["practical_problems_total"] == sum(1 for n in V.VALIDATION_NAMES
+                                                if not V.STIFF[n])
+    assert v["stiff_problems_total"] == len(V.STIFF_NAMES)
+    assert v["problems_compared"] == (v["practical_problems_compared"]
+                                      + v["stiff_problems_compared"])
+    assert v["problems_won_by_discovered"] == (v["practical_problems_won_by_discovered"]
+                                               + v["stiff_problems_won_by_discovered"])
+    assert 0 <= v["stiff_problems_with_no_discovered_finisher"] <= v["stiff_problems_total"]
     assert isinstance(v["overall"], str) and v["overall"]
+    assert "stiff" in v["overall"]
     # this document feeds the findings site: banned words and em dashes stay out
-    for text in [v["overall"]] + [p["source"] for p in synthetic_doc["problems"]]:
+    texts = ([v["overall"]]
+             + [p["source"] for p in synthetic_doc["problems"]]
+             + [p["stiffness_basis"] for p in synthetic_doc["problems"]]
+             + [p.get("notes", "") for p in synthetic_doc["problems"]])
+    for text in texts:
         assert not _BANNED.search(text), text
         assert "—" not in text
 

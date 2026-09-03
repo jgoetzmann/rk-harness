@@ -24,6 +24,7 @@ from rk_harness import literature as literature_mod
 from rk_harness import coeffrep
 from rk_harness import costmodel
 from rk_harness import ledger
+from rk_harness import saturation
 from rk_harness import tableau as tableau_mod
 from rk_harness import timefmt
 from rk_harness.paths import work_dir
@@ -133,6 +134,8 @@ th.num,td.num{text-align:right}
 .badge-supported{background:var(--good-bg);color:var(--good-fg)}
 .badge-refuted{background:var(--bad-bg);color:var(--bad-fg)}
 .badge-inconclusive{background:var(--warn-bg);color:var(--warn-fg)}
+.badge-active{background:var(--good-bg);color:var(--good-fg)}
+.badge-frozen{background:var(--mut-bg);color:var(--mut-fg)}
 .hash{word-break:break-all;font:12px ui-monospace,Consolas,monospace;color:var(--text-2)}
 .mono{font:13px ui-monospace,Consolas,monospace}
 .note{font-size:13px;color:var(--text-2);font-style:italic}
@@ -685,6 +688,100 @@ def _stat_cards(arch: ArchiveState) -> str:
 
 
 # ----------------------------------------------------------------------------
+# epoch-status panel (the public progress loop, HANDOFF-era determinism kept)
+# ----------------------------------------------------------------------------
+
+# Display names for saturation.scan_progress kinds. Progress is defined in
+# docs/ROADMAP.md and implemented in rk_harness/saturation.py.
+_PROGRESS_KIND_LABEL = {
+    "new_cell": "a record landed in a previously empty grid cell",
+    "elite_improvement": "a cell elite improved its held-out error",
+    "heldout_verified": "an acceptance at the heldout_verified tier",
+}
+
+
+def _load_json_or_none(path: Path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def epoch_status_data() -> dict:
+    """Progress-loop state, read from the files in work_dir().
+
+    A pure function of the files on disk (events.jsonl, saturation_state.json,
+    EPOCH_STATUS.json, falsification.json presence): no wall clock is read, so pages
+    built from the same files are byte-identical. Also imported by the rk-overview
+    generator so both sites report the same state.
+    """
+    wd = work_dir()
+    status = _load_json_or_none(wd / saturation.EPOCH_FILE)
+    state = _load_json_or_none(wd / saturation.STATE_FILE) or {}
+    prog = saturation.scan_progress()
+    try:
+        consecutive = int(state.get("consecutive", 0))
+    except (TypeError, ValueError):
+        consecutive = 0
+    return {
+        "epoch": int(status.get("epoch", 1)) if status else 1,
+        "state": "frozen" if status else "active",
+        "frozen_at": status.get("frozen_at") if status else None,
+        "freeze_reason": status.get("reason") if status else None,
+        "n_accepted": prog.get("n_accepted"),
+        "last_progress_ts": prog.get("last_progress_ts"),
+        "last_progress_kind": prog.get("last_progress_kind"),
+        "consecutive": consecutive,
+        "consecutive_needed": saturation._consecutive_needed(),
+        "last_check_ts": state.get("last_check"),
+        "last_verdict": state.get("last_verdict"),
+        "falsification_present": (wd / "falsification.json").exists(),
+    }
+
+
+def _epoch_panel(data: dict | None = None) -> str:
+    d = data if data is not None else epoch_status_data()
+    state = d.get("state", "active")
+    badge = f'<span class="badge badge-{_esc(state)}">{_esc(state)}</span>'
+    head = (f'<p style="margin:0 0 6px"><strong>Epoch {_num(d.get("epoch"))}</strong> '
+            f"{badge} "
+            '<span class="when">scored method class: explicit fixed-step Runge-Kutta</span></p>')
+    rows: list[tuple[str, str]] = []
+    if state == "frozen":
+        rows.append(("frozen at", _esc(_ct(d.get("frozen_at")))))
+        if d.get("freeze_reason"):
+            rows.append(("reason", _esc(d.get("freeze_reason"))))
+    kind = d.get("last_progress_kind")
+    if d.get("last_progress_ts") and kind:
+        label = _PROGRESS_KIND_LABEL.get(kind, str(kind))
+        rows.append(("last progress", f"{_esc(_ct(d.get('last_progress_ts')))}: {_esc(label)} "
+                                      f'<span class="when">({_esc(kind)})</span>'))
+    else:
+        rows.append(("last progress", "no progress events recorded yet"))
+    needed = d.get("consecutive_needed")
+    rows.append(("saturation counter",
+                 f"{_num(d.get('consecutive'))} consecutive saturating checks; "
+                 f"{_num(needed)} trigger a freeze"))
+    if d.get("last_check_ts"):
+        verdict = d.get("last_verdict")
+        rows.append(("last check", _esc(_ct(d.get("last_check_ts")))
+                     + (f", verdict {_esc(verdict)}" if verdict else "")))
+    rows.append(("falsification file",
+                 "present" if d.get("falsification_present") else "not yet produced"))
+    dl = '<dl class="meta">\n' + "\n".join(
+        f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in rows) + "\n</dl>"
+    note = ('<p class="note">Progress means a record in a previously empty cell, an elite '
+            "improving its cell, or a heldout_verified acceptance. When the newest progress "
+            "event is older than the saturation window and the falsification file exists, a "
+            "check counts as saturating; enough consecutive saturating checks freeze the "
+            "epoch and re-pin the verifier. Read from the run state files; timestamps are "
+            "stored UTC, shown as US Central.</p>")
+    return '<div class="panel">' + head + dl + note + "</div>"
+
+
+# ----------------------------------------------------------------------------
 # pages
 # ----------------------------------------------------------------------------
 
@@ -697,6 +794,7 @@ def render_index(arch: ArchiveState) -> str:
         "from that archive and each entry links to a detail page. Terms are defined in the "
         '<a href="glossary.html">glossary</a>.</p>'
     ]
+    parts.append(_epoch_panel())
     parts.append(_stat_cards(arch))
     parts.append('<p class="note">Fitness is heldout_error under m0plus_fast at equal cycle budget; '
                  "lower is better and nothing more is claimed. Cells are (stages, cycle bucket).</p>")
@@ -1366,6 +1464,62 @@ def _validation_chart(data: dict) -> str:
             + svg + "</figure>")
 
 
+def _filter_validation(data: dict, names: set[str]) -> dict:
+    """A shallow copy of a validation results dict restricted to the named problems."""
+    out = dict(data)
+    out["problems"] = [p for p in (data.get("problems") or [])
+                       if str(p.get("name")) in names]
+    out["results"] = [r for r in (data.get("results") or [])
+                      if str(r.get("problem")) in names]
+    return out
+
+
+def _best_table(names: list[str], per: dict, stiff_cols: bool) -> list[str]:
+    """The best-per-problem rows for one problem group. With stiff_cols, finisher
+    counts join the columns and a problem no discovered method finished renders
+    'none finished' instead of numbers (traceable to the overflow notes below)."""
+    head = ('<div class="scroll"><table><tr><th>problem</th><th>winner</th>'
+            '<th>best classical</th><th class="num">Q15 error</th>'
+            '<th>best discovered</th><th class="num">Q15 error</th>'
+            '<th class="num">ratio</th>')
+    if stiff_cols:
+        head += '<th class="num">finishers (classical / discovered)</th>'
+    parts = [head + "</tr>"]
+    for name in names:
+        d = per.get(name)
+        if not isinstance(d, dict):
+            continue
+        wkind = d.get("winner_kind", "")
+        winner = _vlabel(str(d.get("winner")), wkind)
+        ratio = d.get("ratio_discovered_over_classical")
+        best_disc = d.get("best_discovered")
+        if best_disc is None:
+            disc_cells = ('<td>none finished</td><td class="num">n/a</td>')
+        else:
+            disc_cells = (f'<td class="hash">{_esc(_vlabel(str(best_disc), "discovered"))}</td>'
+                          f'<td class="num">{_num(d.get("best_discovered_q15_error"))}</td>')
+        best_cls = d.get("best_classical")
+        best_cls_err = d.get("best_classical_q15_error")
+        if best_cls is None and wkind == "classical":
+            # Verdicts omit best_classical when no discovered method finished; the
+            # winner is then classical by construction, so it is the best classical.
+            best_cls = d.get("winner")
+            best_cls_err = d.get("winner_q15_error")
+        cls_cells = (f"<td>{_esc(str(best_cls)) if best_cls is not None else 'n/a'}</td>"
+                     f'<td class="num">{_num(best_cls_err)}</td>')
+        row = ("<tr>"
+               f"<td>{_esc(name)}</td>"
+               f"<td>{_esc(winner)} <span class=\"when\">({_esc(wkind)})</span></td>"
+               + cls_cells + disc_cells +
+               f'<td class="num">{f"{ratio:.3g}" if isinstance(ratio, (int, float)) else "n/a"}</td>')
+        if stiff_cols:
+            row += (f'<td class="num">{_num(d.get("finishers_classical"))} / '
+                    f'{_num(d.get("finishers_discovered"))}</td>')
+        parts.append(row + "</tr>")
+    parts.append("</table></div>")
+    return parts
+
+
 def render_validation(data: dict) -> str:
     verdicts = data.get("verdicts") or {}
     per = verdicts.get("per_problem") or {}
@@ -1374,6 +1528,19 @@ def render_validation(data: dict) -> str:
     results = data.get("results") or []
     kind_of = {m.get("name_or_hash"): m.get("kind", "") for m in methods}
     budget = data.get("budget_cycles")
+    stiff_names = [str(p.get("name")) for p in problems
+                   if isinstance(p, dict) and p.get("stiff")]
+    has_stiff = bool(stiff_names)
+    practical_names = [str(p.get("name")) for p in problems
+                       if str(p.get("name")) not in set(stiff_names)]
+    practical_names += sorted(k for k in per
+                              if k not in set(practical_names) | set(stiff_names))
+    lead_tail = (", scored as final-state error against an independent reference solution."
+                 if not has_stiff else
+                 ", scored as final-state error against an independent reference solution. "
+                 f"The suite splits into {len(practical_names)} non-stiff practical problems "
+                 f"and {len(stiff_names)} moderately stiff ones, grouped separately below "
+                 "because stiffness changes which methods finish at all.")
     parts = [
         '<p class="lead">This page reports the practical validation suite: '
         f"{len(problems)} problems taken from embedded application domains, disjoint from "
@@ -1383,53 +1550,75 @@ def render_validation(data: dict) -> str:
         + _gloss("q15", "Q15") + " at the same fixed "
         + _gloss("cycle-budget", "cycle budget") + f" of {_num(budget)} cycles under "
         f"{_esc(data.get('cost_model'))} with "
-        + _gloss("floor-rounding", "floor rounding") + ", scored as final-state error against "
-        "an independent reference solution.</p>"
+        + _gloss("floor-rounding", "floor rounding") + lead_tail + "</p>"
     ]
-    won = verdicts.get("problems_won_by_discovered")
-    compared = verdicts.get("problems_compared")
-    median = verdicts.get("median_ratio_discovered_over_classical")
-    cards = [
-        ("problems", _num(compared), "from embedded application domains"),
-        ("won by discovered", f"{_num(won)} of {_num(compared)}", "lower Q15 error than every anchor"),
-        ("median error ratio", f"{median:.3g}" if isinstance(median, (int, float)) else "n/a",
-         "best discovered / best classical; below 1.0 favors discovered"),
-    ]
+
+    def _ratio_card(v) -> str:
+        return f"{v:.3g}" if isinstance(v, (int, float)) else "n/a"
+
+    if has_stiff:
+        cards = [
+            ("practical problems",
+             f"{_num(verdicts.get('practical_problems_won_by_discovered'))} of "
+             f"{_num(verdicts.get('practical_problems_compared'))}",
+             "non-stiff; won by a discovered method"),
+            ("practical median ratio",
+             _ratio_card(verdicts.get("practical_median_ratio_discovered_over_classical")),
+             "best discovered / best classical; below 1.0 favors discovered"),
+            ("stiff problems",
+             f"{_num(verdicts.get('stiff_problems_won_by_discovered'))} of "
+             f"{_num(verdicts.get('stiff_problems_compared'))}",
+             "won by discovered, where both sides finish"),
+            ("stiff median ratio",
+             _ratio_card(verdicts.get("stiff_median_ratio_discovered_over_classical")),
+             "over the stiff problems both sides finish"),
+            ("no discovered finisher",
+             f"{_num(verdicts.get('stiff_problems_with_no_discovered_finisher'))} of "
+             f"{_num(verdicts.get('stiff_problems_total'))}",
+             "stiff problems where every discovered method overflows"),
+        ]
+    else:
+        won = verdicts.get("problems_won_by_discovered")
+        compared = verdicts.get("problems_compared")
+        cards = [
+            ("problems", _num(compared), "from embedded application domains"),
+            ("won by discovered", f"{_num(won)} of {_num(compared)}",
+             "lower Q15 error than every anchor"),
+            ("median error ratio",
+             _ratio_card(verdicts.get("median_ratio_discovered_over_classical")),
+             "best discovered / best classical; below 1.0 favors discovered"),
+        ]
     parts.append('<div class="cards">' + "".join(
         f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
         f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>")
     overall = verdicts.get("overall")
     if overall:
         parts.append(f"<p>{_esc(overall)}</p>")
-    parts.append("<h2>Q15 error per problem</h2>")
-    chart = _validation_chart(data)
-    if chart:
-        parts.append('<div class="panel">' + chart + "</div>")
+    if has_stiff:
+        parts.append("<h2>Q15 error per problem: practical (non-stiff)</h2>")
+        chart = _validation_chart(_filter_validation(data, set(practical_names)))
+        if chart:
+            parts.append('<div class="panel">' + chart + "</div>")
+        parts.append("<h2>Q15 error per problem: stiff subset</h2>")
+        parts.append('<p class="note">A method appears in a stiff row only if its Q15 run '
+                     "finished; a run that overflowed has no error to plot and is listed "
+                     "in the finisher counts and the full table below.</p>")
+        chart = _validation_chart(_filter_validation(data, set(stiff_names)))
+        if chart:
+            parts.append('<div class="panel">' + chart + "</div>")
+    else:
+        parts.append("<h2>Q15 error per problem</h2>")
+        chart = _validation_chart(data)
+        if chart:
+            parts.append('<div class="panel">' + chart + "</div>")
     parts.append("<h2>Best per problem</h2>")
-    parts.append('<div class="scroll"><table><tr><th>problem</th><th>winner</th>'
-                 '<th>best classical</th><th class="num">Q15 error</th>'
-                 '<th>best discovered</th><th class="num">Q15 error</th>'
-                 '<th class="num">ratio</th></tr>')
-    prob_names = [str(p.get("name")) for p in problems]
-    prob_names += sorted(k for k in per if k not in set(prob_names))
-    for name in prob_names:
-        d = per.get(name)
-        if not isinstance(d, dict):
-            continue
-        wkind = d.get("winner_kind", "")
-        winner = _vlabel(str(d.get("winner")), wkind)
-        ratio = d.get("ratio_discovered_over_classical")
-        parts.append(
-            "<tr>"
-            f"<td>{_esc(name)}</td>"
-            f"<td>{_esc(winner)} <span class=\"when\">({_esc(wkind)})</span></td>"
-            f"<td>{_esc(str(d.get('best_classical')))}</td>"
-            f'<td class="num">{_num(d.get("best_classical_q15_error"))}</td>'
-            f'<td class="hash">{_esc(_vlabel(str(d.get("best_discovered")), "discovered"))}</td>'
-            f'<td class="num">{_num(d.get("best_discovered_q15_error"))}</td>'
-            f'<td class="num">{f"{ratio:.3g}" if isinstance(ratio, (int, float)) else "n/a"}</td>'
-            "</tr>")
-    parts.append("</table></div>")
+    if has_stiff:
+        parts.append("<h3>Practical (non-stiff)</h3>")
+        parts.extend(_best_table(practical_names, per, stiff_cols=False))
+        parts.append("<h3>Stiff</h3>")
+        parts.extend(_best_table(stiff_names, per, stiff_cols=True))
+    else:
+        parts.extend(_best_table(practical_names, per, stiff_cols=False))
     parts.append('<p class="note">ratio is best-discovered over best-classical Q15 error; '
                  "below 1.0 the discovered method carries the lower error.</p>")
     parts.append("<h2>Q15 against float64</h2>")
@@ -1442,10 +1631,12 @@ def render_validation(data: dict) -> str:
             f"anywhere is {max(maxq)} of the int16 limit 32767. Where a row's float64 error "
             "sits far below its Q15 error, the Q15 number measures quantization, not "
             "truncation.</p>")
+    any_note = any(r.get("note") for r in results)
     parts.append('<div class="scroll"><table><tr><th>problem</th><th>method</th><th>kind</th>'
                  '<th class="num">steps</th><th class="num">cycles/step</th>'
                  '<th class="num">Q15 error</th><th class="num">float64 error</th>'
-                 '<th class="num">max |q|</th></tr>')
+                 '<th class="num">max |q|</th>' + ("<th>note</th>" if any_note else "")
+                 + "</tr>")
     for r in results:
         m = str(r.get("method"))
         kind = kind_of.get(m, "")
@@ -1458,7 +1649,10 @@ def render_validation(data: dict) -> str:
             f'<td class="num">{_num(r.get("q15_error"))}</td>'
             f'<td class="num">{_num(r.get("float_error"))}</td>'
             f'<td class="num">{_num(r.get("max_abs_q"))}</td>'
-            "</tr>")
+            + (f'<td><span class="note">{_esc(str(r.get("note")))}</span></td>'
+               if any_note and r.get("note")
+               else ("<td></td>" if any_note else ""))
+            + "</tr>")
     parts.append("</table></div>")
     parts.append("<h2>Methods</h2>")
     parts.append('<div class="scroll"><table><tr><th>kind</th><th>name / tableau_hash</th>'
@@ -1489,6 +1683,12 @@ def render_validation(data: dict) -> str:
         parts.append(f"<p>{_esc(str(p.get('domain')))}; {_esc(str(p.get('family')))}, "
                      f"{_num(p.get('n_states'))} states, integrated to t = "
                      f"{_num(p.get('t_end'))}.</p>")
+        if p.get("stiffness_ratio") is not None:
+            basis = p.get("stiffness_basis")
+            parts.append(
+                f'<p class="note">{"Stiff" if p.get("stiff") else "Non-stiff"}; '
+                f"stiffness ratio {_num(p.get('stiffness_ratio'))}"
+                + (f" ({_esc(str(basis))})" if basis else "") + ".</p>")
         eq = p.get("equation")
         if eq:
             parts.append(f'<p class="mono">{_esc(str(eq))}</p>')

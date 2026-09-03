@@ -1,9 +1,11 @@
 """Practical validation suite (T8). New module; nothing pinned is modified.
 
-Five practical problems from embedded application domains (power electronics,
+Eight practical problems from embedded application domains, run through the
+SAME machinery the scored suite uses. The original five (power electronics,
 battery management, vehicle dynamics, communications clocking, biomedical
-devices), defined per the research agent's equation spec and run through the
-SAME machinery the scored suite uses:
+devices) are non-stiff; three more (motor control, biochemical kinetics,
+chemical kinetics) are moderately stiff, added 2026-09-02 per the roadmap's
+out-of-band track:
 
 * Q15 right-hand sides come from ``problems.make_q15_rhs`` (float64 physical
   derivative wrapped into Q15 with a power-of-two scale),
@@ -19,10 +21,24 @@ where PEAK is the largest per-state |y_i| over the window measured by float
 RK4 at 40,000 steps (the fixture convention; values hardcoded below like
 ``fixtures/problems.json`` hardcodes its peaks).
 
-All five problems use derivative scale 1.0.  Their names are deliberately
+All problems use derivative scale 1.0.  Their names are deliberately
 disjoint from the frozen scored problems, so ``problems.DERIV_SCALE.get(name,
 1.0)`` inside ``solve_q15`` resolves to exactly the value in this module's own
 ``DERIV_SCALE`` map (asserted at import).
+
+The moderately stiff subset (stiffness ratios roughly 300 to 1000, labeled
+``stiff: true`` with a ``stiffness_ratio`` in the results schema) is designed
+so that stiffness bites through STABILITY at the shared cycle budget, not
+through Q15 dynamic range: each run starts on or near the slow manifold, so
+derivatives stay Q15-representable, while the step count a method can afford
+decides whether h times the fast eigenvalue stays inside its stability
+interval.  Cheap low-stage methods (euler, heun2, midpoint, the 3-stage
+discovered champion) take many small steps and stay stable; expensive
+high-order tableaus (rk4, rk38, the 6-stage discovered elites) take few large
+steps and can cross the boundary, rattle, or overflow outright.  The honest
+expectation, stated in the verdicts: on stiff problems the explicit discovered
+methods lose ground or fail, which is the motivating evidence for the epoch-3
+implicit (SDIRK) track.
 
 ``main()`` evaluates the classical anchors (euler, heun2, midpoint, rk4, rk38)
 plus the top discovered methods from the live archive (the overall champion,
@@ -76,7 +92,13 @@ CLASSICAL_ANCHOR_NAMES: tuple[str, ...] = ("euler", "heun2", "midpoint", "rk4", 
 
 VALIDATION_NAMES: tuple[str, ...] = (
     "buck_converter", "battery_2rc", "bicycle_lateral", "pll_lock", "glucose_minimal",
+    "servo_load_step", "enzyme_qssa", "robertson_scaled",
 )
+
+# The moderately stiff subset (see the module docstring).
+STIFF_NAMES: tuple[str, ...] = ("servo_load_step", "enzyme_qssa", "robertson_scaled")
+
+STIFF: dict[str, bool] = {name: name in STIFF_NAMES for name in VALIDATION_NAMES}
 
 # The suite's own derivative-scale map (the solve_q15 default of 1.0 applies
 # because these names never appear in the frozen problems.DERIV_SCALE).
@@ -124,6 +146,74 @@ _GLU_P2 = 0.0254
 _GLU_GB_N = 0.82            # Gb / 100
 _GLU_FORCE = 0.1282         # 100 * p3 * 100 uU/ml (see module docstring)
 
+# servo_load_step: armature-controlled DC servo, maxon RE 25 catalog part
+# 118752 (24 V, graphite brushes, 20 W) plus a 12x reflected load inertia,
+# hit with a 10 mNm load-torque step from steady spin.  States are deviations
+# (delta_i / 1 A, delta_omega / 100 rad/s), time unit 1 ms.  The step enters
+# the mechanical equation, so the run starts on the slow manifold and
+# derivatives stay small; the electrical pole at -9.65/ms is the stiff one.
+_SRV_R = 2.32               # ohm, terminal resistance
+_SRV_L = 0.24e-3            # H, terminal inductance
+_SRV_KT = 23.4e-3           # Nm/A torque constant = V s/rad back-EMF constant
+_SRV_J = 13.0 * 1.03e-6     # kg m^2: rotor 10.3 gcm^2 plus 12x reflected load
+_SRV_I0 = 1.0               # A, current normalization
+_SRV_W0 = 100.0             # rad/s, speed normalization
+_SRV_DTL = 10.0e-3          # Nm, load-torque step
+_SRV_U = 1.0e-3             # s, time unit
+_SRV_A11 = -_SRV_R / _SRV_L * _SRV_U
+_SRV_A12 = -_SRV_KT * _SRV_W0 / (_SRV_L * _SRV_I0) * _SRV_U
+_SRV_A21 = _SRV_KT * _SRV_I0 / (_SRV_J * _SRV_W0) * _SRV_U
+_SRV_G2 = -_SRV_DTL / (_SRV_J * _SRV_W0) * _SRV_U
+
+# enzyme_qssa: Michaelis-Menten kinetics in the dimensionless form of the
+# quasi-steady-state literature; u substrate, v complex, started ON the QSS
+# manifold v(0) = u(0)/(u(0) + K) (the state after the fast initial burst),
+# so v' stays O(1) while perturbations off the manifold decay at (u + K)/eps.
+_ENZ_K = 1.0                # Km / s0
+_ENZ_LAM = 0.5              # k2 / (k1 * s0)
+_ENZ_EPS = 1.0 / 64.0       # e0 / s0 (dyadic, our stiffness choice)
+
+# robertson_scaled: the Robertson 1966 reaction structure with rate constants
+# cut down from (0.04, 1e4, 3e7) to (a, b, c) = (0.04, 20, 250) and the
+# intermediate concentration stored as y2 = 10 * physical, so the quasi-steady
+# intermediate stays resolvable in Q15 (about 0.12 * scale full range) while
+# the fast/slow separation stays near 300.  y1 + y2/10 + y3 is conserved.
+_ROB_A = 0.04
+_ROB_B = 20.0
+_ROB_C = 250.0
+
+# Stiffness labels for every problem.  Values are hardcoded from a one-time
+# measurement (numeric Jacobian eigenvalues along a Radau reference at
+# rtol 1e-12; see stiffness_basis strings) exactly like PER_STATE_PEAKS.
+STIFFNESS_RATIO: dict[str, float] = {
+    "buck_converter": 1.0,
+    "battery_2rc": 6.8,
+    "bicycle_lateral": 1.0,
+    "pll_lock": 1.0,
+    "glucose_minimal": 1.5,
+    "servo_load_step": 546.4,
+    "enzyme_qssa": 1030.0,
+    "robertson_scaled": 292.0,
+}
+
+STIFFNESS_BASIS: dict[str, str] = {
+    "buck_converter": "single complex pole pair; both eigenvalues share Re = -1/(2*Qf)",
+    "battery_2rc": "tau2 / tau1 = 222.9 s / 32.8 s for the two RC branches",
+    "bicycle_lateral": "single complex pole pair (sideslip and yaw share their real part)",
+    "pll_lock": "complex pole pair near the lock point (zeta = 0.7)",
+    "glucose_minimal": "ratio of the two decay rates, 10*(0.01*y2 + p1) over 10*p2, at the y2 peak",
+    "servo_load_step": "electrical pole 9.649/ms over electromechanical pole 0.01766/ms",
+    "enzyme_qssa": (
+        "Jacobian eigenvalue ratio 128.4 over 0.1246 at t = 0; the separation "
+        "narrows to about 130 as the substrate empties"
+    ),
+    "robertson_scaled": (
+        "largest fast eigenvalue over the window (11.7, from the y2 equation) "
+        "over the slow consumption rate a = 0.04; the third eigenvalue is 0 "
+        "because y1 + y2/10 + y3 is conserved"
+    ),
+}
+
 
 # --------------------------------------------------------------------------- float64 derivatives
 
@@ -167,12 +257,37 @@ def _rhs_glucose_minimal(t: float, y: tuple[float, ...]) -> tuple[float, ...]:
     )
 
 
+def _rhs_servo_load_step(t: float, y: tuple[float, ...]) -> tuple[float, ...]:
+    di, dw = y[0], y[1]
+    return (_SRV_A11 * di + _SRV_A12 * dw, _SRV_A21 * di + _SRV_G2)
+
+
+def _rhs_enzyme_qssa(t: float, y: tuple[float, ...]) -> tuple[float, ...]:
+    u, v = y[0], y[1]
+    return (
+        -u + (u + _ENZ_K - _ENZ_LAM) * v,
+        (u - (u + _ENZ_K) * v) / _ENZ_EPS,
+    )
+
+
+def _rhs_robertson_scaled(t: float, y: tuple[float, ...]) -> tuple[float, ...]:
+    y1, y2, y3 = y[0], y[1], y[2]
+    return (
+        -_ROB_A * y1 + (_ROB_B / 10.0) * y2 * y3,
+        10.0 * _ROB_A * y1 - _ROB_B * y2 * y3 - (_ROB_C / 10.0) * y2 * y2,
+        (_ROB_C / 100.0) * y2 * y2,
+    )
+
+
 FLOAT_RHS = {
     "buck_converter": _rhs_buck_converter,
     "battery_2rc": _rhs_battery_2rc,
     "bicycle_lateral": _rhs_bicycle_lateral,
     "pll_lock": _rhs_pll_lock,
     "glucose_minimal": _rhs_glucose_minimal,
+    "servo_load_step": _rhs_servo_load_step,
+    "enzyme_qssa": _rhs_enzyme_qssa,
+    "robertson_scaled": _rhs_robertson_scaled,
 }
 
 
@@ -268,12 +383,68 @@ def _ref_glucose_minimal(t: float) -> tuple[float, ...]:
         return (float(v[0]), float(v[1]))
 
 
+_SRV_AUG = np.array(
+    [
+        [_SRV_A11, _SRV_A12, 0.0],
+        [_SRV_A21, 0.0, _SRV_G2],
+        [0.0, 0.0, 0.0],
+    ],
+    dtype=float,
+)
+_ref_servo_load_step = _augmented_ref(_SRV_AUG, (0.0, 0.0))
+
+
+@functools.lru_cache(maxsize=None)
+def _enzyme_solution():
+    with mp.workdps(30):
+        def F(t, y):
+            # K = 1, lambda = 1/2, eps = 1/64: K - lambda = 1/2, 1/eps = 64.
+            return [
+                -y[0] + (y[0] + mp.mpf("0.5")) * y[1],
+                64 * (y[0] - (y[0] + 1) * y[1]),
+            ]
+        return mp.odefun(F, 0, [mp.mpf(1), mp.mpf("0.5")])
+
+
+@functools.lru_cache(maxsize=None)
+def _ref_enzyme_qssa(t: float) -> tuple[float, ...]:
+    with mp.workdps(30):
+        sol = _enzyme_solution()
+        v = sol(mp.mpf(t))
+        return (float(v[0]), float(v[1]))
+
+
+@functools.lru_cache(maxsize=None)
+def _robertson_solution():
+    with mp.workdps(30):
+        def F(t, y):
+            # a = 0.04, b = 20, c = 250 with y2 stored 10x physical:
+            # b/10 = 2, 10a = 2/5, c/10 = 25, c/100 = 5/2.
+            return [
+                -mp.mpf("0.04") * y[0] + 2 * y[1] * y[2],
+                mp.mpf("0.4") * y[0] - 20 * y[1] * y[2] - 25 * y[1] * y[1],
+                mp.mpf("2.5") * y[1] * y[1],
+            ]
+        return mp.odefun(F, 0, [mp.mpf(1), mp.mpf(0), mp.mpf(0)])
+
+
+@functools.lru_cache(maxsize=None)
+def _ref_robertson_scaled(t: float) -> tuple[float, ...]:
+    with mp.workdps(30):
+        sol = _robertson_solution()
+        v = sol(mp.mpf(t))
+        return (float(v[0]), float(v[1]), float(v[2]))
+
+
 REFERENCE = {
     "buck_converter": _ref_buck_converter,
     "battery_2rc": _ref_battery_2rc,
     "bicycle_lateral": _ref_bicycle_lateral,
     "pll_lock": _ref_pll_lock,
     "glucose_minimal": _ref_glucose_minimal,
+    "servo_load_step": _ref_servo_load_step,
+    "enzyme_qssa": _ref_enzyme_qssa,
+    "robertson_scaled": _ref_robertson_scaled,
 }
 
 
@@ -287,6 +458,9 @@ PER_STATE_PEAKS: dict[str, tuple[float, ...]] = {
     "bicycle_lateral": (0.2800102694, 0.0831416553),
     "pll_lock": (0.2305311157, 0.5234280583),
     "glucose_minimal": (2.79, 1.2741375800),
+    "servo_load_step": (0.4230090573, 0.4194014581),
+    "enzyme_qssa": (1.0, 0.5),
+    "robertson_scaled": (1.0, 0.1183412653, 0.5422224405),
 }
 
 PEAK: dict[str, float] = {name: max(v) for name, v in PER_STATE_PEAKS.items()}
@@ -318,6 +492,9 @@ _SPEC = {
     "bicycle_lateral": ((0.0, 0.0), 15.0, 1.0, "linear"),
     "pll_lock": ((0.0, 0.0), 10.0, 0.5, "nonlinear"),
     "glucose_minimal": ((2.79, 0.0), 12.0, 0.125, "nonlinear"),
+    "servo_load_step": ((0.0, 0.0), 260.0, 1.0, "linear"),
+    "enzyme_qssa": ((1.0, 0.5), 12.0, 0.5, "nonlinear"),
+    "robertson_scaled": ((1.0, 0.0, 0.0), 200.0, 0.5, "nonlinear"),
 }
 
 Y0_PHYS: dict[str, tuple[float, ...]] = {name: s[0] for name, s in _SPEC.items()}
@@ -429,6 +606,83 @@ PROBLEM_META: dict[str, dict] = {
         "window": {"t_end": 12.0, "time_unit": "10 min", "real_span": "120 min"},
         "notes": (
             "y0 = (2.79, 0); the Q15 rounding of 2.79*scale is 0.4 LSB and negligible."
+        ),
+    },
+    "servo_load_step": {
+        "domain": "motor control",
+        "source": (
+            "Armature-controlled DC servo, the standard two-state model (electrical "
+            "and mechanical equations coupled by the back-EMF and torque constants; "
+            "see e.g. Franklin, Powell and Emami-Naeini, Feedback Control of Dynamic "
+            "Systems, ch. 2). Motor parameters from the maxon RE 25 catalog page, "
+            "part 118752 (24 V, graphite brushes, 20 W): R = 2.32 ohm, L = 0.24 mH, "
+            "kt = ke = 23.4 mNm/A, rotor inertia 10.3 g cm^2. Our scenario choice: a "
+            "12x reflected load inertia (total J = 13.39e-6 kg m^2) and a 10 mNm "
+            "load-torque step from steady spin. States are deviations from the "
+            "pre-step equilibrium, (delta_i / 1 A, delta_omega / 100 rad/s)."
+        ),
+        "equation": (
+            "di' = (-R*di - ke*dw)/L; dw' = (kt*di - dT_L)/J "
+            "(deviations; per-ms coefficients -9.667, -9.75, 0.017476, -0.0074683)"
+        ),
+        "reference": "closed form via matrix exponential of the augmented affine system",
+        "window": {"t_end": 260.0, "time_unit": "1 ms", "real_span": "0.26 s"},
+        "notes": (
+            "The torque step enters the mechanical equation, so the run starts on "
+            "the slow manifold and derivatives stay Q15-representable; the "
+            "electrical pole at 9.65/ms is felt through stability only. At the "
+            "shared budget a tableau that can afford only a few hundred steps "
+            "sits outside its stability interval here and overflows."
+        ),
+    },
+    "enzyme_qssa": {
+        "domain": "biochemical kinetics",
+        "source": (
+            "Michaelis-Menten enzyme kinetics in the standard dimensionless form of "
+            "the quasi-steady-state literature: Segel and Slemrod, SIAM Review "
+            "31(3):446-477, 1989; Murray, Mathematical Biology I, 3rd ed., Springer "
+            "2002, ch. 6. u is substrate, v the enzyme-substrate complex scaled by "
+            "e0. Dimensionless parameters K = 1, lambda = 1/2, eps = e0/s0 = 1/64 "
+            "are our scenario choice, placing the problem in the moderately stiff "
+            "regime. The run starts on the QSS manifold v(0) = u(0)/(u(0)+K), the "
+            "state reached after the fast initial burst."
+        ),
+        "equation": "u' = -u + (u + 1/2)*v; v' = 64*(u - (u + 1)*v)",
+        "reference": "mpmath odefun at 30 digits (no closed form)",
+        "window": {
+            "t_end": 12.0,
+            "time_unit": "1/(k1*e0), the substrate timescale",
+            "real_span": "12 substrate time units",
+        },
+        "notes": (
+            "Perturbations off the QSS manifold decay at rate (u+K)/eps, between 64 "
+            "and 128; a method whose step count leaves h*(u+K)/eps outside its "
+            "stability interval rattles or overflows while cheaper methods finish."
+        ),
+    },
+    "robertson_scaled": {
+        "domain": "chemical kinetics",
+        "source": (
+            "Reaction structure of the Robertson problem: H. H. Robertson, The "
+            "solution of a set of reaction rate equations, in J. Walsh (ed.), "
+            "Numerical Analysis: An Introduction, Academic Press, 1966, pp. 178-182 "
+            "(original rates 0.04, 1e4, 3e7). Our scaling choices: rate constants "
+            "cut to (a, b, c) = (0.04, 20, 250) and the intermediate stored as "
+            "y2 = 10x its physical concentration, so the quasi-steady intermediate "
+            "stays resolvable in Q15 while a clear fast/slow separation remains."
+        ),
+        "equation": (
+            "y1' = -a*y1 + (b/10)*y2*y3; y2' = 10*a*y1 - b*y2*y3 - (c/10)*y2^2; "
+            "y3' = (c/100)*y2^2 (y2 stored 10x physical; y1 + y2/10 + y3 conserved)"
+        ),
+        "reference": "mpmath odefun at 30 digits (no closed form)",
+        "window": {"t_end": 200.0, "time_unit": "dimensionless", "real_span": "200 units"},
+        "notes": (
+            "The stiffest problem in the suite at the shared budget: the fast "
+            "eigenvalue grows to about 11.7 as y3 accumulates, and a method that "
+            "can afford only about 1000 steps or fewer on three states leaves its "
+            "stability interval mid-run and overflows; the survivors are the "
+            "cheap one- and two-stage methods."
         ),
     },
 }
@@ -559,9 +813,11 @@ _SCHEMA_DOC = {
     "rounding": "Q15 multiply semantics (floor / ASRS, per HANDOFF 4.2)",
     "problems": (
         "one entry per practical problem: name, domain, source, equation, reference, "
-        "family, scale (power of two), deriv_scale (1.0 for all five), y0 in physical "
+        "family, scale (power of two), deriv_scale (1.0 for all), y0 in physical "
         "units, peak (max per-state |y| over the window, float RK4 at 40000 steps), "
-        "per_state_peaks, window {t_end, time_unit, real_span}, optional notes"
+        "per_state_peaks, window {t_end, time_unit, real_span}, stiff (true for the "
+        "moderately stiff subset), stiffness_ratio (fast rate over slow rate, see "
+        "stiffness_basis for how each was measured), optional notes"
     ),
     "methods": (
         "one entry per evaluated method: name_or_hash (classical fixture name, or the "
@@ -583,9 +839,13 @@ _SCHEMA_DOC = {
     "verdicts": (
         "per_problem: for each problem the overall winner and the best classical and "
         "best discovered entries by q15_error, with their ratio "
-        "(discovered/classical, below 1.0 means the discovered method is ahead); "
-        "overall: honest summary phrased from the numbers, plus the scalar facts it "
-        "is derived from"
+        "(discovered/classical, below 1.0 means the discovered method is ahead), plus "
+        "finisher counts (methods whose Q15 run completed without overflow); "
+        "aggregate counts are reported for all problems together and split by the "
+        "stiff flag (practical_* for stiff false, stiff_* for stiff true), including "
+        "stiff_problems_with_no_discovered_finisher, where every discovered method "
+        "overflowed; overall: honest summary phrased from the numbers, plus the "
+        "scalar facts it is derived from"
     ),
 }
 
@@ -635,30 +895,59 @@ def _problem_entry(name: str) -> dict:
         "peak": PEAK[name],
         "per_state_peaks": list(PER_STATE_PEAKS[name]),
         "window": meta["window"],
+        "stiff": STIFF[name],
+        "stiffness_ratio": STIFFNESS_RATIO[name],
+        "stiffness_basis": STIFFNESS_BASIS[name],
     }
     if "notes" in meta:
         entry["notes"] = meta["notes"]
     return entry
 
 
+def _median(vals: list[float]) -> float | None:
+    if not vals:
+        return None
+    s = sorted(vals)
+    mid = len(s) // 2
+    if len(s) % 2:
+        return s[mid]
+    return 0.5 * (s[mid - 1] + s[mid])
+
+
 def _verdicts(methods: list[dict], rows: list[dict]) -> dict:
     kind_of = {m["name_or_hash"]: m["kind"] for m in methods}
     per_problem: dict[str, dict] = {}
-    ratios: list[float] = []
-    wins = 0
-    comparable = 0
+    # Aggregates split by the stiff flag: False = the practical (non-stiff)
+    # subset, True = the moderately stiff subset.
+    groups: dict[bool, dict] = {
+        flag: {"total": 0, "wins": 0, "comparable": 0, "ratios": [], "no_disc": 0}
+        for flag in (False, True)
+    }
     for name in VALIDATION_NAMES:
-        cells = [r for r in rows if r["problem"] == name and r["q15_error"] is not None]
-        if not cells:
-            per_problem[name] = {"winner": None}
-            continue
-        best = min(cells, key=lambda r: r["q15_error"])
+        g = groups[STIFF[name]]
+        g["total"] += 1
+        all_cells = [r for r in rows if r["problem"] == name]
+        cells = [r for r in all_cells if r["q15_error"] is not None]
         cls = [r for r in cells if kind_of[r["method"]] == "classical"]
         dis = [r for r in cells if kind_of[r["method"]] == "discovered"]
+        if not dis:
+            g["no_disc"] += 1
+        if not cells:
+            per_problem[name] = {
+                "winner": None, "stiff": STIFF[name],
+                "finishers_classical": 0, "finishers_discovered": 0,
+                "methods_evaluated": len(all_cells),
+            }
+            continue
+        best = min(cells, key=lambda r: r["q15_error"])
         entry = {
             "winner": best["method"],
             "winner_kind": kind_of[best["method"]],
             "winner_q15_error": best["q15_error"],
+            "stiff": STIFF[name],
+            "finishers_classical": len(cls),
+            "finishers_discovered": len(dis),
+            "methods_evaluated": len(all_cells),
         }
         if cls and dis:
             bc = min(cls, key=lambda r: r["q15_error"])
@@ -671,37 +960,71 @@ def _verdicts(methods: list[dict], rows: list[dict]) -> dict:
                 "best_discovered_q15_error": bd["q15_error"],
                 "ratio_discovered_over_classical": ratio,
             })
-            comparable += 1
+            g["comparable"] += 1
             if bd["q15_error"] < bc["q15_error"]:
-                wins += 1
+                g["wins"] += 1
             if ratio is not None:
-                ratios.append(ratio)
+                g["ratios"].append(ratio)
         per_problem[name] = entry
-    ratios_sorted = sorted(ratios)
-    median_ratio = None
-    if ratios_sorted:
-        mid = len(ratios_sorted) // 2
-        if len(ratios_sorted) % 2:
-            median_ratio = ratios_sorted[mid]
-        else:
-            median_ratio = 0.5 * (ratios_sorted[mid - 1] + ratios_sorted[mid])
-    if comparable:
-        overall = (
-            f"On the practical validation suite ({comparable} problems from embedded "
-            f"application domains) at a {BUDGET_CYCLES}-cycle budget under "
-            f"{COST_MODEL.name} with floor rounding, the best discovered method has "
-            f"lower Q15 error than the best classical anchor on {wins} of "
-            f"{comparable} problems. The median ratio of best-discovered to "
-            f"best-classical Q15 error is {median_ratio:.3f} (below 1.0 favors the "
-            f"discovered methods)."
+
+    mg, sg = groups[False], groups[True]
+    parts: list[str] = []
+    if mg["comparable"]:
+        med = _median(mg["ratios"])
+        parts.append(
+            f"On the {mg['comparable']} non-stiff practical problems at a "
+            f"{BUDGET_CYCLES}-cycle budget under {COST_MODEL.name} with floor "
+            f"rounding, the best discovered method has lower Q15 error than the "
+            f"best classical anchor on {mg['wins']} of {mg['comparable']}; the "
+            f"median ratio of best-discovered to best-classical Q15 error is "
+            f"{med:.3f} (below 1.0 favors the discovered methods)."
         )
-    else:
-        overall = "No comparable results; every cell failed or one side is missing."
+    if sg["total"]:
+        srs = sorted(STIFFNESS_RATIO[n] for n in VALIDATION_NAMES if STIFF[n])
+        bits: list[str] = []
+        if sg["comparable"]:
+            med = _median(sg["ratios"])
+            bits.append(
+                f"where both sides finish, the best discovered method is ahead on "
+                f"{sg['wins']} of {sg['comparable']} with a median error ratio of "
+                f"{med:.3f}"
+            )
+        if sg["no_disc"]:
+            bits.append(
+                f"on {sg['no_disc']} of {sg['total']} no discovered method finishes "
+                f"at all; every one overflows in Q15 while cheap low-stage "
+                f"classical methods complete the run"
+            )
+        if not bits:
+            bits.append("no stiff problem produced a comparable pair of finishers")
+        parts.append(
+            f"On the {sg['total']} moderately stiff problems (stiffness ratios "
+            f"{srs[0]:.0f} to {srs[-1]:.0f}): " + "; ".join(bits) + "."
+        )
+        parts.append(
+            "The pattern is the stability tax of explicit methods: at a fixed "
+            "cycle budget an expensive high-order tableau takes larger steps, and "
+            "once the step size times the fast eigenvalue leaves the stability "
+            "interval the Q15 run overflows, whoever found the tableau. This is "
+            "the motivating evidence for the epoch-3 implicit (SDIRK) track."
+        )
+    overall = " ".join(parts) if parts else (
+        "No comparable results; every cell failed or one side is missing."
+    )
     return {
         "per_problem": per_problem,
-        "problems_won_by_discovered": wins,
-        "problems_compared": comparable,
-        "median_ratio_discovered_over_classical": median_ratio,
+        "problems_won_by_discovered": mg["wins"] + sg["wins"],
+        "problems_compared": mg["comparable"] + sg["comparable"],
+        "median_ratio_discovered_over_classical": _median(mg["ratios"] + sg["ratios"]),
+        "practical_problems_total": mg["total"],
+        "practical_problems_compared": mg["comparable"],
+        "practical_problems_won_by_discovered": mg["wins"],
+        "practical_median_ratio_discovered_over_classical": _median(mg["ratios"]),
+        "stiff_problems_total": sg["total"],
+        "stiff_problems_compared": sg["comparable"],
+        "stiff_problems_won_by_discovered": sg["wins"],
+        "stiff_median_ratio_discovered_over_classical": _median(sg["ratios"]),
+        "stiff_problems_with_no_discovered_finisher": sg["no_disc"],
         "overall": overall,
     }
 
@@ -783,9 +1106,14 @@ def validate_results(doc: dict) -> None:
     if sorted(pnames) != sorted(VALIDATION_NAMES):
         fail(f"problems must cover {VALIDATION_NAMES}, got {pnames}")
     for p in doc["problems"]:
-        for k in ("name", "domain", "source", "scale", "deriv_scale", "window"):
+        for k in ("name", "domain", "source", "scale", "deriv_scale", "window",
+                  "stiff", "stiffness_ratio", "stiffness_basis"):
             if k not in p:
                 fail(f"problem {p.get('name')!r} missing {k!r}")
+        if not isinstance(p["stiff"], bool):
+            fail(f"problem {p.get('name')!r} stiff must be a boolean")
+        if not isinstance(p["stiffness_ratio"], (int, float)):
+            fail(f"problem {p.get('name')!r} stiffness_ratio must be a number")
     mnames = [m["name_or_hash"] for m in doc["methods"]]
     if len(set(mnames)) != len(mnames):
         fail("duplicate method entries")
@@ -819,6 +1147,11 @@ def validate_results(doc: dict) -> None:
         fail("verdicts must carry per_problem and overall")
     if not isinstance(v["overall"], str):
         fail("verdicts.overall must be a string")
+    for k in ("stiff_problems_total", "stiff_problems_compared",
+              "stiff_problems_with_no_discovered_finisher",
+              "practical_problems_total", "practical_problems_compared"):
+        if not isinstance(v.get(k), int):
+            fail(f"verdicts.{k} must be an integer")
 
 
 def write_results(doc: dict, path: Path | str | None = None) -> Path:
