@@ -10,9 +10,12 @@ param(
     [int]$NoCandidateMinutes = 30,
     [string]$Findings = "D:/rk/findings",
     [int]$PushMinutes = 10,
-    [int]$CpuHigh = 50,             # pause when non-container host CPU stays above this ...
+    [int]$CpuHigh = 70,             # pause when non-container host CPU stays above this ...
     [int]$CpuLow = 30,              # ... unpause when it stays below this ...
-    [int]$CpuSustainSeconds = 30,   # ... for this long
+    [int]$CpuSustainSeconds = 30,   # ... for this long (the spike triggers)
+    [int]$CpuHighAvg = 60,          # ... or when the rolling average tops this ...
+    [int]$CpuLowAvg = 40,           # ... or resume when the rolling average is under this ...
+    [int]$CpuAvgWindowSeconds = 300, # ... over this window (the average triggers)
     [int]$SaturationCheckSeconds = 1800,  # epoch-saturation orchestrator cadence (0 = off)
     [switch]$NoSaturation,
     [switch]$AutoFreeze,   # without this, saturation checks are advisory: log only, never freeze
@@ -97,8 +100,9 @@ function Container-UptimeSeconds {
 $cap = Read-Cap
 $highSince = $null
 $lowSince = $null
+$cpuSamples = New-Object System.Collections.ArrayList
 $alerted = $false
-Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s heartbeat-stale=${HeartbeatStaleSeconds}s min-free=${MinFreeGB}GB push=${PushMinutes}min cpu-pause=${CpuHigh}/${CpuLow}% for ${CpuSustainSeconds}s battery-guard=$(-not $NoBatteryGuard)"
+Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s heartbeat-stale=${HeartbeatStaleSeconds}s min-free=${MinFreeGB}GB push=${PushMinutes}min cpu-pause spike ${CpuHigh}/${CpuLow}% for ${CpuSustainSeconds}s, avg ${CpuHighAvg}/${CpuLowAvg}% over ${CpuAvgWindowSeconds}s battery-guard=$(-not $NoBatteryGuard)"
 
 while ($true) {
     if (-not $Once) { Start-Sleep -Seconds $PollSeconds }
@@ -209,7 +213,11 @@ while ($true) {
         if ($Once) { break }; continue
     }
 
-    # Pause watchdog (section 13.5): non-container CPU > 50% for 30 s -> pause; < 30% for 30 s -> unpause.
+    # Pause watchdog (section 13.5, owner-tuned 2026-09-03). Two triggers each way:
+    # pause on a spike (> $CpuHigh for $CpuSustainSeconds) OR a hot average (> $CpuHighAvg
+    # over $CpuAvgWindowSeconds); resume on a quiet spike (< $CpuLow for $CpuSustainSeconds)
+    # OR a quiet average (< $CpuLowAvg over the window). The sample buffer clears after any
+    # action so the spike and average rules cannot flap against each other.
     $total = [double](Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
     $ctr = 0.0
     try {
@@ -218,16 +226,32 @@ while ($true) {
     } catch {}
     $host_cpu = [math]::Max(0.0, $total - $ctr)
     $now = Get-Date
+    [void]$cpuSamples.Add(@{ t = $now; v = $host_cpu })
+    while ($cpuSamples.Count -gt 0 -and ($now - $cpuSamples[0].t).TotalSeconds -gt $CpuAvgWindowSeconds) { $cpuSamples.RemoveAt(0) }
+    $avgReady = ($cpuSamples.Count -ge 2 -and ($now - $cpuSamples[0].t).TotalSeconds -ge (0.8 * $CpuAvgWindowSeconds))
+    $cpuAvg = ($cpuSamples | ForEach-Object { $_.v } | Measure-Object -Average).Average
+    $avgTxt = [math]::Round($cpuAvg, 1)
+    $winMin = [int]($CpuAvgWindowSeconds / 60)
+
     if ($host_cpu -gt $CpuHigh) { if ($null -eq $highSince) { $highSince = $now }; $lowSince = $null }
     elseif ($host_cpu -lt $CpuLow) { if ($null -eq $lowSince) { $lowSince = $now }; $highSince = $null }
     else { $highSince = $null; $lowSince = $null }
 
-    if (-not $isPaused -and $null -ne $highSince -and ($now - $highSince).TotalSeconds -ge $CpuSustainSeconds) {
-        Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for ${CpuSustainSeconds}s -> docker pause"
-        docker pause $Container | Out-Null; $highSince = $null
-    } elseif ($isPaused -and $null -ne $lowSince -and ($now - $lowSince).TotalSeconds -ge $CpuSustainSeconds) {
-        Write-Host "$(Get-Date -Format s) host CPU ${host_cpu}% for ${CpuSustainSeconds}s -> docker unpause"
-        docker unpause $Container | Out-Null; $lowSince = $null
+    $spikePause = ($null -ne $highSince -and ($now - $highSince).TotalSeconds -ge $CpuSustainSeconds)
+    $avgPause = ($avgReady -and $cpuAvg -gt $CpuHighAvg)
+    $spikeResume = ($null -ne $lowSince -and ($now - $lowSince).TotalSeconds -ge $CpuSustainSeconds)
+    $avgResume = ($avgReady -and $cpuAvg -lt $CpuLowAvg)
+
+    if (-not $isPaused -and ($spikePause -or $avgPause)) {
+        $why = if ($spikePause) { "host CPU ${host_cpu}% > ${CpuHigh}% for ${CpuSustainSeconds}s" } else { "host CPU avg ${avgTxt}% > ${CpuHighAvg}% over ${winMin} min" }
+        Write-Host "$(Get-Date -Format s) $why -> docker pause"
+        docker pause $Container | Out-Null
+        $highSince = $null; $lowSince = $null; $cpuSamples.Clear()
+    } elseif ($isPaused -and ($spikeResume -or $avgResume)) {
+        $why = if ($spikeResume) { "host CPU ${host_cpu}% < ${CpuLow}% for ${CpuSustainSeconds}s" } else { "host CPU avg ${avgTxt}% < ${CpuLowAvg}% over ${winMin} min" }
+        Write-Host "$(Get-Date -Format s) $why -> docker unpause"
+        docker unpause $Container | Out-Null
+        $highSince = $null; $lowSince = $null; $cpuSamples.Clear()
     }
     if ($Once) { break }
 }
