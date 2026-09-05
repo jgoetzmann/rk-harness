@@ -20,7 +20,10 @@
     "llm_every_cycles": 5,
     "codex_usage_cap_percent": 80,
     "litreview_every_cycles": 50,
-    "interpret_every_cycles": 25
+    "interpret_every_cycles": 25,
+    "sidetrack_every_cycles": 0,
+    "sidetrack_max_seconds": 180,
+    "sidetrack_tracks": "both"
   },
   "watchdog": {
     "poll_seconds": 10,

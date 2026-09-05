@@ -30,6 +30,7 @@ from rk_harness import literature
 from rk_harness import orderconditions
 from rk_harness import prompts
 from rk_harness import search
+from rk_harness import sidetrack
 from rk_harness import sitegen
 from rk_harness import tableau as tableau_mod
 from rk_harness import verifier
@@ -368,9 +369,14 @@ def _classical_orders() -> dict[str, int]:
     return out
 
 
-def seed_baselines(verifier_hash_value: str) -> int:
-    """Append the 8 classical tableaus (cycle 0, seed 0, unreplicated) if absent."""
-    existing = {r.tableau_hash for r in archive.read_all()}
+def seed_baselines(verifier_hash_value: str, known: frozenset[str] | None = None) -> int:
+    """Append the 8 classical tableaus (cycle 0, seed 0, unreplicated) if absent.
+
+    `known` is the set of archived hashes the caller already has (ArchiveState.record_hashes).
+    Passing it avoids a full re-read of the archive; omitting it re-reads, which is what any
+    caller outside the cycle loop wants.
+    """
+    existing = set(known) if known is not None else {r.tableau_hash for r in archive.read_all()}
     orders = _classical_orders()
     added = 0
     for name, t in tableau_mod.classical().items():
@@ -531,16 +537,46 @@ def _git(args: list[str]) -> None:
         log_event("git_failed", args=args, error=repr(e))
 
 
+# Small, slow-moving state that the container writes into /work. Without these the
+# files only reached git when a human committed them by hand: the runner staged
+# completed archive files and nothing else, and the host watchdog pushes commits but
+# never makes them, so the hypothesis ledger, the literature digests and the model
+# interpretations sat dirty in the checkout indefinitely. Today's archive file stays
+# out on purpose (tens of MB, appended every cycle); it is committed once the day
+# rolls over, exactly as before. Paths that are absent, or that .gitignore covers,
+# stage nothing and cost nothing.
+_WORK_EXTRA_PATHS: tuple[str, ...] = (
+    "LAST_DIRECTIVE.json",
+    "hypotheses.jsonl",
+    "falsification.json",
+    "EPOCH_STATUS.json",
+    "literature",
+    "interpretation",
+    "prototypes",
+    "sidetrack",
+    "validation",
+    "benchmark",
+)
+
+
 def _commit_outputs(new_cycle_id: int) -> None:
     fd = findings_dir()
     _git(["-C", str(fd), "add", "-A"])
     _git(["-C", str(fd), "commit", "-qm", f"cycle {new_cycle_id}"])
     wd = work_dir()
     today = archive.today_path()
-    done = [p for p in sorted(archive_dir().glob("*.jsonl")) if p.resolve() != today.resolve()]
-    if done:
-        for p in done:
+    staged = False
+    for p in sorted(archive_dir().glob("*.jsonl")):
+        if p.resolve() != today.resolve():
             _git(["-C", str(wd), "add", str(p)])
+            staged = True
+    for rel in _WORK_EXTRA_PATHS:
+        if (wd / rel).exists():
+            _git(["-C", str(wd), "add", rel])
+            staged = True
+    if staged:
+        # A commit with nothing actually staged fails harmlessly and makes no empty
+        # commit, so this can run every cycle without producing one.
         _git(["-C", str(wd), "commit", "-qm", f"cycle {new_cycle_id}"])
 
 
@@ -580,6 +616,52 @@ def _interpret_every() -> int:
         return max(0, int(os.environ.get("RK_INTERPRET_EVERY", "25") or 25))
     except ValueError:
         return 25
+
+
+def _sidetrack_every() -> int:
+    try:
+        return max(0, int(os.environ.get("RK_SIDETRACK_EVERY", "0") or 0))
+    except ValueError:
+        return 0
+
+
+def _sidetrack_max_seconds() -> float:
+    try:
+        return max(30.0, min(600.0, float(os.environ.get("RK_SIDETRACK_MAX_SECONDS", "180") or 180)))
+    except ValueError:
+        return 180.0
+
+
+def _sidetrack_tracks() -> tuple[str, ...]:
+    return sidetrack.parse_tracks(os.environ.get("RK_SIDETRACK_TRACKS", "both"))
+
+
+def _maybe_sidetrack(new_cycle_id: int) -> None:
+    """Every RK_SIDETRACK_EVERY cycles: measure side-track points until the budget
+    is spent (docs/SIDETRACK-AUTOMATION.md).
+
+    Off by default, so a container that has not been reconfigured behaves exactly
+    as it did before this existed. Runs after the archive work of the cycle is
+    finished and before the site build, so a job can neither cost the cycle its
+    results nor delay their publication by a cycle. Failures are logged and
+    swallowed, like the literature and interpretation hooks above.
+    """
+    every = _sidetrack_every()
+    tracks = _sidetrack_tracks()
+    if every <= 0 or not tracks or new_cycle_id % every != 0:
+        return
+    if (work_dir() / "STOP").exists():
+        log_event("sidetrack_skipped", reason="STOP present", cycle_id=new_cycle_id)
+        return
+    try:
+        summary = sidetrack.run_until(
+            _sidetrack_max_seconds(), tracks=tracks, cycle=new_cycle_id, log=log_event,
+            stop=lambda: (work_dir() / "STOP").exists())
+    except Exception as e:  # noqa: BLE001 - a side track must never fail the cycle
+        log_event("sidetrack_failed", error=repr(e), cycle_id=new_cycle_id)
+        return
+    log_event("sidetrack_firing", cycle_id=new_cycle_id, points=len(summary.get("points", [])),
+              elapsed_s=summary.get("elapsed_s"), exhausted=summary.get("exhausted"))
 
 
 def _codex_capped() -> bool:
@@ -756,11 +838,16 @@ def _run_cycle(state: RunState) -> RunState:
     phase = state.phase
 
     # 1. replay, verifier hash, baselines
+    # This is the only full pass over the archive in a cycle. It used to be five (a replay
+    # here, a read_all in seed_baselines, a read_all for the seen-set, then a replay each
+    # for the hypothesis resolution and the site build), which at 71k records cost about
+    # 240 s against roughly 250 s of actual searching. The rest of the cycle works from
+    # this state and folds in what it appends; archive.fold is exact, not approximate.
     arch = archive.replay()
     vh = verifier_hash.compute_verifier_hash()
     # Seed on every cycle, not only when the archive is empty: seed_baselines skips hashes already
     # archived, and a crash mid-seeding (review E2 / R1) must not leave the baselines half-written.
-    n = seed_baselines(vh)
+    n = seed_baselines(vh, known=arch.record_hashes)
     if n:
         log_event("baselines_seeded", count=n, verifier_hash=vh)
         arch = archive.replay()
@@ -785,8 +872,7 @@ def _run_cycle(state: RunState) -> RunState:
         return state
 
     # 3. candidates
-    existing = {r.tableau_hash for r in archive.read_all()}
-    seen = set(existing) | _rejected_hashes(vh)
+    seen = set(arch.record_hashes) | _rejected_hashes(vh)
     cands: list[_Candidate] = []
     enumeration_phase = False
     enumeration_exhausted = False
@@ -835,6 +921,7 @@ def _run_cycle(state: RunState) -> RunState:
             elite_map[(int(order), int(stg), int(bucket))] = rec
 
     improved = False
+    appended: list[Record] = []
     last_cell: tuple[int, int] | None = None
     n_accepted = 0
     n_rejected = 0
@@ -874,6 +961,7 @@ def _run_cycle(state: RunState) -> RunState:
         tier = archive.assign_tier(sv, inc.score if inc is not None else None)
         rec = dataclasses.replace(prelim, tier=tier)
         archive.append(rec)
+        appended.append(rec)
         n_accepted += 1
         last_cell = (stg, bucket)
         new_elite = inc is None or sv.heldout_error < inc.score.heldout_error
@@ -888,14 +976,23 @@ def _run_cycle(state: RunState) -> RunState:
               skipped=n_skipped, total=len(cands))
 
     # 5. hypotheses
-    resolved = ledger.resolve_open(archive.replay(), new_cycle_id)
+    # The post-append state, derived from the delta instead of a second full read.
+    arch_after = archive.fold(arch, appended)
+    resolved = ledger.resolve_open(arch_after, new_cycle_id)
     if resolved:
         log_event("hypotheses_resolved", ids=list(resolved))
+        # resolve_open rewrote the ledger, and the site below has to show the new verdicts
+        arch_after = archive.refresh_hypotheses(arch_after)
+
+    # 5b. side tracks: off-archive adaptive and implicit measurements. Placed here so
+    # the cycle's scored work is already appended (a job cannot cost it) and the site
+    # build below still publishes whatever the job produced in this same cycle.
+    _maybe_sidetrack(new_cycle_id)
 
     # 6. site + commits
     if os.environ.get("RK_SITE") != "off":
         try:
-            sitegen.build(archive.replay(), findings_dir() / "docs")
+            sitegen.build(arch_after, findings_dir() / "docs")
         except sitegen.BannedWordError as e:
             log_event("site_build_failed", error=repr(e))
     if os.environ.get("RK_GIT_COMMIT") == "on":

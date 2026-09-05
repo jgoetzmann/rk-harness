@@ -354,7 +354,69 @@ def replay() -> ArchiveState:
         open_hypotheses=open_ids,
         refuted_hypotheses=refuted,
         cell_stats=cell_stats,
+        record_hashes=frozenset(r.tableau_hash for r in records),
     )
+
+
+def fold(state: ArchiveState, records: list[Record]) -> ArchiveState:
+    """The state `replay()` would return if `records` were appended to the archive that
+    `state` was built from.
+
+    A cycle needs the post-append state twice, to resolve hypotheses and to build the
+    site, and re-reading the whole archive for each costs more than the search it wraps:
+    at 71k records a replay is about 66 s against roughly 250 s of actual searching.
+    Every rule below is the one `replay()` applies, moved from the whole file onto the
+    delta. Grids use `_better`, cell stats use the same Welford update fed in the same
+    order (appended records sort last in the same files `read_all()` walks), so this is
+    identical to a replay rather than merely close; `test_A80` asserts exactly that.
+
+    Hypothesis ids are re-read rather than carried, because the cycle may have proposed
+    or resolved one since `state` was built.
+    """
+    grids = {o: dict(g) for o, g in state.grids.items()}
+    cell_stats = {k: dict(v) for k, v in state.cell_stats.items()}
+    last_cycle = state.last_cycle_id
+    hashes = set(state.record_hashes)
+    for r in records:
+        o = record_order(r)
+        g = grids.get(o)
+        if g is not None:
+            key = _cell_key(r)
+            inc = g.get(key)
+            if inc is None or _better(r, inc):
+                g[key] = r
+        cell = cell_stats.setdefault((o, stages(r.tableau)), {})
+        for ms in _MODEL_SHORTS:
+            for metric in _METRICS:
+                v = metric_value(r.score, ms, metric)
+                if v is None:
+                    continue
+                name = f"{ms}.{metric}"
+                cell[name] = update_cell_stat(cell.get(name), v)
+        if r.cycle_id > last_cycle:
+            last_cycle = r.cycle_id
+        hashes.add(r.tableau_hash)
+    open_ids, refuted = _hypothesis_ids()
+    return ArchiveState(
+        n_records=state.n_records + len(records),
+        last_cycle_id=last_cycle,
+        grids=grids,
+        open_hypotheses=open_ids,
+        refuted_hypotheses=refuted,
+        cell_stats=cell_stats,
+        record_hashes=frozenset(hashes),
+    )
+
+
+def refresh_hypotheses(state: ArchiveState) -> ArchiveState:
+    """`state` with only the hypothesis id lists re-read from the ledger.
+
+    Resolving hypotheses rewrites the ledger mid-cycle, and the site is built after
+    that, so it has to see the new verdicts. Nothing else about the state changes, and
+    the grids are shared rather than copied.
+    """
+    open_ids, refuted = _hypothesis_ids()
+    return dataclasses.replace(state, open_hypotheses=open_ids, refuted_hypotheses=refuted)
 
 
 # --------------------------------------------------------------------------- tiers

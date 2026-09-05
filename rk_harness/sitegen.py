@@ -166,6 +166,41 @@ footer{margin-top:48px;padding-top:14px;border-top:1px solid var(--line);
   font-size:12px;color:var(--text-3)}
 footer p{margin:3px 0;max-width:none}
 footer p.prov a{color:var(--text-2)}
+nav.tabs.sub2{margin-top:0;padding-bottom:2px}
+nav.tabs.sub2 a{font-size:12.5px;padding:4px 12px;border-radius:7px;color:var(--text-3)}
+nav.tabs.sub2 a:hover{color:var(--text-1)}
+nav.tabs.sub2 a.on{background:var(--surface-0);border:1px solid var(--line);
+  color:var(--text-1);font-weight:600;box-shadow:none}
+
+/* one-line ledger rows: the summary carries the whole record, the body carries prose */
+.ledger{min-width:820px}
+.ledhead,details.led>summary{display:grid;
+  grid-template-columns:14px 78px 104px 1fr 58px 62px 52px;
+  gap:12px;align-items:center;padding:6px 12px}
+.ledhead{font-size:11px;color:var(--text-2);font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase}
+details.led{background:var(--surface-1);border:1px solid var(--line);border-radius:8px;
+  margin:4px 0;font-size:12.5px}
+details.led>summary{cursor:pointer;list-style:none;font-variant-numeric:tabular-nums}
+details.led>summary::-webkit-details-marker{display:none}
+details.led>summary::before{content:"+";color:var(--text-3);font-weight:600}
+details.led[open]>summary::before{content:"\2212"}
+details.led[open]>summary{border-bottom:1px solid var(--line)}
+details.led>div{padding:10px 16px 12px 40px}
+details.led .pred{font:12px ui-monospace,Consolas,monospace;color:var(--text-2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.led .num,.ledhead .num{text-align:right}
+details.led .badge{justify-self:start}
+details.led .mono{font-size:12px;color:var(--text-2)}
+details.led .rep{color:var(--text-3);font-weight:600}
+details.led table{font-size:12px;margin:6px 0 0}
+details.repeats{margin:10px 0;font-size:13px;color:var(--text-2);border:1px solid var(--line);
+  border-radius:8px;background:var(--surface-0)}
+details.repeats>summary{cursor:pointer;padding:6px 12px;color:var(--text-3);font-size:12.5px}
+details.repeats>summary:hover{color:var(--text-1)}
+details.repeats[open]>summary{border-bottom:1px solid var(--line);color:var(--text-2)}
+details.repeats>div{padding:4px 12px 8px}
+.hash a,a.hash{font:12px ui-monospace,Consolas,monospace}
 """
 
 
@@ -238,34 +273,42 @@ def _explain(*paras: str) -> str:
             f"<div>{body}</div></details>")
 
 
+# Two tiers: the pages that carry results first, the record and the reference behind
+# them second. A flat row of ten gave a reader no order to read them in.
 _NAV_ITEMS = (
-    ("index.html", "overview"),
-    ("methodology.html", "methodology"),
-    ("costmodel.html", "cost model"),
-    ("falsification.html", "falsification"),
-    ("validation.html", "validation"),
-    ("benchmark.html", "benchmark"),
-    ("hypotheses.html", "hypotheses"),
-    ("literature.html", "literature"),
-    ("interpretation.html", "interpretation"),
-    ("glossary.html", "glossary"),
+    ("index.html", "overview", 1),
+    ("validation.html", "validation", 1),
+    ("benchmark.html", "benchmark", 1),
+    ("sidetrack.html", "side tracks", 1),
+    ("hypotheses.html", "hypotheses", 1),
+    ("falsification.html", "falsification", 1),
+    ("methodology.html", "methodology", 2),
+    ("costmodel.html", "cost model", 2),
+    ("literature.html", "literature", 2),
+    ("interpretation.html", "interpretation", 2),
+    ("glossary.html", "glossary", 2),
 )
 
-# validation.html exists only when work_dir()/validation/results.json does, and
-# benchmark.html only when work_dir()/benchmark/results.json does; build() raises
-# these flags (and restores them) so every page's nav matches the pages written.
+# validation.html exists only when work_dir()/validation/results.json does,
+# benchmark.html only when work_dir()/benchmark/results.json does, and sidetrack.html
+# only when work_dir()/sidetrack/ledger.jsonl does; build() raises these flags (and
+# restores them) so every page's nav matches the pages written.
 _HAS_VALIDATION = False
 _HAS_BENCHMARK = False
+_HAS_SIDETRACK = False
 
 
 def _nav(active: str) -> str:
-    items = [(href, label) for href, label in _NAV_ITEMS
+    items = [(href, label, tier) for href, label, tier in _NAV_ITEMS
              if (href != "validation.html" or _HAS_VALIDATION)
-             and (href != "benchmark.html" or _HAS_BENCHMARK)]
-    links = "".join(
-        f'<a href="{href}"{" class=" + chr(34) + "on" + chr(34) if href == active else ""}>{_esc(label)}</a>'
-        for href, label in items)
-    return f'<nav class="tabs">{links}</nav>'
+             and (href != "benchmark.html" or _HAS_BENCHMARK)
+             and (href != "sidetrack.html" or _HAS_SIDETRACK)]
+
+    def row(tier: int) -> str:
+        return "".join(
+            f'<a href="{href}"{" class=" + chr(34) + "on" + chr(34) if href == active else ""}>{_esc(label)}</a>'
+            for href, label, t in items if t == tier)
+    return f'<nav class="tabs">{row(1)}</nav><nav class="tabs sub2">{row(2)}</nav>'
 
 
 def _page(title: str, body: str, active: str = "", subtitle: str = "") -> str:
@@ -491,11 +534,7 @@ def _grid_heatmap(order: int, grid: dict) -> str:
     parts.append(f'<text x="{ml}" y="{h - 6}">cycle bucket (m0plus_fast)</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            f'aria-label="Order {order} elite grid heatmap">' + "".join(parts) + "</svg>")
-    return (f"<figure><figcaption>Order {order} elites: rows are stage counts, columns are "
-            "m0plus_fast cycle buckets, and each filled cell prints the held-out error of its "
-            "elite to 3 significant figures; hover a cell or open it for the exact value. "
-            "Deeper blue is lower error.</figcaption>"
-            f"{svg}</figure>")
+    return (f'<figure><figcaption><strong>Order {order}</strong></figcaption>{svg}</figure>')
 
 
 def _round_top_bar(x: float, y: float, w: float, h: float, fill: str, title: str, r: float = 4) -> str:
@@ -834,59 +873,70 @@ def render_index(arch: ArchiveState, benchmark: dict | None = None) -> str:
     parts.append("<h2>Cost against held-out error</h2>")
     parts.append('<div class="panel">' + _elite_scatter(arch) + "</div>")
     parts.append("<h2>Elite grids</h2>")
+    parts.append('<p class="note">Rows are stage counts, columns are m0plus_fast cycle buckets, '
+                 "and each filled cell prints its elite's held-out error to 3 significant "
+                 "figures. Deeper blue is lower error, scaled within each grid. Hover a cell "
+                 "for the exact value, click it for the record.</p>")
     parts.append(_explain(
         "The archive is a " + _gloss("map-elites", "MAP-Elites") + " structure: one grid per "
         "algebraic " + _gloss("order", "order") + " 1 to 4, whose cells are keyed by (stage count, "
         "cycle bucket). A cell holds at most one record, its " + _gloss("elite", "elite") + ": the "
         "verified tableau with the lowest held-out error seen so far for that shape and cost; ties "
-        "keep the earlier record.",
+        "keep the earlier record. An empty cell means no verified tableau has landed there yet.",
         _gloss("stage", "Stage") + " rows span 2 to 6 by default, extended with a row for any "
         "other stage count that holds an elite (order 1's single-stage cell appears as s=1), "
         "and the " + _gloss("cost-bucket", "cycle buckets") + " are log2-spaced bins of the m0plus_fast "
         "cycles per step: bucket 0 means fewer than 16 cycles, bucket 1 is 16 to 31, bucket 2 "
         "is 32 to 63, doubling each column, and bucket 7 collects everything at 1024 cycles or "
-        "more.",
-        "The blue ramp is scaled within each grid, so shades compare cells of the same order "
-        "only. An empty cell means no verified tableau has landed there yet. Click any filled "
-        "cell to open its detail page."))
+        "more."))
     parts.append('<div class="charts">')
     for order in sorted(arch.grids.keys()):
         if arch.grids[order]:
             parts.append('<div class="panel">' + _grid_heatmap(order, arch.grids[order]) + "</div>")
     parts.append("</div>")
-    parts.append('<p class="note">In the tables below, each row is one cell\'s elite and its '
-                 "hash links to the detail page. A large gap between search_error and "
-                 "heldout_error is overfitting to the visible search set; "
-                 + _gloss("order", "measured_order") + ", the " + _gloss("tiers", "tier")
-                 + " badge and " + _gloss("verifier-hash", "verifier_hash")
-                 + " are defined in the glossary.</p>")
+    parts.append("<h2>Every elite in one table</h2>")
+    parts.append('<p class="note">One row per occupied cell, every order together so cells can be '
+                 "compared across orders. The hash links to the full record. A large gap between "
+                 "search_error and heldout_error is overfitting to the visible search set; "
+                 + _gloss("order", "measured_order") + " and the " + _gloss("tiers", "tier")
+                 + " badge are defined in the glossary.</p>")
+    rows: list[str] = []
+    vhashes: dict[str, int] = {}
     for order in sorted(arch.grids.keys()):
-        grid = arch.grids[order]
-        parts.append(f"<h2>Order {order} grid</h2>")
-        if not grid:
-            parts.append("<p>no elites yet</p>")
-            continue
-        parts.append('<div class="scroll"><table>\n<tr><th>stages</th><th>bucket</th><th>tableau_hash</th><th>tier</th>'
-                     '<th class="num">heldout_error</th><th class="num">search_error</th>'
-                     '<th class="num">cycles fast</th><th class="num">cycles slow</th>'
-                     '<th class="num">measured_order</th><th>label</th><th>verifier_hash</th></tr>')
-        for (stg, bucket) in sorted(grid.keys()):
-            rec = grid[(stg, bucket)]
-            link = _cell_file(order, stg, bucket)
+        for (stg, bucket) in sorted(arch.grids[order].keys()):
+            rec = arch.grids[order][(stg, bucket)]
             sv = rec.score
-            parts.append(
+            vhashes[rec.verifier_hash] = vhashes.get(rec.verifier_hash, 0) + 1
+            rows.append(
                 "<tr>"
-                f"<td>{stg}</td><td>{bucket}</td>"
-                f'<td class="hash"><a href="{link}">{_esc(rec.tableau_hash)}</a></td>'
+                f"<td>{order}</td><td>{stg}</td><td>{bucket}</td>"
+                f'<td class="hash"><a href="{_cell_file(order, stg, bucket)}" '
+                f'title="{_esc(rec.tableau_hash)}">{_esc(rec.tableau_hash[:12])}</a></td>'
                 f"<td>{_tier_badge(rec.tier)}</td>"
                 f'<td class="num">{_num(sv.heldout_error)}</td><td class="num">{_num(sv.search_error)}</td>'
-                f'<td class="num">{_num(sv.cycles.get("m0plus_fast"))}</td><td class="num">{_num(sv.cycles.get("m0plus_slow"))}</td>'
+                f'<td class="num">{_num(sv.cycles.get("m0plus_fast"))}</td>'
+                f'<td class="num">{_num(sv.cycles.get("m0plus_slow"))}</td>'
                 f'<td class="num">{_num(sv.measured_order)}</td>'
                 f"<td>{_esc(_phase_label(rec))}</td>"
-                f'<td class="hash">{_esc(rec.verifier_hash)}</td>'
                 "</tr>"
             )
-        parts.append("</table></div>")
+    if not rows:
+        parts.append("<p>no elites yet</p>")
+    else:
+        parts.append('<div class="scroll"><table>\n'
+                     '<tr><th>order</th><th>stages</th><th>bucket</th><th>tableau_hash</th>'
+                     '<th>tier</th><th class="num">heldout_error</th><th class="num">search_error</th>'
+                     '<th class="num">cycles fast</th><th class="num">cycles slow</th>'
+                     '<th class="num">measured_order</th><th>label</th></tr>'
+                     + "".join(rows) + "</table></div>")
+        vlist = ", ".join(f'<span class="hash">{_esc(h)}</span> ({n} '
+                          + ("row" if n == 1 else "rows") + ")"
+                          for h, n in sorted(vhashes.items(), key=lambda kv: (-kv[1], kv[0])))
+        parts.append('<p class="note">Scored under '
+                     + ("one " if len(vhashes) == 1 else f"{len(vhashes)} ")
+                     + _gloss("verifier-hash", "verifier hash")
+                     + ("" if len(vhashes) == 1 else "es") + ": " + vlist
+                     + ". Each record's own hash is on its detail page.</p>")
     return _page("rk-harness findings", "\n".join(parts), active="index.html",
                  subtitle="Explicit Runge-Kutta tableaus scored end-to-end in Q15 at a fixed cycle budget.")
 
@@ -951,14 +1001,55 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
         "heldout_error is the archive fitness. overflow_margin is 1 / max|state| observed at "
         "twice the nominal amplitude and must exceed 1.0, meaning a doubled signal still fits "
         "in " + _gloss("q15", "Q15") + " range."))
-    parts.append("<h3>All per-problem keys</h3>")
-    parts.append('<div class="scroll"><table><tr><th>key</th><th class="num">error</th><th>note</th></tr>')
-    for k in sorted(sv.per_problem.keys()):
-        note = f'<span class="note">{_esc(AVR_NOTE)}</span>' if str(k).startswith("avr_approx:") else ""
-        parts.append(f'<tr><td>{_esc(k)}</td><td class="num">{_num(sv.per_problem[k])}</td><td>{note}</td></tr>')
-    parts.append("</table></div>")
+    parts.append("<h3>Every per-problem error, by cost model</h3>")
+    parts.append(_per_problem_matrix(sv))
     title = f"cell p{order} s{stages} b{bucket}"
     return _page(title, "\n".join(parts), active="index.html")
+
+
+_PROBLEM_ROWS = ("dahlquist", "damped_osc", "vanderpol_mild",
+                 "pendulum", "dc_motor", "rc_thermal", "quaternion")
+_AGG_ROWS = ("search_error", "heldout_error")
+_MODEL_COLS = ("", "slow", "avr_approx")
+_MODEL_HEAD = {"": "m0plus_fast", "slow": "m0plus_slow", "avr_approx": "avr_approx"}
+
+
+def _per_problem_matrix(sv) -> str:
+    """per_problem keys pivoted to problem x cost model.
+
+    The stored keys are '<name>' for the fast model and '<model>:<name>' otherwise, so the
+    flat listing repeated every problem once per model and every avr_approx row carried the
+    same footnote. One matrix says the same thing in a third of the rows and one footnote."""
+    cells: dict[tuple[str, str], object] = {}
+    names: list[str] = []
+    models: list[str] = []
+    for key, val in sv.per_problem.items():
+        model, _sep, name = str(key).rpartition(":")
+        cells[(name, model)] = val
+        if name not in names:
+            names.append(name)
+        if model not in models:
+            models.append(model)
+    cols = [m for m in _MODEL_COLS if m in models] + sorted(set(models) - set(_MODEL_COLS))
+    known = set(_PROBLEM_ROWS) | set(_AGG_ROWS)
+    rows = ([n for n in _PROBLEM_ROWS if n in names]
+            + sorted(n for n in names if n not in known)
+            + [n for n in _AGG_ROWS if n in names])
+    if not rows or not cols:
+        return "<p>no per-problem errors recorded</p>"
+    out = ['<div class="scroll"><table><tr><th>problem</th>'
+           + "".join(f'<th class="num">{_esc(_MODEL_HEAD.get(m, m))}</th>' for m in cols)
+           + "</tr>"]
+    for name in rows:
+        agg = name in _AGG_ROWS
+        label = f"<strong>{_esc(name)}</strong>" if agg else _esc(name)
+        out.append(f"<tr><td>{label}</td>" + "".join(
+            f'<td class="num">{_num(cells[(name, m)]) if (name, m) in cells else "n/a"}</td>'
+            for m in cols) + "</tr>")
+    out.append("</table></div>")
+    if "avr_approx" in cols:
+        out.append(f'<p class="note">{_esc(AVR_NOTE)}</p>')
+    return "\n".join(out)
 
 
 def _verdict_badge(verdict) -> str:
@@ -966,75 +1057,124 @@ def _verdict_badge(verdict) -> str:
     return f'<span class="badge badge-{_esc(v)}">{_esc(v)}</span>'
 
 
-def _hyp_details(h: dict) -> str:
-    verdict = h.get("verdict")
-    resolved_cycle = h.get("resolved_cycle")
-    if verdict is None:
-        provenance = ("open: the ledger resolves it automatically once every cell the predicate "
-                      "references has at least min_samples records")
-    else:
-        provenance = ("verdict computed by the ledger from archive cell statistics"
-                      + (f" at cycle {_num(resolved_cycle)}" if resolved_cycle is not None else "")
-                      + "; the model never writes verdicts")
-    rows = [
-        ("statement", _esc(h.get("statement", ""))),
-        ("mechanism", _esc(h.get("mechanism", ""))),
-        ("control", _esc(h.get("control", ""))),
-        ("predicate", f'<span class="mono">{_esc(h.get("predicate", ""))}</span>'),
-        ("min_samples", _num(h.get("min_samples"))),
-        ("n_samples", _num(h.get("n_samples"))),
-        ("effect_size", _num(h.get("effect_size"))),
-        ("proposed at cycle", _num(h.get("cycle_proposed"))),
-        ("resolved at cycle", _num(resolved_cycle)),
-        ("provenance", _esc(provenance)),
-    ]
-    body = ('<dl class="meta">\n'
-            + "\n".join(f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in rows)
-            + "\n</dl>")
-    summary = (f'<span class="mono">{_esc(h.get("id", ""))}</span> {_verdict_badge(verdict)} '
-               f'<span class="when">effect size {_num(h.get("effect_size"))}, '
-               f"n = {_num(h.get('n_samples'))}</span>")
-    return (f'<details class="fold"><summary>{summary}</summary>'
-            f"<div>{body}</div></details>")
+def _hyp_cycle(h: dict) -> str:
+    cyc = h.get("resolved_cycle")
+    if cyc is not None:
+        return f"c{_num(cyc)}"
+    return f"c{_num(h.get('cycle_proposed'))}+"
+
+
+def _hyp_row(group: list[dict]) -> str:
+    """One ledger row per distinct predicate.
+
+    The planning model re-proposes a predicate it has already tested, sometimes many times
+    over: 310 hypotheses cover 172 predicates, and the largest group is one predicate posed
+    28 times with an identical verdict and an identical effect size. Grouping keeps every
+    record while showing the repeat as a count instead of 28 near-identical rows."""
+    latest = group[-1]
+    pred = str(latest.get("predicate", ""))
+    verdicts = {str(h.get("verdict") or "open") for h in group}
+    badge = (_verdict_badge(latest.get("verdict")) if len(verdicts) == 1
+             else _verdict_badge(latest.get("verdict")) + '<span class="when">&nbsp;mixed</span>')
+    rep = f' <span class="rep">&times;{len(group)}</span>' if len(group) > 1 else ""
+    summary = (f'<span class="mono">{_esc(group[0].get("id", ""))}{rep}</span>'
+               f"{badge}"
+               f'<span class="pred" title="{_esc(pred)}">{_esc(pred)}</span>'
+               f'<span class="num">{_num(latest.get("effect_size"))}</span>'
+               f'<span class="num">{_num(latest.get("n_samples"))}</span>'
+               f'<span class="when">{_hyp_cycle(latest)}</span>')
+
+    first = group[0]
+    body = ['<dl class="meta">'
+            f'<dt>statement</dt><dd>{_esc(first.get("statement", ""))}</dd>'
+            f'<dt>mechanism</dt><dd>{_esc(first.get("mechanism", ""))}</dd>'
+            f'<dt>control</dt><dd>{_esc(first.get("control", ""))}</dd>'
+            f'<dt>min_samples</dt><dd>{_num(first.get("min_samples"))}</dd>'
+            "</dl>"]
+    if len(group) > 1:
+        body.append(f'<details class="repeats"><summary>the same predicate, posed '
+                    + ("twice" if len(group) == 2 else f"{len(group)} times")
+                    + "</summary><div>"
+                    '<div class="scroll"><table><tr><th>id</th><th>verdict</th>'
+                    '<th class="num">d</th><th class="num">n</th><th>cycle</th>'
+                    "<th>mechanism as restated</th></tr>")
+        for h in group:
+            body.append(f'<tr><td class="mono">{_esc(h.get("id", ""))}</td>'
+                        f"<td>{_verdict_badge(h.get('verdict'))}</td>"
+                        f'<td class="num">{_num(h.get("effect_size"))}</td>'
+                        f'<td class="num">{_num(h.get("n_samples"))}</td>'
+                        f"<td>{_hyp_cycle(h)}</td>"
+                        f'<td>{_esc(h.get("mechanism", ""))}</td></tr>')
+        body.append("</table></div></div></details>")
+    return f'<details class="led"><summary>{summary}</summary><div>{"".join(body)}</div></details>'
+
+
+_HYP_ORDER = ("supported", "refuted", "inconclusive", "open")
+_HYP_GLOSS = {
+    "supported": "the predicate held once every cell it names had enough records",
+    "refuted": "the predicate failed on the data it names",
+    "inconclusive": "effect size under 0.2, or a named cell with no records",
+    "open": "waiting for min_samples in at least one named cell",
+}
 
 
 def render_hypotheses(hyps: list[dict]) -> str:
     parts = [
         '<p class="lead">The ' + _gloss("hypothesis-ledger", "hypothesis ledger")
-        + ": statements the planning model committed to before the data could answer them, "
-        "each resolved mechanically against the archive. Click a hypothesis to see its full "
-        "text, predicate and resolution provenance.</p>"
+        + ": predicates the planning model committed to before the data could answer them, "
+        "each resolved by code. One row per distinct predicate, grouped by verdict. Open a row "
+        "for the statement, the proposed mechanism, and the control that would have shown the "
+        "mechanism wrong.</p>"
     ]
     parts.append(_explain(
-        "A hypothesis is a falsifiable statement about archive cells, recorded with a proposed "
-        "mechanism, a control (what should happen instead if the mechanism is wrong), and a "
-        "machine-checkable predicate over per-cell statistics, for example "
-        '<span class="mono">slow.p3s4.heldout &lt; slow.p4s4.heldout</span>. '
-        "The p and s numbers name an (order, stages) cell; the leading word picks the cost model.",
+        "Each row pairs a machine-checkable predicate over per-cell statistics, for example "
+        '<span class="mono">slow.p3s4.heldout &lt; slow.p4s4.heldout</span>, with the mechanism '
+        "and control the model recorded before the data could answer. The p and s numbers name "
+        "an (order, stages) cell and the leading word picks the cost model.",
         "Verdicts come from code, never from the model. Once every cell a predicate references "
-        "has at least min_samples records, the predicate is evaluated against the cells' running "
-        "statistics and the result is supported or refuted. The effect size is "
-        + _gloss("cohens-d", "Cohen's d") + ", the absolute difference of the two populations' "
-        "means divided by their pooled standard deviation; when populations are compared and d "
-        "is below 0.2 the verdict is inconclusive no matter which way the comparison went, so "
-        "weak effects cannot be claimed as findings.",
-        "A predicate that references a cell with no data is also inconclusive: absence of "
-        "evidence never refutes. n is the smallest record count among the referenced cells. "
-        "Hypotheses carry cycle numbers rather than clock times; cycles are the run's unit of "
-        "progress."))
+        "holds min_samples records the predicate is evaluated against those cells' running "
+        "statistics. d is " + _gloss("cohens-d", "Cohen's d") + "; below 0.2 the verdict is "
+        "inconclusive whichever way the comparison went, so weak effects cannot be claimed. A "
+        "predicate naming an empty cell is inconclusive too, because absence of evidence never "
+        "refutes. n is the smallest record count among the named cells, and c is the cycle the "
+        "verdict landed on (c123+ means proposed at 123, still open).",
+        "A &times;N marker means the model posed that predicate N times across the run. The "
+        "repeats are kept and listed inside the row rather than dropped, because how often the "
+        "planner revisits a settled question is itself a property of the loop."))
     if not hyps:
         parts.append("<p>no hypotheses recorded</p>")
-    else:
-        counts = {"open": 0, "supported": 0, "refuted": 0, "inconclusive": 0}
-        for h in hyps:
-            counts[h.get("verdict") or "open"] = counts.get(h.get("verdict") or "open", 0) + 1
-        parts.append('<div class="cards">' + "".join(
-            f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{v}</div></div>'
-            for k, v in counts.items()) + "</div>")
-        parts.append('<p class="note">Verdicts are computed by code from the archive; the model never '
-                     "writes one. A missing cell reads as inconclusive, never refuted.</p>")
-        for h in sorted(hyps, key=lambda d: str(d.get("id", ""))):
-            parts.append(_hyp_details(h))
+        return _page("hypothesis ledger", "\n".join(parts), active="hypotheses.html",
+                     subtitle="Falsifiable statements about the archive, resolved mechanically.")
+
+    by_pred: dict[str, list[dict]] = {}
+    for h in sorted(hyps, key=lambda d: str(d.get("id", ""))):
+        by_pred.setdefault(str(h.get("predicate", "")), []).append(h)
+    groups: dict[str, list[list[dict]]] = {k: [] for k in _HYP_ORDER}
+    counts: dict[str, int] = {k: 0 for k in _HYP_ORDER}
+    for group in sorted(by_pred.values(), key=lambda g: str(g[0].get("id", ""))):
+        key = str(group[-1].get("verdict") or "open")
+        groups.setdefault(key, []).append(group)
+        for h in group:
+            counts[str(h.get("verdict") or "open")] = counts.get(str(h.get("verdict") or "open"), 0) + 1
+
+    parts.append('<div class="cards">' + "".join(
+        f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{counts.get(k, 0)}</div>'
+        f'<div class="d">{_esc(_HYP_GLOSS[k])}</div></div>' for k in _HYP_ORDER) + "</div>")
+    repeats = sum(1 for g in by_pred.values() if len(g) > 1)
+    parts.append(f'<p class="note">{len(hyps)} hypotheses over {len(by_pred)} distinct '
+                 f"predicates; {repeats} predicates were posed more than once. Counts above are "
+                 "per hypothesis, rows below are per predicate.</p>")
+
+    head = ('<div class="ledhead"><span></span><span>id</span><span>verdict</span>'
+            '<span>predicate</span><span class="num">d</span><span class="num">n</span>'
+            "<span>cycle</span></div>")
+    for key in _HYP_ORDER:
+        rows = groups.get(key, [])
+        if not rows:
+            continue
+        parts.append(f"<h2>{_esc(key)} ({len(rows)} predicates)</h2>")
+        parts.append('<div class="scroll"><div class="ledger">' + head
+                     + "".join(_hyp_row(g) for g in rows) + "</div></div>")
     return _page("hypothesis ledger", "\n".join(parts), active="hypotheses.html",
                  subtitle="Falsifiable statements about the archive, resolved mechanically.")
 
@@ -2117,13 +2257,196 @@ def _load_benchmark() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _load_sidetrack() -> dict | None:
+    """The side-track ledger plus the artifact each measured point produced.
+
+    Absent until the side tracks are switched on (`run.sidetrack_every_cycles`), so the
+    page and its nav entry appear only once there is something to show, exactly as
+    validation and benchmark do.
+    """
+    path = work_dir() / "sidetrack" / "ledger.jsonl"
+    if not path.exists():
+        return None
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    if not rows:
+        return None
+    artifacts: dict[str, dict] = {}
+    for r in rows:
+        rel = str(r.get("artifact") or "")
+        if not rel or rel in artifacts:
+            continue
+        p = work_dir() / rel
+        if not p.exists():
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict):
+            artifacts[rel] = doc
+    return {"ledger": rows, "artifacts": artifacts}
+
+
+# Summary keys that read as the shape of a point rather than as one of its results, so
+# they lead the table instead of landing wherever the alphabet puts them.
+_ST_KEY_ORDER = ("points", "finished", "candidates", "statuses")
+
+
+def _st_cell(v) -> str:
+    """One summary value, compactly. Every container is walked in sorted order so the
+    rendered page stays byte-identical across builds."""
+    if v is None:
+        return "n/a"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return _num(v)
+    if isinstance(v, list):
+        return ", ".join(_st_cell(x) for x in v) if v else "none"
+    if isinstance(v, dict):
+        return "; ".join(f"{_esc(k)} {_st_cell(v[k])}" for k in sorted(v)) if v else "none"
+    return _esc(v)
+
+
+def render_sidetrack(data: dict) -> str:
+    ledger = [e for e in (data.get("ledger") or []) if isinstance(e, dict)]
+    artifacts = data.get("artifacts") or {}
+    ok = [e for e in ledger if e.get("status") == "ok"]
+    failed = [e for e in ledger if e.get("status") == "failed"]
+
+    parts = [
+        '<p class="lead">The side tracks are off-archive measurements for the two method '
+        "classes the run does not score. Adaptive embedded pairs and implicit SDIRK methods "
+        "cannot enter the archive as things stand, because the verifier accepts only "
+        "explicit fixed-step tableaus; everything on this page is float64, produced outside "
+        "the scored path, and exists so the epoch-2 and epoch-3 designs are settled on "
+        "measurements rather than estimates. Nothing here ranks against the archive, and "
+        "nothing here is Q15.</p>"
+    ]
+
+    codes = sorted({str(e.get("code_hash", "")) for e in ok if e.get("code_hash")})
+    tracks = sorted({str(e.get("track", "")) for e in ok if e.get("track")})
+    jobs_seen = sorted({str(e.get("job", "")) for e in ok if e.get("job")})
+    cards = [
+        ("points measured", str(len(ok)), "one per parameter point in the plan"),
+        ("jobs", str(len(jobs_seen)), "each closes one open design question"),
+        ("tracks", ", ".join(tracks) or "none", "adaptive is epoch 2, implicit is epoch 3"),
+        ("code hash", (codes[-1][:12] if codes else "n/a"),
+         "digest over the executor and the prototypes"),
+    ]
+    if failed:
+        cards.append(("failed points", str(len(failed)), "recorded, retried, then set aside"))
+    parts.append('<div class="cards">' + "".join(
+        f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
+        f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>")
+
+    parts.append(_explain(
+        "A <em>point</em> is one member of a job's finite, deterministic plan. A firing of the "
+        "side-track executor measures the points it has not measured yet, writes each as its own "
+        "artifact, and appends a line to the ledger this page is rendered from.",
+        "Every artifact is a pure function of the code and the point's parameters: no clock, no "
+        "host detail, no unseeded randomness, so re-measuring a point reproduces it byte for "
+        "byte. The <strong>code hash</strong> is a digest over the executor and the prototype "
+        "modules. A point counts as measured only under the hash that measured it, so editing a "
+        "prototype re-opens its points instead of leaving stale numbers standing beside fresh "
+        "ones.",
+        "These runs are float64 and off-archive by design. They carry no "
+        + _gloss("q15", "Q15") + " quantization, no floor bias, and no cycle budget, so their "
+        "errors are not comparable with anything on the "
+        + _gloss("elite", "elite") + " grids. The comparison they support is between methods "
+        "inside this page, not between this page and the archive."))
+
+    by_job: dict[str, list[dict]] = {}
+    for e in ok:
+        by_job.setdefault(str(e.get("job", "")), []).append(e)
+    ordered = sorted(by_job, key=lambda j: (str(by_job[j][0].get("track", "")), j))
+
+    for job in ordered:
+        entries = sorted(by_job[job], key=lambda e: str(e.get("key", "")))
+        track = str(entries[0].get("track", ""))
+        doc = artifacts.get(str(entries[0].get("artifact", "")), {})
+        parts.append(f"<h2>{_esc(job)}</h2>")
+        parts.append(f'<p class="sub">{_esc(track)} track, {len(entries)} points</p>')
+        closes = str(doc.get("closes", "")).strip()
+        if closes:
+            parts.append(f"<p>Closes: {_esc(closes)}</p>")
+        note = str(doc.get("construction") or doc.get("question") or doc.get("note") or "").strip()
+        if note:
+            parts.append(f'<p class="note">{_esc(note)}</p>')
+
+        # Counts lead, then everything else alphabetically. Both halves are a total order,
+        # so the column list is a function of the data and nothing else.
+        seen = {k for e in entries
+                for k in (e.get("summary") or {}) if isinstance(e.get("summary"), dict)}
+        keys: list[str] = sorted(
+            seen, key=lambda k: (_ST_KEY_ORDER.index(k) if k in _ST_KEY_ORDER
+                                 else len(_ST_KEY_ORDER), k))
+        head = ("<tr><th>point</th><th>cycle</th>"
+                + "".join(f"<th>{_esc(k)}</th>" for k in keys) + "</tr>")
+        rows = []
+        for e in entries:
+            summary = e.get("summary") if isinstance(e.get("summary"), dict) else {}
+            cells = "".join(f"<td>{_st_cell(summary.get(k))}</td>" for k in keys)
+            rows.append(f'<tr><th class="mono">{_esc(e.get("key"))}</th>'
+                        f'<td class="num">{_num(e.get("cycle"))}</td>{cells}</tr>')
+        parts.append('<div class="scroll"><table>\n' + head + "\n"
+                     + "\n".join(rows) + "\n</table></div>")
+
+    if failed:
+        rows = "\n".join(
+            f'<tr><th class="mono">{_esc(e.get("job"))}:{_esc(e.get("key"))}</th>'
+            f'<td>{_esc(str(e.get("error", ""))[:200])}</td></tr>'
+            for e in sorted(failed, key=lambda e: (str(e.get("job")), str(e.get("key")))))
+        parts.append("<h2>Points that did not complete</h2>")
+        parts.append("<p>A failed point is recorded and retried on later firings. After three "
+                     "failures under one code hash it is set aside and reported rather than "
+                     "retried forever.</p>")
+        parts.append('<div class="scroll"><table>\n<tr><th>point</th><th>error</th></tr>\n'
+                     + rows + "\n</table></div>")
+
+    parts.append("<h2>What these numbers are not</h2>")
+    parts.append(
+        "<ul>"
+        "<li>Not scored. No side-track measurement enters the archive, changes an elite, or "
+        "affects a hypothesis verdict. The executor is outside the verifier hash by "
+        "construction.</li>"
+        "<li>Not Q15. Every run here is float64, so quantization effects that dominate the "
+        "archive, the floor bias in particular, are absent.</li>"
+        "<li>Not a cost comparison with the archive. There is no shared cycle budget; where "
+        "cycles per step appear they are the design-document estimates for a method class the "
+        "cost model does not yet price against an assembly fixture.</li>"
+        "<li>Preliminary. These exist to choose the parameters that get frozen at an epoch "
+        "boundary. The scored implementation is written fresh against the pinned interfaces "
+        "when that boundary arrives.</li>"
+        "</ul>")
+    parts.append('<p class="note">Plan, job catalogue and invariants: '
+                 "docs/SIDETRACK-AUTOMATION.md in the harness repository. Designs these feed: "
+                 "docs/EPOCH2-DESIGN.md and docs/EPOCH3-DESIGN.md.</p>")
+
+    return _page("side tracks", "\n".join(parts), active="sidetrack.html",
+                 subtitle="off-archive adaptive and implicit measurements")
+
+
 def build(arch: ArchiveState, out_dir: Path) -> None:
-    global _HAS_VALIDATION, _HAS_BENCHMARK
+    global _HAS_VALIDATION, _HAS_BENCHMARK, _HAS_SIDETRACK
     out_dir = Path(out_dir)
     validation = _load_validation()
     benchmark = _load_benchmark()
+    sidetrack = _load_sidetrack()
     _HAS_VALIDATION = validation is not None
     _HAS_BENCHMARK = benchmark is not None
+    _HAS_SIDETRACK = sidetrack is not None
     try:
         pages: dict[str, str] = {}
         pages["index.html"] = render_index(arch, benchmark=benchmark)
@@ -2141,6 +2464,8 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
             pages["validation.html"] = render_validation(validation, benchmark=benchmark)
         if benchmark is not None:
             pages["benchmark.html"] = render_benchmark(benchmark)
+        if sidetrack is not None:
+            pages["sidetrack.html"] = render_sidetrack(sidetrack)
         pages["glossary.html"] = render_glossary()
         try:
             from rk_harness import methodology
@@ -2157,3 +2482,4 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
     finally:
         _HAS_VALIDATION = False
         _HAS_BENCHMARK = False
+        _HAS_SIDETRACK = False

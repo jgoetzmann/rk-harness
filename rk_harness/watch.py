@@ -371,6 +371,18 @@ def health_panel(events: list[dict], now) -> Panel:
         rows.append(("verifier hash", f"{vh[:16]} " + ("matches pin" if pin == vh else ("NO PIN" if pin is None else "PIN MISMATCH"))))
     except Exception as e:  # noqa: BLE001
         rows.append(("verifier hash", f"unavailable ({e!r})"))
+    try:
+        from rk_harness import sidetrack
+        st = sidetrack.status()
+        if st["ledger_lines"]:
+            fired = [e for e in events if e.get("kind") == "sidetrack_done"]
+            last = f"; last {fired[-1].get('job')}:{fired[-1].get('key')} at {fmt_ct(fired[-1].get('ts'))}" if fired else ""
+            rows.append(("side tracks", f"{st['done_total']} of {st['planned_total']} points measured "
+                                        f"(code {st['code_hash']}){last}"))
+        elif os.environ.get("RK_SIDETRACK_EVERY", "0") not in ("0", ""):
+            rows.append(("side tracks", f"enabled, nothing measured yet ({st['planned_total']} points planned)"))
+    except Exception:  # noqa: BLE001 - the live view must never fail on an optional panel row
+        pass
     abandoned = [e for e in events if e.get("kind") == "cycle_abandoned"]
     rows.append(("abandoned cycles", f"{len(abandoned)}" + (f"; last: {str(abandoned[-1].get('error'))[:120]}" if abandoned else "")))
     stops = [e for e in events if str(e.get("kind", "")).startswith("stopped_by") or e.get("kind") == "spend_cap_exceeded"]

@@ -28,6 +28,17 @@ thinking. The Codex literature rotation implements the same split
 (`literature.TRACK_SCHEDULE`, 14/3/3 over a 20-slot cycle). When the scored slot hands
 over at a freeze, the track letters re-map and the lead becomes the new epoch.
 
+**The container carries the side tracks itself (2026-09-04).** Until now the rotation's side-track
+share was met by reading alone: the cycle loop never called the prototypes, the verifier rejected
+both method classes outright, and the directive schema could not express either, so adaptive and
+implicit work advanced only when a human-driven session ran a prototype by hand.
+`rk_harness/sidetrack.py` now measures off-archive points on a cadence set by
+`run.sidetrack_every_cycles`, balancing the two tracks against each other, and appends the results
+to `rk-work/sidetrack/`. It is unpinned by construction (not in `VERIFIER_FILES`, canary-tested),
+it cannot write anything scored, and it ships disabled. Five jobs, 40 points, each closing a
+question EPOCH2-DESIGN or EPOCH3-DESIGN leaves open. Full plan, job catalogue, invariants and
+acceptance criteria: `docs/SIDETRACK-AUTOMATION.md`.
+
 The progress loop is public (owner, 2026-09-02): both sites surface it. The overview
 carries a research-tracks page (the three tracks, current milestones, orchestrator state);
 the findings site carries an epoch-status panel on its index (epoch, active or frozen,

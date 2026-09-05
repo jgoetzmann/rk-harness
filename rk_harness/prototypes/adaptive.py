@@ -192,11 +192,19 @@ def _error_norm(err: tuple[float, ...], y: tuple[float, ...],
 
 def solve_adaptive(pair: EmbeddedPair, rhs, y0: tuple[float, ...], t0: float,
                    t_end: float, rtol: float, atol: float,
-                   h0: float | None = None, max_attempts: int = 1_000_000) -> AdaptiveResult:
+                   h0: float | None = None, max_attempts: int = 1_000_000,
+                   alpha: float = ALPHA, beta: float = BETA,
+                   safety: float = SAFETY) -> AdaptiveResult:
     """Integrate to t_end with PI step control. A step whose scaled error norm
     is <= 1 is accepted; otherwise it repeats with a smaller h and the
     rejection is counted. Function evaluations are counted exactly (FSAL
     reuse after an acceptance, unchanged stage one after a rejection).
+
+    The controller gains default to the module constants, so every existing
+    caller and the frozen curve are unaffected. They are arguments because the
+    epoch-2 side track sweeps them (docs/SIDETRACK-AUTOMATION.md, job J2): the
+    dyadic values in EPOCH2-DESIGN.md section 4 rest on one measurement, and
+    the classical alpha for a 3(2) pair is 1/3, not 1/4.
     """
     span = t_end - t0
     if span <= 0.0:
@@ -224,13 +232,13 @@ def solve_adaptive(pair: EmbeddedPair, rhs, y0: tuple[float, ...], t0: float,
             y = y_new
             n_acc += 1
             k1 = ks[-1] if pair.fsal else None
-            fac = SAFETY * max(e, _ERR_FLOOR) ** (-ALPHA) * err_prev ** BETA
+            fac = safety * max(e, _ERR_FLOOR) ** (-alpha) * err_prev ** beta
             err_prev = max(e, _ERR_FLOOR)
             h *= min(FAC_MAX, max(FAC_MIN, fac))
         else:
             n_rej += 1
             k1 = ks[0]                        # y unchanged, stage one still valid
-            fac = SAFETY * e ** (-ALPHA)
+            fac = safety * e ** (-alpha)
             h *= min(1.0, max(FAC_MIN, fac))  # never grow on a rejection
     return AdaptiveResult(y=y, t=t, n_accepted=n_acc, n_rejected=n_rej,
                           n_fevals=n_fev, h_final=h)
@@ -242,25 +250,58 @@ CURVE_PROBLEMS: tuple[str, ...] = ("buck_converter", "pll_lock", "glucose_minima
 CURVE_TOLS: tuple[float, ...] = (1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8)
 
 
-def curve_point(name: str, tol: float) -> dict:
-    """One measured point: run BS32 adaptively on a T8 validation problem at
-    rtol = atol = tol, report the cost counters and the achieved final error
-    under the suite's own metric (validation.validation_error)."""
+def sweep_point(name: str, tol: float, alpha: float = ALPHA, beta: float = BETA,
+                safety: float = SAFETY, max_attempts: int = 200_000) -> dict:
+    """One adaptive run on a T8 validation problem, with failure as data.
+
+    Same measurement as `curve_point` plus a `status` field: the attempt cap, a
+    step underflow and an overflow all come back as a status rather than an
+    exception, with whatever counters were reached. The side-track sweeps
+    (docs/SIDETRACK-AUTOMATION.md, jobs J1 and J2) depend on that, because the
+    stiff members of the suite are exactly where an explicit pair is expected to
+    give up, and "it gave up after N attempts" is the result being sought.
+    """
     from rk_harness import validation as V   # read-only; lazy so the pair core stays light
 
     rhs = V.FLOAT_RHS[name]
     y0 = V.Y0_PHYS[name]
     t_end = V.PROBLEMS[name].t_end
-    res = solve_adaptive(BOGACKI_SHAMPINE_32, rhs, y0, 0.0, t_end,
-                         rtol=tol, atol=tol, h0=t_end / 64.0)
-    return {
-        "problem": name,
-        "tol": tol,
+    out: dict = {"problem": name, "tol": tol, "status": "ok"}
+    try:
+        res = solve_adaptive(BOGACKI_SHAMPINE_32, rhs, y0, 0.0, t_end,
+                             rtol=tol, atol=tol, h0=t_end / 64.0,
+                             max_attempts=max_attempts,
+                             alpha=alpha, beta=beta, safety=safety)
+    except RuntimeError as e:                 # attempt cap or step underflow
+        out["status"] = "underflow" if "underflow" in str(e) else "attempt_cap"
+        return out
+    except (OverflowError, ZeroDivisionError, ValueError):
+        out["status"] = "overflow"
+        return out
+    out.update({
         "n_accepted": res.n_accepted,
         "n_rejected": res.n_rejected,
         "n_fevals": res.n_fevals,
         "achieved_error": V.validation_error(name, res.y),
-    }
+    })
+    return out
+
+
+def curve_point(name: str, tol: float) -> dict:
+    """One measured point of the frozen headline curve: run BS32 adaptively on a
+    T8 validation problem at rtol = atol = tol, report the cost counters and the
+    achieved final error under the suite's own metric.
+
+    Deliberately narrower than `sweep_point`: it emits the six keys that
+    `adaptive_curve.json` has always carried, and a run that cannot finish
+    raises rather than being recorded, so the published artifact keeps its exact
+    shape (docs/SIDETRACK-AUTOMATION.md, D5).
+    """
+    p = sweep_point(name, tol, max_attempts=1_000_000)
+    if p["status"] != "ok":
+        raise RuntimeError(f"{name} at tol {tol}: {p['status']}")
+    return {k: p[k] for k in ("problem", "tol", "n_accepted", "n_rejected",
+                              "n_fevals", "achieved_error")}
 
 
 def build_curve(problems: tuple[str, ...] = CURVE_PROBLEMS,

@@ -1,0 +1,238 @@
+name: ci
+
+# Why this exists: the suite takes roughly half an hour on the owner's
+# machine, where it competes with the running container for CPU. The host watchdog reacts to
+# that load by pausing the container, so running the suite locally literally stops the
+# research. Every repo here is public, so GitHub-hosted runners are free and unmetered, and
+# moving the suite off the workstation costs nothing but this file.
+#
+# What CI is allowed to check: everything outside the container's own runtime. It cannot
+# check the live run, and it must never touch rk-work or rk-findings (see docs/CI.md).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "README.md"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # ---------------------------------------------------------------- the fast gate
+  # Exactly what entrypoint.sh runs before it will start the runner: the verifier hash
+  # must match its pin, then the golden and canary tests. If this fails, the container
+  # would refuse to start, so nothing else is worth running.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # The package is never installed: the container mounts it and sets PYTHONPATH (P1),
+      # so CI imports it the same way production does. pyproject stays the one place the
+      # pins are declared. (pip install -e . cannot work here anyway: flat layout with
+      # docs/, fixtures/, scripts/ and tests/ beside the package defeats auto-discovery.)
+      - name: install the pinned dependencies
+        run: |
+          python - <<'PY' > "$RUNNER_TEMP/requirements.txt"
+          import pathlib, tomllib
+          p = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          for d in p["project"]["dependencies"] + p["project"]["optional-dependencies"]["test"]:
+              print(d)
+          PY
+          pip install -r "$RUNNER_TEMP/requirements.txt"
+      - name: verifier hash matches its pin (K3)
+        run: python -m rk_harness.verifier_hash --check
+      - name: golden and canary tests (G1-G20, K1-K2)
+        run: |
+          python -m pytest -rN -q -k \
+            "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or \
+             G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or \
+             G20_ or K1_ or K2_" tests
+
+  # ---------------------------------------------------------------- the full suite, sharded
+  # Sharded by test file so wall-clock is one shard, not the whole suite. The groups are
+  # balanced by test count as a first approximation; --durations makes each run report its
+  # own timings, so rebalance from the log rather than from a guess.
+  suite:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fixedpoint-coeff-cost
+            files: tests/test_t1_*.py
+          - name: order-eval-verify
+            files: tests/test_t2_*.py tests/test_t5_*.py tests/test_t6_*.py tests/test_t7_*.py
+          - name: archive-search-directive
+            files: tests/test_t3_*.py tests/test_t9_*.py
+          - name: ledger-runner-site-prototypes
+            files: tests/test_t4_*.py tests/test_t11_*.py tests/test_t12_*.py tests/test_t13_*.py
+          - name: validation-benchmark
+            files: tests/test_t8_*.py tests/test_t10_*.py
+    name: suite (${{ matrix.name }})
+    env:
+      # test_t10 skips a case when RK_WORK_DIR is unset at import time; conftest still
+      # redirects every individual test to its own tmp_path, so this only un-skips it.
+      RK_WORK_DIR: ${{ runner.temp }}/work
+      RK_FINDINGS_DIR: ${{ runner.temp }}/findings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # The package is never installed: the container mounts it and sets PYTHONPATH (P1),
+      # so CI imports it the same way production does. pyproject stays the one place the
+      # pins are declared. (pip install -e . cannot work here anyway: flat layout with
+      # docs/, fixtures/, scripts/ and tests/ beside the package defeats auto-discovery.)
+      - name: install the pinned dependencies
+        run: |
+          python - <<'PY' > "$RUNNER_TEMP/requirements.txt"
+          import pathlib, tomllib
+          p = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          for d in p["project"]["dependencies"] + p["project"]["optional-dependencies"]["test"]:
+              print(d)
+          PY
+          pip install -r "$RUNNER_TEMP/requirements.txt"
+      - name: configure git (test_ST20/ST21 drive real repos)
+        run: |
+          git config --global user.email ci@rk-harness
+          git config --global user.name ci
+      - run: python -m pytest -q --durations=10 ${{ matrix.files }}
+
+  # ---------------------------------------------------------------- reproducibility
+  # The side-track design rests on artifacts being pure functions of (code, params):
+  # SIDETRACK-AUTOMATION.md invariant I5, and D5 for the frozen headline curves. That is
+  # a property no unit test can assert about the catalogue as a whole, so it is checked
+  # here by measuring everything twice and diffing.
+  determinism:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # The package is never installed: the container mounts it and sets PYTHONPATH (P1),
+      # so CI imports it the same way production does. pyproject stays the one place the
+      # pins are declared. (pip install -e . cannot work here anyway: flat layout with
+      # docs/, fixtures/, scripts/ and tests/ beside the package defeats auto-discovery.)
+      - name: install the pinned dependencies
+        run: |
+          python - <<'PY' > "$RUNNER_TEMP/requirements.txt"
+          import pathlib, tomllib
+          p = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          for d in p["project"]["dependencies"] + p["project"]["optional-dependencies"]["test"]:
+              print(d)
+          PY
+          pip install -r "$RUNNER_TEMP/requirements.txt"
+      - name: prototype curves reproduce byte for byte
+        run: |
+          for run in a b; do
+            RK_WORK_DIR="$RUNNER_TEMP/$run" python -m rk_harness.prototypes.adaptive >/dev/null
+            RK_WORK_DIR="$RUNNER_TEMP/$run" python -m rk_harness.prototypes.sdirk >/dev/null
+          done
+          diff -r "$RUNNER_TEMP/a/prototypes" "$RUNNER_TEMP/b/prototypes"
+          echo "both curves identical across runs"
+      - name: the whole side-track catalogue reproduces byte for byte
+        run: |
+          for run in c d; do
+            RK_WORK_DIR="$RUNNER_TEMP/$run" python -m rk_harness.sidetrack --run-until 1800 >/dev/null
+          done
+          # the ledger carries timestamps and durations by design; the artifacts must not
+          diff -r -x ledger.jsonl "$RUNNER_TEMP/c/sidetrack" "$RUNNER_TEMP/d/sidetrack"
+          n=$(find "$RUNNER_TEMP/c/sidetrack" -name '*.json' | wc -l)
+          echo "$n artifacts identical across runs"
+          test "$n" -eq 40
+      - name: nothing scored was written
+        run: |
+          for run in c d; do
+            for f in archive quarantine hypotheses.jsonl RUNSTATE.json EPOCH_STATUS.json; do
+              test ! -e "$RUNNER_TEMP/$run/$f" || { echo "side-track work created $f"; exit 1; }
+            done
+          done
+          python -m rk_harness.verifier_hash --check
+
+  # ---------------------------------------------------------------- the real environment
+  # The runner is Python 3.12 in the image; a developer's host may be newer. This job is the
+  # one that catches syntax or stdlib use that works locally and breaks the container, and it
+  # proves the image still builds at all.
+  image:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build the harness image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: rk-harness:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: the entrypoint gate, inside the image
+        run: |
+          docker run --rm --entrypoint python \
+            -v "${{ github.workspace }}:/harness:ro" \
+            -e RK_WORK_DIR=/tmp/w -e RK_FINDINGS_DIR=/tmp/f \
+            -w /harness rk-harness:ci \
+            -m pytest -rN -q -o cache_dir=/tmp/pc -k \
+            "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or \
+             G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or \
+             G20_ or K1_ or K2_" tests
+      - name: the harness mount is read-only (K4)
+        run: |
+          docker run --rm --entrypoint sh \
+            -v "${{ github.workspace }}:/harness:ro" rk-harness:ci \
+            -c 'touch /harness/.rw-probe 2>/dev/null && { echo "mount is writable"; exit 1; }; echo "mount is read-only"'
+
+  # ---------------------------------------------------------------- pin drift
+  # The dependency pins live in two places, and a container built from one while the tests
+  # run against the other would make every local result unreproducible in the container.
+  pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Dockerfile and pyproject pin the same versions
+        run: |
+          python - <<'PY'
+          import re, sys, tomllib, pathlib
+          # deliberately no backslash character classes: this literal travels through YAML
+          # and a heredoc before Python sees it, and an escape that survives one but not the
+          # other fails as a regex error rather than as a wrong answer.
+          pat = re.compile(r"([A-Za-z0-9_.-]+)==([0-9][0-9A-Za-z._-]*)")
+          pins = dict(pat.findall(pathlib.Path("Dockerfile").read_text(encoding="utf-8")))
+          proj = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          want = dict(pat.match(d).groups() for d in proj["project"]["dependencies"]
+                      + proj["project"]["optional-dependencies"]["test"])
+          bad = [(k, v, pins.get(k)) for k, v in want.items() if pins.get(k) != v]
+          for k, v, got in bad:
+              print(f"pin drift: pyproject {k}=={v} but Dockerfile has {got}")
+          for k in sorted(set(pins) - set(want)):
+              print(f"note: Dockerfile pins {k}=={pins[k]}, not declared in pyproject")
+          print(f"checked {len(want)} pins, drift {len(bad)}")
+          sys.exit(1 if bad else 0)
+          PY

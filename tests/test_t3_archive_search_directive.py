@@ -28,6 +28,8 @@ from rk_harness.archive import (
     read_all,
     elites,
     replay,
+    fold,
+    refresh_hypotheses,
     assign_tier,
     metric_value,
     update_cell_stat,
@@ -1732,3 +1734,95 @@ def test_K13_search_and_evaluator_graphs_are_openai_free():
     for root in ("search", "evaluator", "verifier", "archive"):
         for name in _reachable(root, skip=("runner", "credentials")):
             assert "openai" not in _module_path(name).read_text(encoding="utf-8").lower(), (root, name)
+
+
+# --------------------------------------------------------------------------- fold
+
+def _cell_stats_tuples(state):
+    """cell_stats reduced to comparable tuples, so a float difference shows up."""
+    return {key: {name: (cs.n, cs.mean, cs.m2, cs.min) for name, cs in stats.items()}
+            for key, stats in state.cell_stats.items()}
+
+
+def test_A80_fold_is_identical_to_a_replay_after_appending(monkeypatch, tmp_path):
+    """The cycle folds the records it appended instead of re-reading the archive, so
+    fold has to be exact rather than close. Welford is order dependent, and grids keep
+    the earlier record on a tie, so both are compared value by value.
+    """
+    _work(monkeypatch, tmp_path)
+    for r in _three_records():
+        append(r)
+    before = replay()
+
+    # a mix that exercises every branch: a new cell, an improvement on an occupied
+    # cell, a worse record that must lose, an exact tie that must keep the incumbent,
+    # and a second sample in a cell so its stats have to accumulate
+    later = [
+        _record(_euler(), _sv_for(_euler(), 0.30, 0.40), cycle_id=4),
+        _record(_rk4(), _sv_for(_rk4(), 0.001, 0.002), cycle_id=5),
+        _record(_rk38(), _sv_for(_rk38(), 0.90, 0.99), cycle_id=6),
+        _record(_heun2(), _sv_for(_heun2(), 0.050, 0.060), cycle_id=7),
+        _record(_midpoint(), _sv_for(_midpoint(), 0.07, 0.08), cycle_id=8),
+    ]
+    folded = fold(before, later)
+    for r in later:
+        append(r)
+    after = replay()
+
+    assert folded.n_records == after.n_records == 8
+    assert folded.last_cycle_id == after.last_cycle_id
+    assert folded.record_hashes == after.record_hashes
+    assert folded.open_hypotheses == after.open_hypotheses
+    assert folded.refuted_hypotheses == after.refuted_hypotheses
+    assert sorted(folded.grids) == sorted(after.grids)
+    for order, grid in after.grids.items():
+        assert sorted(folded.grids[order]) == sorted(grid), order
+        for key, rec in grid.items():
+            assert folded.grids[order][key].tableau_hash == rec.tableau_hash, (order, key)
+            assert folded.grids[order][key].cycle_id == rec.cycle_id, (order, key)
+    assert _cell_stats_tuples(folded) == _cell_stats_tuples(after)
+
+
+def test_A80_fold_of_nothing_changes_only_the_hypothesis_lists(monkeypatch, tmp_path):
+    _work(monkeypatch, tmp_path)
+    for r in _three_records():
+        append(r)
+    before = replay()
+    same = fold(before, [])
+    assert same.n_records == before.n_records
+    assert same.last_cycle_id == before.last_cycle_id
+    assert same.record_hashes == before.record_hashes
+    assert _cell_stats_tuples(same) == _cell_stats_tuples(before)
+
+
+def test_A80_replay_carries_every_record_hash(monkeypatch, tmp_path):
+    _work(monkeypatch, tmp_path)
+    recs = _three_records()
+    for r in recs:
+        append(r)
+    state = replay()
+    assert state.record_hashes == {r.tableau_hash for r in recs}
+    assert len(state.record_hashes) == state.n_records
+
+
+def test_A80_refresh_hypotheses_rereads_the_ledger_and_keeps_the_rest(monkeypatch, tmp_path):
+    """resolve_open rewrites the ledger mid-cycle and the site is built afterwards, so
+    the state handed to the site build has to see the new verdicts."""
+    _work(monkeypatch, tmp_path)
+    for r in _three_records():
+        append(r)
+    (tmp_path / "hypotheses.jsonl").write_text(
+        json.dumps({"id": "H-001", "statement": "s", "mechanism": "m", "control": "c",
+                    "predicate": "fast.p4s4.heldout < 1", "min_samples": 20,
+                    "cycle_proposed": 1}) + "\n", encoding="utf-8")
+    state = replay()
+    assert state.open_hypotheses == ("H-001",)
+    with open(tmp_path / "hypotheses.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": "H-001", "verdict": "refuted", "resolved_cycle": 9,
+                             "n_samples": 20, "effect_size": 0.1}) + "\n")
+    fresh = refresh_hypotheses(state)
+    assert fresh.open_hypotheses == ()
+    assert fresh.refuted_hypotheses == ("H-001",)
+    # nothing else moved
+    assert fresh.n_records == state.n_records
+    assert fresh.grids is state.grids

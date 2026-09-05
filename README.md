@@ -28,6 +28,12 @@ $env:RK_WORK_DIR="..\rk-work"; $env:RK_FINDINGS_DIR="..\rk-findings"
 .venv\Scripts\python.exe -m rk_harness.dashboard           # read-only TUI
 ```
 
+The full suite runs in CI (`.github/workflows/ci.yml`), which is where it belongs: locally it
+loads the host enough that the watchdog pauses the container, so verifying the harness suspends
+the run. Prefer the fast subset, or the gate the container itself uses
+(`python -m rk_harness.verifier_hash --check` plus the `G*`/`K*` tests), and let CI carry the
+rest. Details and the reasoning: `docs/CI.md`.
+
 Environment: `RK_WORK_DIR` (rk-work checkout), `RK_FINDINGS_DIR` (rk-findings checkout),
 `RK_PHASE` (initial phase), `RK_LLM=off|on|codex` (`on` = API key via `OPENAI_API_KEY`; `codex` = `codex exec` with the host's `~/.codex/auth.json`, plan-billed, needs the Codex CLI which the image installs), `RK_SITE=on|off`, `RK_GIT_COMMIT=on|off`,
 `RK_CLOCK` (fixed ISO timestamp for deterministic runs), `RK_EVAL_BUDGET`

@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
+from fractions import Fraction
 from typing import Callable, Sequence
 
 from rk_harness.costmodel import M0PLUS_FAST, cycle_count
@@ -63,6 +65,131 @@ Jac = Callable[[float, tuple[float, ...]], list[list[float]]]
 def stability_function(z: complex) -> complex:
     """Closed-form R(z) for the tableau above."""
     return (1.0 + (1.0 - 2.0 * GAMMA) * z) / (1.0 - GAMMA * z) ** 2
+
+
+# --------------------------------------------------------------------------- exact dyadic tableaus
+
+# EPOCH3-DESIGN.md rules that gamma is snapped to a dyadic and the rest of the tableau
+# is then solved exactly over Fractions with that gamma substituted in. Everything in
+# this section does that solve and the stability algebra that goes with it, exactly, so
+# the L-stability gate the epoch-3 verifier needs can be chosen from measurements rather
+# than from the "on the order of 0.05" placeholder the design document carries today.
+#
+# Note what the snap costs. The stiffly accurate form (b equal to the last row of A) and
+# order 2 can only hold together at the irrational gamma = 1 - sqrt(2)/2, so with a dyadic
+# gamma one of them has to go. Order is the one worth keeping, so a21 is fixed at 1 - gamma
+# (which keeps c2 = 1) and b is solved from the two order conditions. At the exact gamma
+# the construction reproduces Alexander's tableau, stiff accuracy and all.
+
+Poly = tuple[Fraction, ...]        # index = degree
+
+
+def _poly_mul(p: Poly, q: Poly) -> Poly:
+    out = [Fraction(0)] * (len(p) + len(q) - 1)
+    for i, a in enumerate(p):
+        if a:
+            for j, b in enumerate(q):
+                out[i + j] += a * b
+    return tuple(out)
+
+
+def _poly_add(p: Poly, q: Poly, sign: int = 1) -> Poly:
+    n = max(len(p), len(q))
+    return tuple((p[i] if i < len(p) else Fraction(0))
+                 + sign * (q[i] if i < len(q) else Fraction(0))
+                 for i in range(n))
+
+
+def _poly_sub(p: Poly, q: Poly) -> Poly:
+    return _poly_add(p, q, sign=-1)
+
+
+def _abs_sq_on_imaginary_axis(p: Poly) -> Poly:
+    """|P(i*y)|**2 as a polynomial in w = y**2.
+
+    P(i*y) splits into Re = sum_m p[2m] (-1)^m w^m and Im = y * sum_m p[2m+1] (-1)^m w^m,
+    so |P|^2 = Re^2 + w * (Im/y)^2.
+    """
+    re = tuple(p[k] * (-1) ** (k // 2) for k in range(0, len(p), 2))
+    im = tuple(p[k] * (-1) ** (k // 2) for k in range(1, len(p), 2))
+    out: Poly = _poly_mul(re, re) if re else (Fraction(0),)
+    if im:
+        out = _poly_add(out, (Fraction(0),) + _poly_mul(im, im))
+    return out
+
+
+def order2_tableau_exact(gamma: Fraction) -> dict:
+    """The order-2 SDIRK2 tableau for a given gamma, solved exactly, with its
+    stability data. Every value returned is a Fraction or a bool.
+
+    Raises ValueError for a gamma the construction cannot use (0 or 1).
+    """
+    if gamma <= 0 or gamma >= 1:
+        raise ValueError(f"gamma must lie strictly inside (0, 1), got {gamma}")
+    a21 = 1 - gamma
+    b2 = (Fraction(1, 2) - gamma) / (1 - gamma)         # from b.c = 1/2 with c = (gamma, 1)
+    b1 = 1 - b2
+    c = (gamma, Fraction(1))
+    b = (b1, b2)
+
+    # R(z) = det(I - zA + z 1 b^T) / det(I - zA), both exact polynomials in z.
+    num = _poly_sub(
+        _poly_mul((Fraction(1), b1 - gamma), (Fraction(1), b2 - gamma)),
+        _poly_mul((Fraction(0), b2), (Fraction(0), b1 - a21)),
+    )
+    den = _poly_mul((Fraction(1), -gamma), (Fraction(1), -gamma))
+
+    # L-stability margin |R(inf)|: the ratio of leading coefficients, zero when the
+    # numerator degree is the lower one.
+    deg_n = max((i for i, v in enumerate(num) if v), default=0)
+    deg_d = max((i for i, v in enumerate(den) if v), default=0)
+    r_inf = Fraction(0) if deg_n < deg_d else num[deg_n] / den[deg_d]
+
+    # A-stability: |R(iy)| <= 1 for all real y, i.e. E(w) = |D|^2 - |N|^2 >= 0 for w >= 0.
+    # R(0) = 1 always, so E(0) = 0 and E factors as w * F(w). For this tableau shape both
+    # |D|^2 and |N|^2 are quadratic in w, so F is linear and "every coefficient of F is
+    # non-negative" is exactly A-stability rather than merely sufficient for it. The
+    # exactness flag says which of the two a caller is looking at.
+    e_poly = _poly_sub(_abs_sq_on_imaginary_axis(den), _abs_sq_on_imaginary_axis(num))
+    if e_poly and e_poly[0] != 0:
+        raise AssertionError(f"E(0) should vanish, got {e_poly[0]}")
+    f_poly = e_poly[1:] if len(e_poly) > 1 else (Fraction(0),)
+    a_stable = all(v >= 0 for v in f_poly)
+    f_degree = max((i for i, v in enumerate(f_poly) if v), default=0)
+
+    # Order residuals: the two order-3 conditions, to show where order actually stops.
+    res3a = sum(b[i] * c[i] ** 2 for i in range(2)) - Fraction(1, 3)
+    res3b = b[1] * a21 * c[0] - Fraction(1, 6)
+
+    return {
+        "gamma": gamma, "a21": a21, "b": b, "c": c,
+        "num": num, "den": den,
+        "r_at_infinity": r_inf,
+        "l_stable": r_inf == 0,
+        "a_stable": a_stable,
+        "a_stable_exact": f_degree <= 1,
+        "f_poly": f_poly,
+        "order3_residuals": (res3a, res3b),
+        "stiffly_accurate": b == (a21, gamma),
+    }
+
+
+def spec_from_exact(t: dict, newton_iters: int = NEWTON_ITERS) -> Sdirk2Spec:
+    """Float Sdirk2Spec for a tableau from order2_tableau_exact."""
+    return Sdirk2Spec(gamma=float(t["gamma"]), a21=float(t["a21"]),
+                      b=(float(t["b"][0]), float(t["b"][1])),
+                      c=(float(t["c"][0]), float(t["c"][1])),
+                      newton_iters=newton_iters)
+
+
+def dyadic_neighbours(target: float, s: int, width: int = 8) -> list[Fraction]:
+    """The dyadics m / 2**s nearest `target`, `width` either side, inside (0, 1)."""
+    centre = round(target * (1 << s))
+    out = []
+    for m in range(centre - width, centre + width + 1):
+        if 0 < m < (1 << s):
+            out.append(Fraction(m, 1 << s))
+    return out
 
 
 # --------------------------------------------------------------------------- small dense LU
@@ -131,8 +258,31 @@ def fd_jacobian(rhs: Rhs, t: float, y: tuple[float, ...], f0: tuple[float, ...] 
 
 # --------------------------------------------------------------------------- the integrator
 
-def sdirk2_step(rhs: Rhs, t: float, y: tuple[float, ...], h: float, jac: Jac | None = None) -> tuple[float, ...]:
-    """One SDIRK2 step with exactly NEWTON_ITERS modified-Newton iterations per stage.
+@dataclass(frozen=True)
+class Sdirk2Spec:
+    """A 2-stage SDIRK tableau plus its iteration count, in float.
+
+    The defaults reproduce Alexander's method exactly, so every caller that
+    passes nothing behaves as this module always has. It is a parameter because
+    two side-track jobs sweep it: the dyadic-gamma scan (J4), which has to build
+    a tableau per candidate gamma, and the iteration-count study (J5), where
+    EPOCH3-DESIGN.md says outright that three iterations is "the prototype's
+    setting, not a final ruling".
+    """
+    gamma: float
+    a21: float
+    b: tuple[float, float]
+    c: tuple[float, float]
+    newton_iters: int
+
+
+DEFAULT_SPEC = Sdirk2Spec(gamma=GAMMA, a21=1.0 - GAMMA, b=_B, c=_C,
+                          newton_iters=NEWTON_ITERS)
+
+
+def sdirk2_step(rhs: Rhs, t: float, y: tuple[float, ...], h: float, jac: Jac | None = None,
+                spec: Sdirk2Spec = DEFAULT_SPEC) -> tuple[float, ...]:
+    """One SDIRK2 step with exactly spec.newton_iters modified-Newton iterations per stage.
 
     The Jacobian is evaluated once at (t, y) and frozen for the whole step; both
     stages share one factorization of M = I - h*gamma*J. On linear problems the
@@ -141,8 +291,10 @@ def sdirk2_step(rhs: Rhs, t: float, y: tuple[float, ...], h: float, jac: Jac | N
     count exists so the cycle cost never depends on the data.
     """
     n = len(y)
+    gam = spec.gamma
+    amat = ((gam, 0.0), (spec.a21, gam))
     jmat = jac(t, y) if jac is not None else fd_jacobian(rhs, t, y)
-    m = [[(1.0 if i == j else 0.0) - h * GAMMA * jmat[i][j] for j in range(n)] for i in range(n)]
+    m = [[(1.0 if i == j else 0.0) - h * gam * jmat[i][j] for j in range(n)] for i in range(n)]
     lu, piv = lu_factor(m)
 
     ks: list[list[float]] = []
@@ -150,28 +302,41 @@ def sdirk2_step(rhs: Rhs, t: float, y: tuple[float, ...], h: float, jac: Jac | N
     for i in range(STAGES):
         base = list(y)
         for j in range(i):
-            a = _A[i][j]
+            a = amat[i][j]
             for st in range(n):
                 base[st] += h * a * ks[j][st]
         k = list(k)                                 # warm start from the previous stage
-        for _ in range(NEWTON_ITERS):
-            yi = tuple(base[st] + h * GAMMA * k[st] for st in range(n))
-            f = rhs(t + _C[i] * h, yi)
+        for _ in range(spec.newton_iters):
+            yi = tuple(base[st] + h * gam * k[st] for st in range(n))
+            f = rhs(t + spec.c[i] * h, yi)
             resid = [k[st] - f[st] for st in range(n)]
             delta = lu_solve(lu, piv, resid)
             for st in range(n):
                 k[st] -= delta[st]
         ks.append(k)
 
-    return tuple(y[st] + h * (_B[0] * ks[0][st] + _B[1] * ks[1][st]) for st in range(n))
+    return tuple(y[st] + h * (spec.b[0] * ks[0][st] + spec.b[1] * ks[1][st]) for st in range(n))
 
 
-def solve_sdirk2(rhs: Rhs, y0: tuple[float, ...], t_end: float, n: int, jac: Jac | None = None) -> tuple[float, ...]:
-    """n fixed SDIRK2 steps of size h = t_end / n from t = 0, like simulate.solve_float."""
+def solve_sdirk2(rhs: Rhs, y0: tuple[float, ...], t_end: float, n: int, jac: Jac | None = None,
+                 spec: Sdirk2Spec = DEFAULT_SPEC,
+                 diverge_at: float | None = None) -> tuple[float, ...]:
+    """n fixed SDIRK2 steps of size h = t_end / n from t = 0, like simulate.solve_float.
+
+    `diverge_at` is a deterministic escape hatch for the side-track sweeps: when
+    any state exceeds it in magnitude the run stops and raises OverflowError
+    immediately, instead of grinding through hundreds of steps of growing floats
+    before Python's own overflow fires. It is a bound on the data, not on the
+    clock, so a run's outcome stays a pure function of its inputs.
+    """
     h = t_end / n
     y = tuple(float(v) for v in y0)
     for kstep in range(n):
-        y = sdirk2_step(rhs, kstep * h, y, h, jac=jac)
+        y = sdirk2_step(rhs, kstep * h, y, h, jac=jac, spec=spec)
+        if diverge_at is not None:
+            for v in y:
+                if not (abs(v) <= diverge_at):        # catches NaN as well
+                    raise OverflowError(f"state {v} past the divergence bound at step {kstep + 1}")
     return y
 
 

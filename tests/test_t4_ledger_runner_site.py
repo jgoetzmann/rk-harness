@@ -1035,7 +1035,10 @@ def test_E3_index_parses_and_shows_every_elite_tier_next_to_its_hash(monkeypatch
     assert len(elites) == 3
     assert {e.tier for e in elites} == set(TIERS)
     for rec in elites:
-        assert rec.tableau_hash in text
+        # The table prints a 12-character prefix and carries the full hash in the link's
+        # title, so the row stays narrow without losing provenance.
+        assert rec.tableau_hash[:12] in text
+        assert rec.tableau_hash in html
         assert rec.tier in text
         assert rec.verifier_hash in text
         i = html.index(rec.tableau_hash)
@@ -1267,13 +1270,24 @@ def test_B61_build_writes_glossary_and_index_deep_links_it(monkeypatch, tmp_path
     assert "glossary.html#" in index              # explanations deep-link into the glossary
 
 
+def _nav_hrefs(html: str) -> list[str]:
+    """Every nav link across both tiers, in reading order.
+
+    The nav is two rows: results-bearing pages first, then the record and the reference.
+    Tests assert the whole ordered list so a page can neither vanish nor change tier
+    unnoticed."""
+    rows = re.findall(r'<nav class="tabs[^"]*">(.*?)</nav>', html, re.S)
+    assert rows, "no nav found"
+    return [h for row in rows for h in re.findall(r'href="([^"]+)"', row)]
+
+
 def test_B61_nav_lists_every_page_in_order():
     # Without a validation results file, the validation tab is absent everywhere.
     html = render_costmodel()
-    nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
-    assert re.findall(r'href="([^"]+)"', nav) == [
-        "index.html", "methodology.html", "costmodel.html", "falsification.html",
-        "hypotheses.html", "literature.html", "interpretation.html", "glossary.html"]
+    assert _nav_hrefs(html) == [
+        "index.html", "hypotheses.html", "falsification.html",
+        "methodology.html", "costmodel.html", "literature.html",
+        "interpretation.html", "glossary.html"]
 
 
 def test_B61_folds_kept_only_where_depth_remains(monkeypatch, tmp_path):
@@ -1323,20 +1337,31 @@ def test_B61_every_chart_opens_with_a_visible_caption(monkeypatch, tmp_path):
     assert saw_figures >= 3  # scatter + heatmaps + per-problem bars at minimum
 
 
-def test_B61_hypotheses_page_folds_each_hypothesis_with_provenance():
+def test_B61_hypotheses_page_gives_each_distinct_predicate_one_row():
+    """One row per predicate, and the row's summary is the whole machine record.
+
+    The planner re-poses predicates it has already settled, so the page groups by predicate
+    and counts the repeats instead of printing near-identical rows."""
     hyps = [
         _hyp(id="H-001", verdict="supported", n_samples=250, effect_size=1.5, resolved_cycle=7),
-        _hyp(id="H-003"),
+        _hyp(id="H-002", verdict="supported", n_samples=260, effect_size=1.6, resolved_cycle=9),
+        _hyp(id="H-003", predicate="fast.p2s2.heldout < fast.p2s3.heldout"),
     ]
     html = render_hypotheses(hyps)
-    assert html.count('<details class="fold">') == 2
-    m = re.search(r'<summary><span class="mono">H-001</span> <span class="badge badge-supported">'
-                  r"supported</span>[^<]*<span class=\"when\">effect size 1\.5, n = 250", html)
-    assert m is not None, "summary must carry id + status + effect size"
-    assert "slow.p3s4.heldout" in html            # full predicate text in the body
-    assert "verdict computed by the ledger" in html and "at cycle 7" in html
-    assert "open: the ledger resolves it automatically" in html   # H-003 is unresolved
-    assert "112" in html                          # cycle_proposed is shown
+    # H-001 and H-002 share the default predicate; H-003 has its own.
+    assert html.count('<details class="led">') == 2
+    m = re.search(r'<summary><span class="mono">H-001 <span class="rep">&times;2</span></span>'
+                  r'<span class="badge badge-supported">supported</span>'
+                  r'<span class="pred" title="[^"]*">slow\.p3s4\.heldout[^<]*</span>'
+                  r'<span class="num">1\.6</span><span class="num">260</span>'
+                  r'<span class="when">c9</span>', html)
+    assert m is not None, "summary must carry id, repeat count, verdict, predicate, d, n, cycle"
+    assert html.count('<details class="repeats">') == 1      # only the repeated predicate
+    for hid in ("H-001", "H-002", "H-003"):
+        assert hid in html                                   # no record is dropped
+    assert "3 hypotheses over 2 distinct predicates" in html
+    assert "c112+" in html                                   # H-003 open, shown by proposal cycle
+    assert "Verdicts come from code, never from the model" in html
     check_banned(html)
 
 
@@ -1654,10 +1679,9 @@ def test_B64_validation_nav_entry_present_only_with_results(monkeypatch, tmp_pat
     assert (out2 / "validation.html").is_file()
     for name in ("index.html", "costmodel.html", "methodology.html", "validation.html"):
         html = (out2 / name).read_text(encoding="utf-8")
-        nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
-        assert re.findall(r'href="([^"]+)"', nav) == [
-            "index.html", "methodology.html", "costmodel.html", "falsification.html",
-            "validation.html", "hypotheses.html", "literature.html",
+        assert _nav_hrefs(html) == [
+            "index.html", "validation.html", "hypotheses.html", "falsification.html",
+            "methodology.html", "costmodel.html", "literature.html",
             "interpretation.html", "glossary.html"], name
     # the active tab lands on the validation page itself
     val = (out2 / "validation.html").read_text(encoding="utf-8")
@@ -2006,11 +2030,10 @@ def test_B67_benchmark_nav_entry_present_only_with_results(monkeypatch, tmp_path
     assert (out2 / "benchmark.html").is_file()
     for name in ("index.html", "validation.html", "benchmark.html"):
         html = (out2 / name).read_text(encoding="utf-8")
-        nav = html[html.index('<nav class="tabs">'):html.index("</nav>")]
-        assert re.findall(r'href="([^"]+)"', nav) == [
-            "index.html", "methodology.html", "costmodel.html", "falsification.html",
-            "validation.html", "benchmark.html", "hypotheses.html", "literature.html",
-            "interpretation.html", "glossary.html"], name
+        assert _nav_hrefs(html) == [
+            "index.html", "validation.html", "benchmark.html", "hypotheses.html",
+            "falsification.html", "methodology.html", "costmodel.html",
+            "literature.html", "interpretation.html", "glossary.html"], name
     val = (out2 / "benchmark.html").read_text(encoding="utf-8")
     assert '<a href="benchmark.html" class="on">benchmark</a>' in val
 
@@ -2025,6 +2048,80 @@ def test_B67_benchmark_build_is_deterministic_and_flag_resets(monkeypatch, tmp_p
     # the nav flag never leaks out of build(): a direct render afterwards has no tab
     html = render_costmodel()
     assert 'href="benchmark.html"' not in html
+
+
+def _write_sidetrack(work: Path, points: list[dict]) -> None:
+    """A side-track ledger and its artifacts, in the layout rk_harness.sidetrack writes."""
+    base = work / "sidetrack"
+    for p in points:
+        rel = f"sidetrack/{p['job']}/{p['key']}.json"
+        art = work / rel
+        art.parent.mkdir(parents=True, exist_ok=True)
+        art.write_text(json.dumps(
+            {"job": p["job"], "key": p["key"], "closes": p.get("closes", "a question"),
+             "summary": p["summary"]}, sort_keys=True), encoding="utf-8")
+        with open(base / "ledger.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": "2026-09-04T00:00:00Z", "cycle": 20,
+                                 "track": p["track"], "job": p["job"], "key": p["key"],
+                                 "code_hash": "0123456789abcdef", "status": "ok",
+                                 "duration_s": 0.5, "artifact": rel,
+                                 "summary": p["summary"]}, sort_keys=True) + "\n")
+
+
+def _sidetrack_fixture() -> list[dict]:
+    return [
+        {"track": "adaptive", "job": "adaptive.suite_sweep", "key": "buck_converter",
+         "summary": {"points": 6, "finished": 6, "fevals_max": 3571}},
+        {"track": "implicit", "job": "sdirk.stiff_suite", "key": "servo_load_step",
+         "summary": {"finishers": ["sdirk2"], "explicit_finishers": [],
+                     "sdirk2_min_stable_n": 8}},
+    ]
+
+
+def test_B68_sidetrack_nav_entry_present_only_with_a_ledger(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    out1 = tmp_path / "docs1"
+    build(arch, out1)
+    assert not (out1 / "sidetrack.html").exists()
+    assert 'href="sidetrack.html"' not in (out1 / "index.html").read_text(encoding="utf-8")
+    _write_sidetrack(work, _sidetrack_fixture())
+    out2 = tmp_path / "docs2"
+    build(arch, out2)
+    assert (out2 / "sidetrack.html").is_file()
+    for name in ("index.html", "costmodel.html", "sidetrack.html"):
+        html = (out2 / name).read_text(encoding="utf-8")
+        assert _nav_hrefs(html) == [
+            "index.html", "sidetrack.html", "hypotheses.html", "falsification.html",
+            "methodology.html", "costmodel.html", "literature.html",
+            "interpretation.html", "glossary.html"], name
+    page = (out2 / "sidetrack.html").read_text(encoding="utf-8")
+    assert '<a href="sidetrack.html" class="on">side tracks</a>' in page
+
+
+def test_B68_sidetrack_build_is_deterministic_and_flag_resets(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_sidetrack(work, _sidetrack_fixture())
+    d1, d2 = tmp_path / "s1", tmp_path / "s2"
+    build(arch, d1)
+    build(arch, d2)
+    assert _snapshot(d1) == _snapshot(d2)
+    html = render_costmodel()
+    assert 'href="sidetrack.html"' not in html
+
+
+def test_B68_sidetrack_page_reports_every_point_and_stays_static(monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_sidetrack(work, _sidetrack_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    page = (out / "sidetrack.html").read_text(encoding="utf-8")
+    for p in _sidetrack_fixture():
+        assert p["job"] in page and p["key"] in page
+    # the counts come from the ledger, not from a hardcoded number
+    assert ">2<" in page                      # points measured card
+    # both tracks are named, and the page stays script-free like every other page
+    assert "adaptive" in page and "implicit" in page
+    assert "<script" not in page
 
 
 def test_B67_render_benchmark_direct_is_banned_word_safe():

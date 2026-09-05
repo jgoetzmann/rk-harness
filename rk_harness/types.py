@@ -123,6 +123,10 @@ class ArchiveState:
     # (order, stages) -> "<model>.<metric>" -> CellStat.  model in fast|slow|avr_approx,
     # metric in heldout|search|cycles|order.  Filled by archive.replay().
     cell_stats: dict[tuple[int, int], dict[str, CellStat]] = field(default_factory=dict)
+    # Every archived tableau_hash. Carried here so a cycle can skip candidates it has
+    # already seen without a second full pass over the archive; replay() has the records
+    # in hand anyway. Filled by archive.replay() and maintained by archive.fold().
+    record_hashes: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)

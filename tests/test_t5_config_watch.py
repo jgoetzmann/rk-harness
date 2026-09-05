@@ -107,8 +107,12 @@ def test_C14_watch_renders_and_is_clean(tmp_path, monkeypatch):
         assert needle in text, needle
     src = (HARNESS / "rk_harness" / "watch.py").read_text(encoding="utf-8").lower()
     assert "openai" not in src
-    # read-only: nothing written into the work dir by rendering
-    assert sorted(p.name for p in work.iterdir()) == ["events.jsonl"]
+    # read-only: nothing written into the work dir by rendering. HEARTBEAT is excluded
+    # because T4's heartbeat test leaves a daemon thread running for the rest of the
+    # pytest process, and it writes into whatever RK_WORK_DIR points at by then; that
+    # made this assertion fail depending on where the 10 s timer landed, which is
+    # nothing to do with what render_once() writes.
+    assert sorted(p.name for p in work.iterdir() if p.name != "HEARTBEAT") == ["events.jsonl"]
 
 
 def test_C15_project_falls_back_to_highest_solvable_order():

@@ -20,6 +20,9 @@ param(
     [int]$CodexUsageCap = 80,
     [int]$LitEvery = 50,
     [int]$InterpretEvery = 25,
+    [int]$SidetrackEvery = 0,
+    [int]$SidetrackMaxSeconds = 180,
+    [string]$SidetrackTracks = "both",
     [int]$EnumPerCycle = 500,
     [int]$MaxMinutes = 0,
     [int]$MaxCycles = 0,
@@ -76,6 +79,9 @@ $envFlags = @(
     "-e", "RK_CODEX_USAGE_CAP=$CodexUsageCap",
     "-e", "RK_LIT_EVERY=$LitEvery",
     "-e", "RK_INTERPRET_EVERY=$InterpretEvery",
+    "-e", "RK_SIDETRACK_EVERY=$SidetrackEvery",
+    "-e", "RK_SIDETRACK_MAX_SECONDS=$SidetrackMaxSeconds",
+    "-e", "RK_SIDETRACK_TRACKS=$SidetrackTracks",
     "-e", "RK_ENUM_PER_CYCLE=$EnumPerCycle",
     "-e", "RK_MAX_MINUTES=$MaxMinutes",
     "-e", "RK_MAX_CYCLES=$MaxCycles"
@@ -87,6 +93,7 @@ $mem = "{0}g" -f $MemoryGB
 $scratch = "/scratch:size={0}g" -f $ScratchGB
 Write-Host "resources: cpus=$Cpus memory=$mem pids-limit=$PidsLimit cpu-shares=$CpuShares tmpfs=$scratch"
 Write-Host "limits: max_minutes=$MaxMinutes max_cycles=$MaxCycles eval_budget=$EvalBudget enum_per_cycle=$EnumPerCycle llm_every=$LlmEveryCycles cycles codex_cap=$CodexUsageCap%"
+Write-Host "side tracks: every=$(if ($SidetrackEvery -gt 0) { "$SidetrackEvery cycles" } else { "off" }) budget=${SidetrackMaxSeconds}s tracks=$SidetrackTracks"
 
 # on-failure: a wrongful kill (nonzero exit) self-heals; a graceful STOP exit (0) or an explicit
 # `docker stop` from the watchdog stays down.
