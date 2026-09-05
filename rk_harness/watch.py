@@ -141,14 +141,19 @@ def watchdog_running() -> bool | None:
     if hit and time.monotonic() - hit[0] < 30:
         return hit[1]
     try:
-        # Match the invocation shape, not the string: this query runs in a powershell whose
-        # own command line contains "watchdog.ps1", so a bare -like on that pattern matches
-        # itself and the answer is always true, which is exactly wrong when the watchdog has
-        # died. Requiring -File excludes -Command queries, including this one.
+        # This query runs in a powershell whose own command line contains the pattern it is
+        # searching for, so it matches itself and the count is never zero -- which is exactly
+        # wrong at the one moment the answer matters, when the watchdog has died. Matching on
+        # the invocation shape is not enough on its own, because the "-File" in the pattern
+        # literal is itself part of the querying process's command line. Three conditions
+        # together are: launched with -File (a watchdog is), not this process, and not any
+        # process that is running a Get-CimInstance query.
         # The pattern stays "watchdog.ps1" exactly, never "watchdog*.ps1": a second harness
         # on this host runs scripts/watchdog-<name>.ps1 and must not be counted as rk's.
         p = subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*-File*watchdog.ps1*' -and $_.CommandLine -notlike '*-Once*' } | Measure-Object).Count"],
+                            "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*-File*watchdog.ps1*'"
+                            " -and $_.ProcessId -ne $PID -and $_.CommandLine -notlike '*Get-CimInstance*'"
+                            " -and $_.CommandLine -notlike '*-Once*' } | Measure-Object).Count"],
                            capture_output=True, text=True, timeout=15)
         val = int(p.stdout.strip() or 0) > 0
     except Exception:  # noqa: BLE001
