@@ -23,11 +23,11 @@ that would stop the container from starting at all.
 
 | Job | What it proves | Rough time |
 | --- | --- | --- |
-| `gate` | The verifier hash matches its pin (K3), then the golden and canary tests G1-G20, K1-K2. This is `entrypoint.sh`'s check, run in the same order. | 2-4 min |
-| `suite` | The full suite, sharded five ways by test file. `--durations=10` in every shard so the log carries its own balance data. | 5-15 min per shard, in parallel |
-| `determinism` | Both prototype curves and all 40 side-track artifacts reproduce byte for byte across two independent runs, and no scored file is created. Invariants I5 and D5 in `SIDETRACK-AUTOMATION.md`. | 5-10 min |
-| `image` | The Dockerfile still builds, the entrypoint gate passes **inside the image on Python 3.12**, and the harness mount is read-only (K4). | 5-10 min, cached |
-| `pins` | The Dockerfile and `pyproject.toml` pin the same versions of the same nine packages. | under 1 min |
+| `gate` | The verifier hash matches its pin (K3), then the golden and canary tests G1-G20, K1-K2. This is `entrypoint.sh`'s check, run in the same order. | 32 s |
+| `suite` | The full suite, sharded five ways by test file. `--durations=10` in every shard so the log carries its own balance data. | 25-87 s per shard, in parallel |
+| `determinism` | Both prototype curves and all 40 side-track artifacts reproduce byte for byte across two independent runs, and no scored file is created. Invariants I5 and D5 in `SIDETRACK-AUTOMATION.md`. | 130 s |
+| `image` | The Dockerfile still builds, the entrypoint gate passes **inside the image on Python 3.12**, and the harness mount is read-only (K4). | 156 s cold, less once cached |
+| `pins` | The Dockerfile and `pyproject.toml` pin the same versions of the same nine packages. | 4 s |
 
 Two of those deserve their reasons stated.
 
@@ -92,15 +92,22 @@ Actions is on by default for public repositories. The first run populates the bu
 `image` job is slowest the first time and cached afterwards. `workflow_dispatch` is enabled, so it
 can also be run by hand from the Actions tab without a push.
 
-## Rebalancing the shards
+## Rebalancing the shards, and why not to yet
 
-The five groups were balanced by test count, which is a proxy for time and not a good one: t1 has
-332 tests but they are fast unit tests, while t4's 191 include `run_cycle` cases. Read the
-`--durations=10` output from the slowest shard and move a file. The groups are a plain matrix in
-the workflow, so rebalancing is a one-line edit and needs no tooling.
+The five groups were balanced by test count, which the first run confirmed is a poor proxy for
+time: t1 has 332 tests and is the *fastest* shard at 25 s, while the 225 tests of
+t4/t11/t12/t13 take 87 s. Sum of the shards is 275 s; slowest is 87 s.
 
-Wall clock is the slowest shard, not the sum. If one shard dominates after rebalancing, split its
-file rather than adding a sixth group of small files.
+Do not rebalance on that. The whole run finishes in 3 min 17 s and its critical path is the
+`image` job at 156 s, not the suite. Moving a file between shards would shave nothing off wall
+clock while the image build dominates. Revisit if the suite grows past the image build, and read
+the `--durations=10` output from the slowest shard when you do; the groups are a plain matrix, so
+it is a one-line edit.
+
+The number worth keeping in view is the comparison, not the shard balance. The suite is 275 s of
+runner CPU here against the twenty to forty minutes it takes on the workstation, where it is
+contending with the container for the cores the watchdog is guarding. Same tests; the difference
+is what else is running.
 
 ## Running the same checks locally
 
