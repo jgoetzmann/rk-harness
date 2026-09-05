@@ -141,8 +141,14 @@ def watchdog_running() -> bool | None:
     if hit and time.monotonic() - hit[0] < 30:
         return hit[1]
     try:
+        # Match the invocation shape, not the string: this query runs in a powershell whose
+        # own command line contains "watchdog.ps1", so a bare -like on that pattern matches
+        # itself and the answer is always true, which is exactly wrong when the watchdog has
+        # died. Requiring -File excludes -Command queries, including this one.
+        # The pattern stays "watchdog.ps1" exactly, never "watchdog*.ps1": a second harness
+        # on this host runs scripts/watchdog-<name>.ps1 and must not be counted as rk's.
         p = subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*watchdog.ps1*' -and $_.CommandLine -notlike '*-Once*' } | Measure-Object).Count"],
+                            "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*-File*watchdog.ps1*' -and $_.CommandLine -notlike '*-Once*' } | Measure-Object).Count"],
                            capture_output=True, text=True, timeout=15)
         val = int(p.stdout.strip() or 0) > 0
     except Exception:  # noqa: BLE001
