@@ -84,11 +84,6 @@ jobs:
           - name: validation-benchmark
             files: tests/test_t8_*.py tests/test_t10_*.py
     name: suite (${{ matrix.name }})
-    env:
-      # test_t10 skips a case when RK_WORK_DIR is unset at import time; conftest still
-      # redirects every individual test to its own tmp_path, so this only un-skips it.
-      RK_WORK_DIR: ${{ runner.temp }}/work
-      RK_FINDINGS_DIR: ${{ runner.temp }}/findings
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -113,7 +108,14 @@ jobs:
         run: |
           git config --global user.email ci@rk-harness
           git config --global user.name ci
+      # RK_WORK_DIR belongs on the step, not the job: the runner context is not
+      # available in a job-level env block. test_t10 skips a case when it is unset at
+      # import time, and conftest still redirects every individual test to its own
+      # tmp_path, so this only un-skips it.
       - run: python -m pytest -q --durations=10 ${{ matrix.files }}
+        env:
+          RK_WORK_DIR: ${{ runner.temp }}/work
+          RK_FINDINGS_DIR: ${{ runner.temp }}/findings
 
   # ---------------------------------------------------------------- reproducibility
   # The side-track design rests on artifacts being pure functions of (code, params):
