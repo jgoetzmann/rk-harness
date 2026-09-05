@@ -224,7 +224,7 @@ def test_S14_never_states_the_container_is_down_when_docker_is_the_thing_that_is
     assert "Docker cannot tell us anything about the container." in body
     # a ten-hour-old heartbeat is not evidence of life, and must not read as reassurance
     assert "has not moved in" in body
-    assert "alive and working" not in body
+    assert "It is Docker that is broken" not in body
 
 
 def test_S15_exit_code_is_shown_only_once_the_container_has_stopped(tmp_path):
@@ -316,14 +316,54 @@ def test_S22_a_silent_daemon_reads_the_heartbeat_out_loud(tmp_path):
 
     doc["heartbeat"] = {"at": _iso(0.5), "age_s": 30}
     fresh = status.render_text(doc)
-    assert "the run itself is" in fresh and "alive and working" in fresh
+    assert "It is Docker that is broken, not the run." in fresh
 
     doc["heartbeat"] = {"at": _iso(75), "age_s": 4500}
     stale = status.render_text(doc)
     assert "has not moved in" in stale
-    assert "no" in stale and "evidence the run is alive" in stale
-    assert "alive and working" not in stale
+    assert "evidence the run is alive" in stale
+    assert "It is Docker that is broken" not in stale
 
     doc["heartbeat"] = {"at": None, "age_s": None}
     none = status.render_text(doc)
     assert "no heartbeat file either" in none
+
+
+def test_S23_a_live_heartbeat_is_not_proof_of_progress(tmp_path):
+    """The trap one level down from S22.
+
+    Observed live: the heartbeat advanced once and froze, while no cycle had completed for
+    eighty minutes against a 470 s median. Anything reading liveness from the heartbeat
+    alone calls that healthy. It is executing; it is not getting anywhere.
+    """
+    now = status._utcnow()
+    fresh_beat = {"at": _iso(0.5), "age_s": 30}
+
+    moving = {"last": now - datetime.timedelta(seconds=200), "median_s": 470.0, "samples": 20}
+    assert status.progress_note(moving, now) is None
+
+    stuck = {"last": now - datetime.timedelta(seconds=4800), "median_s": 470.0, "samples": 20}
+    note = status.progress_note(stuck, now)
+    assert note and "no cycle has completed in" in note and "median of" in note
+
+    # with no cadence yet, fall back to a floor rather than staying silent
+    assert status.progress_note({"last": now - datetime.timedelta(seconds=60)}, now) is None
+    bare = status.progress_note({"last": now - datetime.timedelta(seconds=9000)}, now)
+    assert bare and "no cadence has been established" in bare
+    assert status.progress_note({}, now) is None
+
+    doc = _collect(_work(tmp_path))
+    doc["docker"] = {"state": "DOCKER_UNREACHABLE", "error": "timed out after 6s"}
+    doc["verdict"] = "DOCKER_UNREACHABLE"
+    doc["heartbeat"] = fresh_beat
+    doc["cadence"] = stuck
+    body = status.render_text(doc)
+    assert "running without getting anywhere" in body
+    assert "It is Docker that is broken" not in body
+    assert "STUCK" in body
+
+    doc["cadence"] = moving
+    ok = status.render_text(doc)
+    assert "It is Docker that is broken, not the run." in ok
+    assert "running without getting anywhere" not in ok
+    assert "STUCK" not in ok

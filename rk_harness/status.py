@@ -423,6 +423,33 @@ _VERDICT_TEXT = {
 
 # Heartbeat older than this, with the container up and not paused, reads as no heartbeat.
 HEARTBEAT_STALE_S = 300
+# A cycle taking longer than this multiple of the recent median is not slow, it is stuck.
+STUCK_CYCLE_FACTOR = 3.0
+# ...unless there is no cadence to compare against, in which case fall back to this.
+STUCK_CYCLE_FLOOR_S = 1800
+
+
+def progress_note(cadence: dict, now) -> str | None:
+    """Whether cycles are still completing, independent of the heartbeat.
+
+    A live heartbeat means the container is executing; it does not mean the run is getting
+    anywhere. Observed directly: the heartbeat advanced once and froze, while no cycle had
+    completed for eighty minutes against a 470 s median. Anything that reports liveness
+    from the heartbeat alone will call that healthy.
+    """
+    last = cadence.get("last")
+    if last is None:
+        return None
+    age = _age(last, now)
+    if age is None:
+        return None
+    median = cadence.get("median_s")
+    limit = median * STUCK_CYCLE_FACTOR if median else STUCK_CYCLE_FLOOR_S
+    if age <= limit:
+        return None
+    against = ("against a median of {}".format(_dur(median)) if median
+               else "and no cadence has been established")
+    return "no cycle has completed in {}, {}".format(_dur(age), against)
 
 
 def decide(docker: dict, heartbeat_age: float | None, stop_file: bool, frozen: bool) -> str:
@@ -597,8 +624,15 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
             L.append("         There is no heartbeat file either, so nothing here is")
             L.append("         evidence that the run is alive.")
         elif age <= HEARTBEAT_STALE_S:
-            L.append("         The heartbeat is {} old though, so the run itself is".format(_dur(age)))
-            L.append("         alive and working. It is Docker that is broken, not the run.")
+            stuck = progress_note(doc.get("cadence") or {}, now)
+            if stuck:
+                sentence = ("The heartbeat is {} old, so the container is executing. "
+                            "But {}, so it is running without getting "
+                            "anywhere.").format(_dur(age), stuck)
+                L += ["         " + w for w in textwrap.wrap(sentence, _W - 10)]
+            else:
+                L.append("         The heartbeat is {} old though, so the run is alive".format(_dur(age)))
+                L.append("         and working. It is Docker that is broken, not the run.")
         else:
             L.append("         The heartbeat has not moved in {}, so there is no".format(_dur(age)))
             L.append("         evidence the run is alive. Check again in a minute: if that")
@@ -646,6 +680,12 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
     sat = doc.get("saturation", {}) or {}
     arc = doc.get("archive", {}) or {}
     L += _sec("PROGRESS")
+    stuck = progress_note(cad, now)
+    if stuck:
+        head = stuck[0].upper() + stuck[1:]
+        parts = textwrap.wrap(head, _W - 16) or [head]
+        L.append(_row("STUCK", parts[0]))
+        L += [_row("", w) for w in parts[1:]]
     L.append(_row("stall", "{} cycles with no new elite".format(rs.get("stall_counter", "unknown"))))
     if arc.get("files"):
         L.append(_row("archive", "{} daily files, {:.1f} MB, newest touched {} ago".format(
