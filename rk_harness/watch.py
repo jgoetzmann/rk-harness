@@ -409,6 +409,59 @@ def health_panel(events: list[dict], now) -> Panel:
     return _kv_table(rows, "health")
 
 
+def machine_panel(dk: dict) -> Panel:
+    """What this machine is doing, from the same code that writes stats.txt.
+
+    Shares rk_harness.status so the live view and the file cannot disagree. Every probe
+    returns None rather than raising, and the GPU is cached because nvidia-smi costs about
+    140 ms and keeps an Optimus dGPU awake.
+    """
+    rows: list[tuple[str, str]] = []
+    try:
+        from rk_harness import status as st
+    except Exception:  # noqa: BLE001
+        return _kv_table([("machine", "unavailable")], "this machine")
+
+    cpu = st.host_cpu_percent(sample_seconds=0.15)
+    rows.append(("host CPU", f"{cpu}% total (the pause guard uses host minus container)"
+                 if cpu is not None else "unknown"))
+    mem = st.host_memory()
+    if mem:
+        rows.append(("memory", f"{mem['percent_used']}% used, {mem['free_gb']} GB free "
+                               f"of {mem['total_gb']} GB"))
+    pw = st.host_power()
+    if pw:
+        b = f", battery {pw['battery_percent']}%" if pw.get("battery_percent") is not None else ""
+        rows.append(("power", f"on {pw['source']}{b}"))
+    for dsk in st.probe_disks([work_dir()] + ([Path(os.environ["SystemDrive"] + os.sep)]
+                                              if os.environ.get("SystemDrive") else [])):
+        low = "  LOW" if (dsk["percent_free"] or 100) < 10 else ""
+        rows.append((f"disk {dsk['mount'].rstrip(chr(92) + '/')}",
+                     f"{dsk['free_gb']} GB free of {dsk['total_gb']} GB "
+                     f"({dsk['percent_free']}%){low}"))
+    if dk.get("cpus") or dk.get("memory_gb"):
+        rows.append(("container limits", f"{dk.get('cpus')} cpus, {dk.get('memory_gb')} GB"))
+
+    hit = _cache.get("gpu")
+    if hit and time.monotonic() - hit[0] < 30:
+        g = hit[1]
+    else:
+        on_battery = bool(pw) and pw.get("on_ac") is False
+        g = st.probe_gpu(skip=on_battery)
+        _cache["gpu"] = (time.monotonic(), g)
+    if g.get("ok"):
+        rows.append(("GPU", f"{g.get('name')}"))
+        rows.append(("", f"{g.get('util_percent')}% util, "
+                         f"{g.get('memory_used_mib'):.0f}/{g.get('memory_total_mib'):.0f} MiB, "
+                         f"{g.get('temp_c'):.0f} C, {g.get('power_w')} W, {g.get('pstate')}"))
+        rows.append(("", "the run is CPU-only; this is the rest of the machine"))
+    elif g.get("skipped"):
+        rows.append(("GPU", f"not sampled ({g['skipped']})"))
+    else:
+        rows.append(("GPU", f"unknown ({str(g.get('error'))[:60]})"))
+    return _kv_table(rows, "this machine")
+
+
 def events_panel(events: list[dict], n: int) -> Panel:
     t = Table(expand=True)
     t.add_column("time (CT)", no_wrap=True)
@@ -443,13 +496,15 @@ def build_layout() -> Layout:
     root.split_column(Layout(name="head", size=4), Layout(name="top", size=14), Layout(name="mid"), Layout(name="bottom", size=n_tail + 4))
     root["top"].split_row(Layout(name="settings", ratio=3), Layout(name="llm", ratio=2))
     root["mid"].split_row(Layout(name="left"), Layout(name="right", ratio=2))
-    root["left"].split_column(Layout(name="progress"), Layout(name="working"), Layout(name="health"))
+    root["left"].split_column(Layout(name="progress"), Layout(name="working"),
+                              Layout(name="health"), Layout(name="machine", size=12))
     root["head"].update(header(st, arch, events, dk, now))
     root["settings"].update(settings_panel(cfg, dk))
     root["llm"].update(llm_panel(events, dk))
     root["progress"].update(progress_panel(st, arch, events, records, now))
     root["working"].update(working_panel(events, hyps))
     root["health"].update(health_panel(events, now))
+    root["machine"].update(machine_panel(dk))
     root["right"].update(results_panel(arch, records))
     root["bottom"].update(events_panel(events, n_tail))
     return root
