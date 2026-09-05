@@ -221,7 +221,10 @@ def test_S14_never_states_the_container_is_down_when_docker_is_the_thing_that_is
     body = status.render_text(doc)
     assert "CANNOT TELL" in body
     assert "NOT RUNNING" not in body
-    assert "may be perfectly healthy" in body
+    assert "Docker cannot tell us anything about the container." in body
+    # a ten-hour-old heartbeat is not evidence of life, and must not read as reassurance
+    assert "has not moved in" in body
+    assert "alive and working" not in body
 
 
 def test_S15_exit_code_is_shown_only_once_the_container_has_stopped(tmp_path):
@@ -299,3 +302,28 @@ def test_S21_a_skipped_gpu_says_so_rather_than_showing_nothing():
     out = status.probe_gpu(skip=True)
     assert out["skipped"] == "on battery"
     assert not out["ok"]
+
+
+def test_S22_a_silent_daemon_reads_the_heartbeat_out_loud(tmp_path):
+    """When Docker cannot answer, the heartbeat is the only evidence of life there is.
+
+    Regression for a real incident: the daemon wedged, a 140 s heartbeat left over from a
+    brief unpause was read as recovery, and the run had in fact done no work for an hour.
+    """
+    doc = _collect(_work(tmp_path))
+    doc["docker"] = {"state": "DOCKER_UNREACHABLE", "error": "timed out after 6s"}
+    doc["verdict"] = "DOCKER_UNREACHABLE"
+
+    doc["heartbeat"] = {"at": _iso(0.5), "age_s": 30}
+    fresh = status.render_text(doc)
+    assert "the run itself is" in fresh and "alive and working" in fresh
+
+    doc["heartbeat"] = {"at": _iso(75), "age_s": 4500}
+    stale = status.render_text(doc)
+    assert "has not moved in" in stale
+    assert "no" in stale and "evidence the run is alive" in stale
+    assert "alive and working" not in stale
+
+    doc["heartbeat"] = {"at": None, "age_s": None}
+    none = status.render_text(doc)
+    assert "no heartbeat file either" in none

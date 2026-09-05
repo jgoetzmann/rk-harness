@@ -415,8 +415,8 @@ _VERDICT_TEXT = {
     "ABSENT": ("STOP", "NOT CREATED - no container by that name exists."),
     "STOPPING": ("WARN", "STOPPING - a STOP file is present; the run exits at the next cycle boundary."),
     "FROZEN": ("OK", "FROZEN - the epoch was closed deliberately. This is a clean end, not a failure."),
-    "DOCKER_UNREACHABLE": ("STOP", "CANNOT TELL - Docker did not answer in time. The run may well be fine; this says nothing about it."),
-    "DOCKER_ERROR": ("STOP", "CANNOT TELL - Docker answered with an error. The run may well be fine; this says nothing about it."),
+    "DOCKER_UNREACHABLE": ("STOP", "CANNOT TELL - Docker did not answer in time, so the container's state is unknown. The heartbeat below is the only evidence either way."),
+    "DOCKER_ERROR": ("STOP", "CANNOT TELL - Docker answered with an error, so the container's state is unknown. The heartbeat below is the only evidence either way."),
     "DOCKER_ABSENT": ("STOP", "CANNOT TELL - the docker command is not available on this machine."),
     "UNKNOWN": ("WARN", "UNKNOWN - the container state could not be determined."),
 }
@@ -587,8 +587,22 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
         L.append("         " + str(dk["error"]))
         if dk.get("latency_ms"):
             L.append("         docker took {} ms to fail".format(dk["latency_ms"]))
-        L.append("         Nothing below about the container is known. The run itself")
-        L.append("         may be perfectly healthy; this says nothing either way.")
+        L.append("         Docker cannot tell us anything about the container.")
+        # With the daemon silent the heartbeat is the only evidence of life there is, so
+        # it gets read out here rather than left as a quiet row further down. Learned the
+        # hard way: a 140 s heartbeat during a brief unpause was mistaken for recovery
+        # while the run had in fact done no work for over an hour.
+        age = (doc.get("heartbeat") or {}).get("age_s")
+        if age is None:
+            L.append("         There is no heartbeat file either, so nothing here is")
+            L.append("         evidence that the run is alive.")
+        elif age <= HEARTBEAT_STALE_S:
+            L.append("         The heartbeat is {} old though, so the run itself is".format(_dur(age)))
+            L.append("         alive and working. It is Docker that is broken, not the run.")
+        else:
+            L.append("         The heartbeat has not moved in {}, so there is no".format(_dur(age)))
+            L.append("         evidence the run is alive. Check again in a minute: if that")
+            L.append("         age keeps growing, it has stopped doing work.")
     L.append("")
     if dk.get("ok") and dk.get("status"):
         L.append(_row("container", "{}   image {}".format(dk.get("status"), dk.get("image") or "unknown")))
