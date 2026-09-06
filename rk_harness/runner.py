@@ -550,6 +550,7 @@ _WORK_EXTRA_PATHS: tuple[str, ...] = (
     "hypotheses.jsonl",
     "falsification.json",
     "EPOCH_STATUS.json",
+    "saturation_state.json",
     "literature",
     "interpretation",
     "prototypes",
