@@ -345,9 +345,23 @@ grace. A 600 s budget would give 21.5 min and be force-stopped, which is why the
 value rather than trusting it. Re-derive this if cycle time grows. (A literature cycle already
 exceeds the grace today, per M7. That is pre-existing and is not made worse by this change.)
 
-### 6a. What the first full run measured
+### 6a. Appendix: an unreproduced run, kept for its design content
 
-The catalogue was run end to end once on the host, into a scratch work directory, on 2026-09-04.
+**Provenance, and where the citable numbers now live.** The catalogue was run end to end once on
+the host on 2026-09-04, into a scratch `RK_WORK_DIR` that is **not in this repository**, so the
+figures below were prose with no artifact behind them when this appendix was written. Two of the
+statements were also wrong, and are corrected in place.
+
+That is no longer the state. The container measured all 40 points itself at cycle 2380 on
+2026-09-08, under code hash `a98acb39fb4f31ca`, and the artifacts are committed under
+`rk-work/sidetrack/`. **Cite those, not this section.** The nine `sdirk.gamma_dyadic_scan`
+artifacts reproduce the corrected figures below exactly, which is why the corrections stand rather
+than being withdrawn with the rest.
+
+What survives here is the J4 construction ruling at the end, which is design content with no other
+home. The measured figures are kept beside it only so a reader can see that the correction and the
+later measurement agree. Decision: `DECISIONS.md` D24.
+
 All 40 points completed with status `ok` in **77.9 s** of wall clock, and re-measuring every point
 reproduced all 40 artifacts byte for byte. Costs are dominated by reference-solution computation
 on first touch, not by integration: `robertson_scaled` alone accounts for 44 s of the 78, and it
@@ -356,24 +370,52 @@ is cheap on every subsequent point in the same process.
 Three results are worth reading before the site page exists, because they answer questions the
 design documents left open:
 
-* **The explicit wall is total on the stiff suite.** On all three stiff validation problems
-  (`servo_load_step`, `enzyme_qssa`, `robertson_scaled`), euler, heun2, midpoint and rk4 diverge at
-  every step count in the ladder up to 256. SDIRK2 finishes all three: from n=8 on servo
-  (error 8.6e-7), n=8 on enzyme (6.9e-7), and n=256 on robertson (1.0e-5). Epoch 1 established
-  that no discovered explicit method finishes robertson; this establishes that an implicit one
-  does. That is the epoch-3 case, made on the harness's own problems rather than on a synthetic
-  two-rate system.
+* **Explicit methods need far more steps than the ladder allows.** Two statements, deliberately
+  kept apart, because they are measured under different arithmetic and a reader who merges them
+  draws a conclusion neither supports.
+
+  *In float64, on this ladder.* On all three stiff validation problems (`servo_load_step`,
+  `enzyme_qssa`, `robertson_scaled`), euler, heun2, midpoint and rk4 diverge at every step count in
+  the ladder, which stops at 256. SDIRK2 finishes all three: from n=8 on servo (error 8.6e-7), n=8
+  on enzyme (6.9e-7), and n=256 on robertson (1.0e-5). These runs carry no Q15 effects at all; the
+  job stamps them `float64 only` for that reason, and SDIRK2 is priced with a finite-difference
+  Jacobian.
+
+  *In Q15, at the scored budget.* `rk-work/validation/results.json` is the traceable source and it
+  says something different: euler, heun2 and midpoint all **finish** `robertson_scaled`, at 4369,
+  1680 and 1985 steps, and midpoint wins the problem outright at `q15_error` 0.0894. What no
+  explicit method does is finish it from the discovered set:
+  `verdicts.per_problem.robertson_scaled.finishers_discovered` is 0. That, and only that, is the
+  claim to make in public.
+
+  So the epoch-3 case rests on a float64 result about step counts, not on a Q15 result about
+  feasibility. Establishing that an implicit method finishes these problems *in Q15* is work that
+  has not been done.
 * **The dyadic-gamma threshold has a number now.** EPOCH3-DESIGN puts the `NOT_L_STABLE` gate "on
   the order of 0.05" as a placeholder. Measured |R(inf)| for the best A-stable dyadic gamma at each
-  denominator exponent: 0.28 at s=4, 0.21 at s=5, 0.064 at s=6 and s=7, and 0.00124 at s=8 and
-  finer, all at measured order 2.007. So a 0.05 gate implies s >= 8, and s=8 clears it by a factor
-  of 40. Every candidate scanned is A-stable and none is L-stable, which is the expected cost of
-  the snap.
+  denominator exponent: 0.28 at s=4 (gamma 5/16), 0.20988 at s=5 (9/32), 0.063712 at s=6 and s=7
+  (19/64), and 0.0012444 at s=8 and finer (75/256). Measured order is **not** uniform, as this
+  section previously claimed: it is 2.0062 at s=4, 2.0066 at s=5, and 2.0069 from s=6 through s=12.
+  So a 0.05 gate implies s >= 8, and s=8 clears it by a factor of 40. That conclusion is bounded by
+  the scan window: `sidetrack.py:374` sets `GAMMA_WIDTH = 8`, so "s >= 8" means the coarsest dyadic
+  grid whose plus-or-minus-8-ulp window around 1 - sqrt(2)/2 contains a qualifying gamma, not a
+  theorem about all dyadics at that exponent. The plateau from s=8 onward is a windowing artifact
+  for the same reason: 1 - sqrt(2)/2 sits about 0.02 ulp from 75/256, so `round()` returns the same
+  reduced dyadic at s=9 through s=12.
+
+  This section previously said every candidate scanned is A-stable. That is wrong: **18 of the 149
+  scanned candidates are not A-stable**, being 3 of 13 at s=4, 7 of 17 at s=5, 5 of 17 at s=6, 3 of
+  17 at s=7, and none at s=8 and finer. Only from s=8 is the whole window A-stable. None of the 149
+  is L-stable, which is the expected cost of the snap, and that half of the statement stands. The
+  threshold this scan argues for is settled in `DECISIONS.md` D15.
 * **Three of the sixteen controller-gain settings are unusable.** alpha=1/8 with beta=1/8 or 1/4,
   and alpha=1/4 with beta=1/4, drive the step size into underflow on all three reference problems.
   Among the settings that work, rejection rates by alpha are: 0.80 to 1.02 percent at alpha=3/8,
   1.39 to 1.66 percent at alpha=1/4, 1.79 to 2.53 percent at alpha=1/8, and 1.27 to 15.75 percent
-  at alpha=1/2, where beta=1/4 is a sharp outlier. So alpha=3/8 is the best of the four and
+  at alpha=1/2, where beta=1/4 is a sharp outlier. Note what "unusable" means here: the failure is
+  the float step floor at `prototypes/adaptive.py:213`, not the Q15 minimum step of one LSB of h_q
+  described at `adaptive.py:47-49`. A float sweep cannot separate the two, so this is not a Q15
+  result. So alpha=3/8 is the best of the four and
   alpha=1/2 is the least predictable, while the currently proposed alpha=1/4, beta=1/8 sits
   mid-field. EPOCH2-DESIGN section 4 should be revisited against the full artifact before those
   gains are frozen into the Q15 table.

@@ -2124,6 +2124,49 @@ def test_B68_sidetrack_page_reports_every_point_and_stays_static(monkeypatch, tm
     assert "<script" not in page
 
 
+def test_B69_a_failed_point_message_cannot_block_the_site_build(monkeypatch, tmp_path):
+    """A failed point records its exception string, the ledger is append-only, and
+    check_banned refuses the whole site on one hit. One unlucky message would take the
+    site down and keep it down, so the message is softened on the way to the page."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_sidetrack(work, _sidetrack_fixture())
+    with open(work / "sidetrack" / "ledger.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": "2026-09-04T00:01:00Z", "cycle": 20,
+                             "track": "implicit", "job": "sdirk.newton_iters", "key": "n1",
+                             "code_hash": "0123456789abcdef", "status": "failed",
+                             "duration_s": 0.1,
+                             "error": "RuntimeError('this proves the first novel case')"},
+                            sort_keys=True) + chr(10))
+    out = tmp_path / "docs"
+    build(arch, out)                       # build() runs check_banned before writing
+    page = (out / "sidetrack.html").read_text(encoding="utf-8")
+    check_banned(page)
+    # softened, not dropped: the reader still gets the message
+    assert "RuntimeError" in page
+    assert "shows the earliest new case" in page
+
+
+def test_B69_the_shipped_catalogue_prose_passes_the_guard(monkeypatch, tmp_path):
+    """The job catalogue and the artifact strings are written in this repository, so
+    nothing softens them, and they reach a published page. Guard them here, and put one
+    real artifact's own schema and arithmetic strings under the same guard."""
+    from rk_harness import sidetrack as sidetrack_mod
+
+    for job in sidetrack_mod.JOBS:
+        check_banned(job.closes)
+        assert chr(0x2014) not in job.closes and chr(0x2013) not in job.closes, job.name
+
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    job = sidetrack_mod.JOBS_BY_NAME["sdirk.gamma_dyadic_scan"]
+    point = next(p for p in job.points() if p.key == "s04")
+    sidetrack_mod.run_point(point, ts="fixed")     # cheapest real point: exact algebra
+    out = tmp_path / "docs"
+    build(arch, out)
+    page = (out / "sidetrack.html").read_text(encoding="utf-8")
+    check_banned(page)
+    assert "sdirk.gamma_dyadic_scan" in page and "s04" in page
+
+
 def test_B67_render_benchmark_direct_is_banned_word_safe():
     html = render_benchmark(_benchmark_fixture())
     assert "<title>" in html.lower()

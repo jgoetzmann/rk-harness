@@ -307,11 +307,18 @@ def _codex_rate_limits() -> dict:
             if not isinstance(rl, dict):
                 continue
             primary = rl.get("primary") or {}
+            try:
+                age_s = max(0.0, time.time() - path.stat().st_mtime)
+            except OSError:
+                age_s = None
             return {
                 "used_percent": primary.get("used_percent"),
                 "window_minutes": primary.get("window_minutes"),
                 "resets_at": primary.get("resets_at"),
                 "plan_type": rl.get("plan_type"),
+                # How old the reading is. Only a codex call refreshes it, so an
+                # unbounded age is the signature of a gate that has latched shut.
+                "snapshot_age_s": age_s,
             }
     return {}
 
@@ -487,11 +494,8 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_
     spent = 0.0
     mode = os.environ.get("RK_LLM")
     want = mode in ("on", "codex") and state.spend_usd < credentials.monthly_cap_usd()
-    if want and mode == "codex":
-        used = _codex_rate_limits().get("used_percent")
-        if isinstance(used, (int, float)) and used >= _codex_usage_cap():
-            log_event("llm_skipped", reason="plan usage cap", used_percent=used, cap_percent=_codex_usage_cap())
-            want = False
+    if want and mode == "codex" and _codex_capped("directive"):
+        want = False
     if want and not llm_due(new_cycle_id, action_kind, _llm_every_cycles()):
         try:
             last = json.loads(_last_directive_path().read_text(encoding="utf-8"))
@@ -508,7 +512,15 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_
         open_h = [h for h in hyps if h.get("verdict") is None]
         user = prompts.build_user_prompt(arch, state, refuted, open_h,
                                          literature=literature.digest_for_prompt())
-        content, cost = call_llm(prompts.SYSTEM_PROMPT, user)
+        # The other three gates wrap their call for this reason and say so; this one did not,
+        # so a codex failure (non-zero exit, auth, network, the 600 s timeout) propagated out
+        # of the directive path and _abandon discarded the whole cycle. A directive is a
+        # narrowing, so falling back to the deterministic one is always safe.
+        try:
+            content, cost = call_llm(prompts.SYSTEM_PROMPT, user)
+        except Exception as e:  # noqa: BLE001 - a directive call must never fail the cycle
+            log_event("llm_call_failed", error=repr(e)[:300], gate="directive")
+            return directive_mod.fallback_directive(arch, phase, new_cycle_id), spent
         spent = cost
         log_event("llm_call", cost_usd=cost, model=os.environ.get("RK_LLM_MODEL", "gpt-4.1-mini"),
                   chars=len(content))
@@ -665,9 +677,43 @@ def _maybe_sidetrack(new_cycle_id: int) -> None:
               elapsed_s=summary.get("elapsed_s"), exhausted=summary.get("exhausted"))
 
 
-def _codex_capped() -> bool:
-    used = _codex_rate_limits().get("used_percent")
-    return isinstance(used, (int, float)) and used >= _codex_usage_cap()
+def _codex_cap_state() -> tuple[bool, str, dict]:
+    """Whether the Codex plan cap is binding right now, and why.
+
+    Only a codex call writes a rate-limit snapshot, so a reading that closes the gate is
+    also the last reading that will ever be taken: without an expiry the gate latches shut
+    for good, which is what happened between 2026-09-06 and 2026-09-08. The same payload
+    already carries resets_at, the end of the window the reading was taken in. Once that
+    has passed the reading describes a window that no longer exists, so it must not gate.
+    A snapshot older than its own window is treated the same way, for the case where
+    resets_at is missing.
+    """
+    rl = _codex_rate_limits()
+    used = rl.get("used_percent")
+    if not isinstance(used, (int, float)):
+        return False, "no snapshot", rl
+    resets_at = rl.get("resets_at")
+    if isinstance(resets_at, (int, float)) and time.time() >= float(resets_at):
+        return False, "window reset passed", rl
+    age_s = rl.get("snapshot_age_s")
+    window_s = rl.get("window_minutes")
+    if (isinstance(age_s, (int, float)) and isinstance(window_s, (int, float))
+            and age_s > float(window_s) * 60.0):
+        return False, "snapshot older than its window", rl
+    if used >= _codex_usage_cap():
+        return True, "plan usage cap", rl
+    return False, "under cap", rl
+
+
+def _codex_capped(gate: str = "") -> bool:
+    """One gate decision, logged. Three of the four call sites used to suppress silently,
+    which is why a thousand-cycle outage left almost no trace in events.jsonl."""
+    capped, reason, rl = _codex_cap_state()
+    if capped:
+        log_event("llm_skipped", reason=reason, gate=gate,
+                  used_percent=rl.get("used_percent"), cap_percent=_codex_usage_cap(),
+                  resets_at=rl.get("resets_at"))
+    return capped
 
 
 def _maybe_literature_review(state: RunState, arch, new_cycle_id: int) -> float:
@@ -677,7 +723,7 @@ def _maybe_literature_review(state: RunState, arch, new_cycle_id: int) -> float:
     every = _lit_every()
     if every <= 0 or new_cycle_id % every != 0 or os.environ.get("RK_LLM") != "codex":
         return 0.0
-    if state.spend_usd >= credentials.monthly_cap_usd() or _codex_capped():
+    if state.spend_usd >= credentials.monthly_cap_usd() or _codex_capped("literature"):
         return 0.0
     digests = literature.load_digests()
     topic = literature.next_topic(len(digests))
@@ -715,7 +761,7 @@ def _maybe_interpret(state: RunState, arch, new_cycle_id: int) -> float:
         return 0.0
     if state.spend_usd >= credentials.monthly_cap_usd():
         return 0.0
-    if os.environ.get("RK_LLM") == "codex" and _codex_capped():
+    if os.environ.get("RK_LLM") == "codex" and _codex_capped("interpret"):
         return 0.0
     hyps = ledger.load_hypotheses()
     refuted = [h for h in hyps if h.get("verdict") == "refuted"]
@@ -770,10 +816,8 @@ def _maybe_propose_hypothesis(state: RunState, arch, action_kind: str, new_cycle
         return 0.0
     if state.spend_usd >= credentials.monthly_cap_usd():
         return 0.0
-    if os.environ.get("RK_LLM") == "codex":
-        used = _codex_rate_limits().get("used_percent")
-        if isinstance(used, (int, float)) and used >= _codex_usage_cap():
-            return 0.0
+    if os.environ.get("RK_LLM") == "codex" and _codex_capped("hypothesis"):
+        return 0.0
     hyps = ledger.load_hypotheses()
     refuted = [h for h in hyps if h.get("verdict") == "refuted"]
     open_h = [h for h in hyps if h.get("verdict") is None]

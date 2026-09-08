@@ -11,6 +11,7 @@ from fractions import Fraction
 
 import jsonschema
 
+from rk_harness.encourager import stage_domain
 from rk_harness.types import ArchiveState
 
 
@@ -192,15 +193,19 @@ def _heldout_of(rec) -> float:
 
 def _emptiest_cell(arch: ArchiveState, order: int) -> tuple[int, int]:
     grid = arch.grids.get(order, {}) if arch is not None and arch.grids else {}
-    for stages in range(2, 7):
+    domain = stage_domain(order)
+    for stages in domain:
         for bucket in range(8):
             if (stages, bucket) not in grid:
                 return (stages, bucket)
-    best_key = (2, 0)
+    best_key = (domain[0], 0)
     best_val = float("-inf")
-    for stages in range(2, 7):
+    for stages in domain:
         for bucket in range(8):
-            v = _heldout_of(grid[(stages, bucket)])
+            rec = grid.get((stages, bucket))
+            if rec is None:
+                continue
+            v = _heldout_of(rec)
             if v > best_val:
                 best_val = v
                 best_key = (stages, bucket)

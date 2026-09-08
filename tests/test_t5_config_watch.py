@@ -278,3 +278,89 @@ def test_C20_sitegen_publishes_literature_and_interpretation(tmp_path, monkeypat
     assert "arxiv.org" in lit and "Model-written" in lit and "Model-written" in interp
     for page in (lit, interp):
         sitegen.check_banned(page)
+
+
+def test_C21_a_snapshot_whose_window_has_reset_does_not_cap(tmp_path, monkeypatch):
+    """Only a codex call writes a rate-limit snapshot, so a reading that closes the gate is
+    the last reading that will ever be taken. Without an expiry the gate latches shut: that
+    is what kept the run on fallback directives for over a thousand cycles."""
+    import time as _time
+    from rk_harness import runner
+    from rk_harness.types import ArchiveState, RunState
+    work = tmp_path / "work"
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    monkeypatch.setenv("RK_LLM", "codex")
+    monkeypatch.setenv("RK_LLM_EVERY_CYCLES", "1")
+    monkeypatch.setenv("RK_CODEX_USAGE_CAP", "80")
+    arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
+    st = RunState(0, 2, "2026-09-21T10:00:00Z", "2026-09-21T10:00:00Z", 0.0, 0, None)
+    good = json.dumps({"directive_id": "D-T9", "hypothesis_id": None, "target_order": 3,
+                       "stages": [4], "constraints": {}, "islands": 1, "budget_minutes": 5,
+                       "rationale": "test"})
+    calls = []
+
+    def fake_call(system, user):
+        calls.append(1)
+        return good, 0.0
+    monkeypatch.setattr(runner, "call_llm", fake_call)
+
+    now = _time.time()
+    # over cap, window still open: the cap binds, which is the behaviour worth keeping
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {
+        "used_percent": 80.0, "window_minutes": 10080, "resets_at": now + 3600})
+    d, _ = runner._llm_directive(st, arch, 2, 1, "SEARCH_CELL")
+    assert calls == [] and d["directive_id"].startswith("D-F")
+    assert runner._codex_cap_state()[:2] == (True, "plan usage cap")
+
+    # same reading, window already reset: it describes a window that no longer exists
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {
+        "used_percent": 80.0, "window_minutes": 10080, "resets_at": now - 1})
+    assert runner._codex_cap_state()[:2] == (False, "window reset passed")
+    d, _ = runner._llm_directive(st, arch, 2, 2, "SEARCH_CELL")
+    assert calls == [1] and d["directive_id"] == "D-T9"
+
+    # no resets_at, but the reading is older than its own window: same conclusion
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {
+        "used_percent": 80.0, "window_minutes": 60, "snapshot_age_s": 7200.0})
+    assert runner._codex_cap_state()[:2] == (False, "snapshot older than its window")
+
+    # no snapshot at all is not a cap hit either
+    monkeypatch.setattr(runner, "_codex_rate_limits", dict)
+    assert runner._codex_cap_state()[:2] == (False, "no snapshot")
+
+
+def test_C22_every_codex_gate_names_itself_when_it_suppresses(tmp_path, monkeypatch):
+    """Three of the four gates used to suppress silently, which is why a thousand-cycle
+    outage left almost no trace in events.jsonl."""
+    import time as _time
+    from rk_harness import runner
+    from rk_harness.types import ArchiveState, RunState
+    work = tmp_path / "work"
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    monkeypatch.setenv("RK_LLM", "codex")
+    monkeypatch.setenv("RK_LLM_EVERY_CYCLES", "1")
+    monkeypatch.setenv("RK_LIT_EVERY", "1")
+    monkeypatch.setenv("RK_INTERPRET_EVERY", "1")
+    monkeypatch.setenv("RK_CODEX_USAGE_CAP", "80")
+    arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
+    st = RunState(0, 2, "2026-09-21T10:00:00Z", "2026-09-21T10:00:00Z", 0.0, 0, None)
+    monkeypatch.setattr(runner, "_codex_rate_limits", lambda: {
+        "used_percent": 95.0, "window_minutes": 10080, "resets_at": _time.time() + 3600})
+    monkeypatch.setattr(runner, "call_llm", lambda s, u: (_ for _ in ()).throw(
+        AssertionError("a capped gate must not call out")))
+    monkeypatch.setattr(runner, "_call_codex", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a capped gate must not call out")))
+
+    runner._llm_directive(st, arch, 2, 1, "SEARCH_CELL")
+    assert runner._maybe_propose_hypothesis(st, arch, "HYPOTHESIZE", 1) == 0.0
+    assert runner._maybe_literature_review(st, arch, 1) == 0.0
+    assert runner._maybe_interpret(st, arch, 1) == 0.0
+
+    lines = [json.loads(x) for x in
+             (work / "events.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    gates = {e.get("gate") for e in lines if e.get("kind") == "llm_skipped"}
+    assert gates == {"directive", "hypothesis", "literature", "interpret"}, gates
+    for e in lines:
+        if e.get("kind") == "llm_skipped":
+            assert e["reason"] == "plan usage cap"
+            assert e["used_percent"] == 95.0 and e["cap_percent"] == 80.0

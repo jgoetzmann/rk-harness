@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 
+from rk_harness.encourager import stage_domain
 from rk_harness.types import ArchiveState, RunState
 
 _DIRECTIVE_EXAMPLE = {
@@ -83,8 +84,12 @@ def _grid_section(arch: ArchiveState) -> list[str]:
     grids = arch.grids if arch is not None and arch.grids else {}
     for order in (1, 2, 3, 4):
         grid = grids.get(order, {}) or {}
-        lines.append(f"order {order}: {len(grid)} of 40 cells filled")
-        for stages in range(2, 7):
+        domain = stage_domain(order)
+        in_domain = sum(1 for (s, _b) in grid if s in domain)
+        outside = len(grid) - in_domain
+        extra = f" (+{outside} outside the searchable stage range)" if outside else ""
+        lines.append(f"order {order}: {in_domain} of {len(domain) * 8} cells filled{extra}")
+        for stages in domain:
             row = []
             for bucket in range(8):
                 rec = grid.get((stages, bucket))
@@ -99,7 +104,7 @@ def _grid_section(arch: ArchiveState) -> list[str]:
                         he, se, cyc = None, None, None
                     row.append(f"b{bucket}:heldout={_fmt(he)},search={_fmt(se)},cycles={cyc}")
             lines.append(f"  stages {stages}: " + " | ".join(row))
-        empties = [(s, b) for s in range(2, 7) for b in range(8) if (s, b) not in grid]
+        empties = [(s, b) for s in domain for b in range(8) if (s, b) not in grid]
         if empties:
             lines.append("  empty cells (stages, bucket): " + ", ".join(f"({s},{b})" for s, b in empties[:40]))
     return lines

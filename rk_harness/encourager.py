@@ -18,6 +18,29 @@ _ORDER_BY_PHASE = {0: 2, 1: 3, 2: 4, 3: 4}
 _STAGES = (2, 3, 4, 5, 6)
 _BUCKETS = (0, 1, 2, 3, 4, 5, 6, 7)
 _MAX_STAGES = 6
+
+# Stages an explicit Runge-Kutta method needs to reach an order. Orders 1 to 4 need one
+# stage each; order 5 is the Butcher barrier at 6. archive.record_order caps the recorded
+# order at 4, so only the first four entries are reachable today. The barrier is written
+# down anyway, because the scan below is the one place where getting it wrong is silent.
+_MIN_STAGES: dict[int, int] = {1: 1, 2: 2, 3: 3, 4: 4, 5: 6, 6: 7, 7: 9, 8: 11}
+
+
+def min_stages_for_order(order: int) -> int:
+    return _MIN_STAGES.get(int(order), int(order))
+
+
+def stage_domain(order: int) -> tuple[int, ...]:
+    """The stage counts worth searching for `order`.
+
+    Scanning stage 2 for an order-4 grid asks for a cell that cannot exist, so the scan
+    returns it on every call forever and the search spends every cycle re-proposing
+    tableaus it has already archived. Never empty: an order past the largest searchable
+    stage count falls back to that stage count.
+    """
+    lo = min_stages_for_order(order)
+    dom = tuple(s for s in _STAGES if s >= lo)
+    return dom or (_STAGES[-1],)
 _DYADIC_DENOMINATOR_MAX = 32768
 
 
@@ -33,20 +56,24 @@ def _all_elites(arch: ArchiveState):
 
 def emptiest_cell(arch: ArchiveState, order: int) -> tuple[int, int]:
     grid = arch.grids.get(order, {})
-    for s in _STAGES:
+    domain = stage_domain(order)
+    for s in domain:
         for b in _BUCKETS:
             if (s, b) not in grid:
                 return (s, b)
-    # Grid full: the cell whose elite has the highest heldout_error (first on ties).
+    # Grid full: the cell whose elite has the highest heldout_error (earliest on ties).
     worst_key: tuple[int, int] | None = None
     worst_val = -math.inf
-    for s in _STAGES:
+    for s in domain:
         for b in _BUCKETS:
-            v = grid[(s, b)].score.heldout_error
+            rec = grid.get((s, b))
+            if rec is None:
+                continue
+            v = rec.score.heldout_error
             if worst_key is None or v > worst_val:
                 worst_key = (s, b)
                 worst_val = v
-    return worst_key if worst_key is not None else (2, 0)
+    return worst_key if worst_key is not None else (domain[0], 0)
 
 
 def heldout_gap(arch: ArchiveState) -> float:

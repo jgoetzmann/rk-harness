@@ -937,7 +937,8 @@ def test_B41_low_stall_keeps_current_cell():
 def test_B41_stall_5_to_9_moves_to_emptiest_cell():
     act = next_action(_state(stall=7, phase=1, cell=(3, 4)), _empty_arch(), _dt(2026, 10, 1))
     assert act.kind == "SEARCH_CELL"
-    assert tuple(act.payload["cell"]) == (2, 0)
+    # phase 1 targets order 3, and an explicit method needs three stages to reach it
+    assert tuple(act.payload["cell"]) == (3, 0)
 
 
 def test_B41_stall_12_is_WIDEN():
@@ -995,18 +996,28 @@ def test_B41_no_gap_at_stall_10_is_WIDEN():
     assert act.kind == "WIDEN"
 
 
-def test_B42_emptiest_cell_on_empty_archive_is_2_0():
+def test_B42_emptiest_cell_starts_at_the_lowest_stage_count_that_can_reach_the_order():
+    """An explicit two-stage method cannot exceed order 2, so scanning (2, b) for order 4
+    returns a cell that can never be filled, on every call, forever."""
     arch = _empty_arch()
-    for order in (1, 2, 3, 4):
-        assert tuple(emptiest_cell(arch, order)) == (2, 0)
+    assert tuple(emptiest_cell(arch, 1)) == (2, 0)
+    assert tuple(emptiest_cell(arch, 2)) == (2, 0)
+    assert tuple(emptiest_cell(arch, 3)) == (3, 0)
+    assert tuple(emptiest_cell(arch, 4)) == (4, 0)
+
+
+def test_B42_emptiest_cell_never_returns_fewer_stages_than_the_order():
+    arch = _empty_arch()
+    for order in (2, 3, 4):
+        assert emptiest_cell(arch, order)[0] >= order
 
 
 def test_B42_emptiest_cell_skips_occupied_cells_lowest_stages_then_bucket():
     r = _record(_heun2(), _sv_for(_heun2()))
     arch = _arch_with({2: {(2, 0): r, (2, 1): r}})
     assert tuple(emptiest_cell(arch, 2)) == (2, 2)
-    # another order's grid is untouched
-    assert tuple(emptiest_cell(arch, 3)) == (2, 0)
+    # another order's grid is untouched, and starts at its own minimum stage count
+    assert tuple(emptiest_cell(arch, 3)) == (3, 0)
 
 
 def test_B42_emptiest_cell_moves_to_next_stage_count_when_a_row_is_full():
@@ -1543,7 +1554,8 @@ def test_B50_first_object_is_the_one_validated():
 def test_B51_fallback_directive_phase_2_cycle_7():
     d = fallback_directive(_empty_arch(), 2, 7)
     assert validate_directive(d) == d
-    assert d["stages"] == [2]
+    # order 4 needs at least four stages; asking for two was a cell that cannot exist
+    assert d["stages"] == [4]
     assert d["target_order"] == 4
     assert d["directive_id"] == "D-F00007"
     assert d["hypothesis_id"] is None

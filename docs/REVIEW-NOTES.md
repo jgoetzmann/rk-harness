@@ -117,3 +117,11 @@ rk_harness/validation.py using the pinned solver machinery read-only, at the sam
 archive progress + falsification present, six consecutive half-hourly checks) and executed
 by the watchdog via the STOP killfile; see docs/ROADMAP.md for the epoch model and the
 70/15/15 attention rotation.
+
+
+## Rulings move to DECISIONS.md (2026-09-07)
+This file stays the record of how `docs/REVIEW.md` was executed and of the rulings that
+depart from the handoff. Rulings made after 2026-09-07 go to `DECISIONS.md` in this
+directory, numbered from D13, one level-2 entry each with an epoch-impact line. The two
+ledgers are not forks of each other: this one is historical, that one is current. The plan
+the first batch came out of is `UNBLOCK-2026-09-07.md`.

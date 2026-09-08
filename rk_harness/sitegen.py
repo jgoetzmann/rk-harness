@@ -23,6 +23,7 @@ from pathlib import Path
 from rk_harness import literature as literature_mod
 from rk_harness import coeffrep
 from rk_harness import costmodel
+from rk_harness import encourager
 from rk_harness import ledger
 from rk_harness import saturation
 from rk_harness import tableau as tableau_mod
@@ -743,12 +744,24 @@ def _record_meta(rec: Record) -> str:
 def _stat_cards(arch: ArchiveState) -> str:
     elites = [rec for grid in arch.grids.values() for rec in grid.values()]
     verified = sum(1 for r in elites if r.tier == "heldout_verified")
-    cells = 40 * len(arch.grids)
+    # Numerator and denominator over one domain. An order can only use stage counts that can
+    # reach it, so the denominator is not the same for every order: a two-stage cell in the
+    # order-4 grid is not an empty cell, it is an impossible one. The grid can also hold a cell
+    # outside the searchable stage range (the seeded single-stage order-1 baseline); that is
+    # stated next to the fraction rather than counted into it.
+    domains = {o: encourager.stage_domain(o) for o in sorted(arch.grids)}
+    cells = sum(len(d) * 8 for d in domains.values())
+    occupied = sum(1 for o, g in arch.grids.items()
+                   for (s, _b) in g if s in domains.get(o, ()))
+    outside = len(elites) - occupied
+    coverage = "grid coverage, all orders"
+    if outside:
+        coverage += f"; {outside} seeded outside the searched stage range"
     cards = [
         ("records", _num(arch.n_records), "verified tableaus archived"),
         ("last cycle id", _num(arch.last_cycle_id), "cycle ids start at 0"),
-        ("elite cells", f"{len(elites)}/{cells}", "grid coverage, all orders"),
-        ("heldout_verified", str(verified), "elites in the top tier"),
+        ("elite cells", f"{occupied}/{cells}", coverage),
+        ("heldout_verified", str(verified), "top tier at insertion"),
         ("hypotheses", f"{len(arch.open_hypotheses)} open", f"{len(arch.refuted_hypotheses)} refuted"),
     ]
     return '<div class="cards">' + "".join(
@@ -1527,7 +1540,9 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "held-out error, with improvements in at least two problem families. search_only: it "
         "improved on search error but not on held-out error. unreplicated: everything else, "
         "including any record that landed in a previously empty cell, which has no incumbent "
-        "to compare against.",
+        "to compare against. The elite grid ranks on held-out error alone, so a cell can pass "
+        "from a heldout_verified record to a lower-error record labelled otherwise, and the "
+        "top-tier count can fall without anything having gone wrong.",
     )),
     ("verifier-hash", "verifier hash", (
         "A sha256 over ten pinned files in fixed order: the six scoring modules (coeffrep, "
@@ -2329,10 +2344,10 @@ def render_sidetrack(data: dict) -> str:
         '<p class="lead">The side tracks are off-archive measurements for the two method '
         "classes the run does not score. Adaptive embedded pairs and implicit SDIRK methods "
         "cannot enter the archive as things stand, because the verifier accepts only "
-        "explicit fixed-step tableaus; everything on this page is float64, produced outside "
-        "the scored path, and exists so the epoch-2 and epoch-3 designs are settled on "
-        "measurements rather than estimates. Nothing here ranks against the archive, and "
-        "nothing here is Q15.</p>"
+        "explicit fixed-step tableaus; everything on this page is produced outside the scored "
+        "path and exists so the epoch-2 and epoch-3 designs are settled on measurements "
+        "rather than estimates. Each job states its own arithmetic below, because they "
+        "differ. Nothing here ranks against the archive, and nothing here is Q15.</p>"
     ]
 
     codes = sorted({str(e.get("code_hash", "")) for e in ok if e.get("code_hash")})
@@ -2381,6 +2396,9 @@ def render_sidetrack(data: dict) -> str:
         closes = str(doc.get("closes", "")).strip()
         if closes:
             parts.append(f"<p>Closes: {_esc(closes)}</p>")
+        arith = str(doc.get("arithmetic", "")).strip()
+        if arith:
+            parts.append(f'<p class="note">Arithmetic: {_esc(arith)}</p>')
         note = str(doc.get("construction") or doc.get("question") or doc.get("note") or "").strip()
         if note:
             parts.append(f'<p class="note">{_esc(note)}</p>')
@@ -2406,7 +2424,7 @@ def render_sidetrack(data: dict) -> str:
     if failed:
         rows = "\n".join(
             f'<tr><th class="mono">{_esc(e.get("job"))}:{_esc(e.get("key"))}</th>'
-            f'<td>{_esc(str(e.get("error", ""))[:200])}</td></tr>'
+            f'<td>{_esc(literature_mod.soften(str(e.get("error", ""))[:200]))}</td></tr>'
             for e in sorted(failed, key=lambda e: (str(e.get("job")), str(e.get("key")))))
         parts.append("<h2>Points that did not complete</h2>")
         parts.append("<p>A failed point is recorded and retried on later firings. After three "
@@ -2421,11 +2439,16 @@ def render_sidetrack(data: dict) -> str:
         "<li>Not scored. No side-track measurement enters the archive, changes an elite, or "
         "affects a hypothesis verdict. The executor is outside the verifier hash by "
         "construction.</li>"
-        "<li>Not Q15. Every run here is float64, so quantization effects that dominate the "
-        "archive, the floor bias in particular, are absent.</li>"
-        "<li>Not a cost comparison with the archive. There is no shared cycle budget; where "
-        "cycles per step appear they are the design-document estimates for a method class the "
-        "cost model does not yet price against an assembly fixture.</li>"
+        "<li>Not Q15. Nothing on this page carries the quantization effects that dominate "
+        "the archive, the floor bias in particular, and nothing here runs under a cycle "
+        "budget. Each job states its own arithmetic above, because they differ: the solver "
+        "jobs run in float64, while the stability scan is exact over rationals with only "
+        "the measured order in float.</li>"
+        "<li>Not a cost comparison with the archive. There is no shared cycle budget. Where "
+        "cycles per step appear, the explicit anchors are priced by the same pinned cost "
+        "model the archive uses, and SDIRK2 is priced by the unpinned prototype estimate "
+        "with a finite-difference Jacobian. Neither figure includes the right-hand side or "
+        "Jacobian evaluation itself.</li>"
         "<li>Preliminary. These exist to choose the parameters that get frozen at an epoch "
         "boundary. The scored implementation is written fresh against the pinned interfaces "
         "when that boundary arrives.</li>"

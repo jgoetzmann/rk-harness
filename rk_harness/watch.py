@@ -30,9 +30,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from rk_harness import archive, ledger, verifier_hash
+from rk_harness import archive, encourager, ledger, verifier_hash
 from rk_harness import tableau as tableau_mod
-from rk_harness.paths import findings_dir, work_dir
+from rk_harness.paths import archive_dir, findings_dir, work_dir
 from rk_harness.timefmt import fmt_ct, to_ct
 from rk_harness.types import ArchiveState
 
@@ -85,21 +85,66 @@ def load_config() -> dict:
         return {}
 
 
-def load_events() -> list[dict]:
+# events.jsonl has no rotation and is already past 45 MB. This view refreshes every few
+# seconds and only ever reports recent history, so it reads the tail, exactly as
+# status.tail_events does and for the same reason. Reading the whole file here cost about a
+# gigabyte of resident memory after a few days of uptime.
+EVENTS_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def load_events(max_bytes: int = EVENTS_TAIL_BYTES) -> list[dict]:
     path = work_dir() / "events.jsonl"
     out: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    ev = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(ev, dict):
-                    out.append(ev)
+        size = path.stat().st_size
+        with open(path, "rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()                     # discard the partial line at the seam
+            raw = fh.read().decode("utf-8", errors="replace")
     except OSError:
-        pass
+        return out
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
     return out
+
+
+def _archive_signature() -> tuple:
+    """Cheap proof that the append-only archive has not changed: name, size and mtime per file."""
+    try:
+        out = []
+        for path in sorted(archive_dir().glob("*.jsonl")):
+            st = path.stat()
+            out.append((path.name, st.st_size, int(st.st_mtime)))
+        return tuple(out)
+    except OSError:
+        return ()
+
+
+def archive_view() -> tuple[ArchiveState, list]:
+    """(state, records), re-read only when the archive files actually change.
+
+    build_layout used to call replay() and read_all() on every refresh, which is two full
+    passes over a 230 MB append-only archive every few seconds: more archive I/O than the
+    run it is watching does in a whole cycle. The container appends once per cycle, so a
+    size-and-mtime signature is enough to know when a re-read is owed.
+    """
+    sig = _archive_signature()
+    hit = _cache.get("archive")
+    if hit is not None and hit[0] == sig:
+        return hit[1], hit[2]
+    arch = archive.replay()
+    records = archive.read_all()
+    _cache["archive"] = (sig, arch, records)
+    return arch, records
 
 
 def docker_info(name: str = "rk") -> dict:
@@ -252,8 +297,11 @@ def progress_panel(st, arch: ArchiveState, events: list[dict], records, now) -> 
         rows.append(("enumeration", f"phase {e.get('phase')}: {int(e.get('total', 0)) - remaining}/{e.get('total')} visited, {remaining} to go, ETA {eta}"))
     tiers = Counter(r.tier for r in records)
     rows.append(("tiers", "  ".join(f"{k}={v}" for k, v in sorted(tiers.items())) or "-"))
-    cov = {o: len(g) for o, g in arch.grids.items()}
-    rows.append(("grid coverage", "  ".join(f"order {o}: {n}/40 cells" for o, n in sorted(cov.items()))))
+    # Per-order denominator: an order can only use stage counts that can reach it, so a
+    # flat 40 counted cells that cannot exist. Same fix as directive.py and sitegen.py.
+    cov = {o: (len(g), len(encourager.stage_domain(o)) * 8) for o, g in arch.grids.items()}
+    rows.append(("grid coverage",
+                 "  ".join(f"order {o}: {n}/{tot} cells" for o, (n, tot) in sorted(cov.items()))))
     improved = [e for e in cycles if e.get("improved")]
     rows.append(("last improvement", fmt_ct(improved[-1].get("ts"), default="?") if improved else "none yet"))
     rows.append(("current cell", str(st.current_cell)))
@@ -492,8 +540,7 @@ def build_layout() -> Layout:
     events = load_events()
     dk = docker_info()
     try:
-        arch = archive.replay()
-        records = archive.read_all()
+        arch, records = archive_view()
     except Exception:  # noqa: BLE001
         arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
         records = []
