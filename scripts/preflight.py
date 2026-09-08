@@ -36,20 +36,33 @@ RK_FINDINGS = WORKSPACE / "rk-findings"
 # ----------------------------------------------------------------------------- report plumbing
 
 class Report:
+    """Rows of the review report.
+
+    Every row carries the origin of the evidence behind it, because the report is no longer
+    the record of one sitting: the suite rows can come out of a CI artifact built on another
+    machine at another time while the host rows are measured now. A report that blends the
+    two without saying so is a date on a page that is true of nothing on it.
+    """
+
+    # 'host' is measured by this process, now. 'suite' comes out of a junit artifact that
+    # may have been produced elsewhere, earlier; only those two rows can differ in date.
+    ORIGINS = ("host", "suite")
+
     def __init__(self) -> None:
-        self.items: list[tuple[str, str, str, str]] = []   # (section, id, status, detail)
+        # (section, id, status, detail, origin)
+        self.items: list[tuple[str, str, str, str, str]] = []
         self.section = "0"
 
-    def add(self, item_id: str, status: str, detail: str = "") -> None:
+    def add(self, item_id: str, status: str, detail: str = "", origin: str = "host") -> None:
         detail = " ".join(str(detail).split())
-        self.items.append((self.section, item_id, status, detail))
+        self.items.append((self.section, item_id, status, detail, origin))
         print(f"[{status:6}] {item_id:6} {detail}")
 
-    def check(self, item_id: str, cond: bool, detail: str = "") -> None:
-        self.add(item_id, "PASS" if cond else "FAIL", detail)
+    def check(self, item_id: str, cond: bool, detail: str = "", origin: str = "host") -> None:
+        self.add(item_id, "PASS" if cond else "FAIL", detail, origin)
 
     def section_status(self, sec: str) -> str:
-        st = [s for (se, _, s, _) in self.items if se == sec]
+        st = [s for (se, _, s, _, _) in self.items if se == sec]
         if not st:
             return "n/a"
         if "FAIL" in st:
@@ -113,10 +126,25 @@ def _import_closure(module: str) -> list[str]:
 
 # ----------------------------------------------------------------------------- test suite
 
-def run_suite(quick: bool, reuse: bool = False) -> dict[str, str]:
-    """Run pytest once, return {test_id_prefix: 'passed'|'failed'} keyed by the review IDs."""
+def run_suite(quick: bool, reuse: bool = False,
+              evidence_path: Path | None = None) -> tuple[dict[str, str], dict]:
+    """Run pytest once (or reuse CI's artifact); return (results, evidence).
+
+    results is {test_id_prefix: 'passed'|'failed'|'skipped'} keyed by the review IDs.
+    evidence is the sidecar scripts/merge_junit.py wrote next to the artifact, or {} when
+    the suite was run here and there is nothing to say beyond "this machine, just now".
+    """
     junit = HARNESS / ".fullsend" / "preflight-junit.xml"
     junit.parent.mkdir(exist_ok=True)
+    if reuse and not junit.exists():
+        # Falling through into ET.parse here used to raise FileNotFoundError after every
+        # other check had already run. Say what to fetch instead, and let the suite rows
+        # be SKIP rather than a crash.
+        print(f"--reuse-suite but {junit} is absent. Download the CI artifact for the "
+              f"commit under test:\n"
+              f"    gh run download <run-id> -n preflight-suite -D .fullsend/\n"
+              f"Suite-derived items will be SKIP until it is there.")
+        return {}, {}
     if reuse and junit.exists():
         print(f"reusing suite results from {junit}")
     else:
@@ -146,7 +174,18 @@ def run_suite(quick: bool, reuse: bool = False) -> dict[str, str]:
     if "F1" in results:
         for k in range(2, 17):
             results.setdefault(f"F{k}", results["F1"])
-    return results
+    evidence: dict = {}
+    ev_path = evidence_path if evidence_path is not None else HARNESS / ".fullsend" / "preflight-evidence.json"
+    if ev_path.exists():
+        try:
+            loaded = json.loads(ev_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                evidence = loaded
+                print(f"suite evidence: {ev_path} (commit {evidence.get('commit', '?')[:12]}, "
+                      f"merged {evidence.get('merged_at_utc', '?')})")
+        except (OSError, ValueError) as e:
+            print(f"suite evidence at {ev_path} unreadable: {e!r}")
+    return results, evidence
 
 
 def suite_check(item_id: str, results: dict[str, str], test_ids: list[str], note: str = "") -> None:
@@ -154,14 +193,14 @@ def suite_check(item_id: str, results: dict[str, str], test_ids: list[str], note
     failed = [t for t in test_ids if results.get(t) == "failed"]
     skipped = [t for t in test_ids if results.get(t) == "skipped"]
     if not results:
-        R.add(item_id, "SKIP", f"suite not run ({', '.join(test_ids)})")
+        R.add(item_id, "SKIP", f"suite not run ({', '.join(test_ids)})", origin="suite")
     elif failed:
-        R.add(item_id, "FAIL", f"failed: {', '.join(failed)} {note}")
+        R.add(item_id, "FAIL", f"failed: {', '.join(failed)} {note}", origin="suite")
     elif missing and len(missing) == len(test_ids):
-        R.add(item_id, "SKIP", f"not in this suite run: {', '.join(missing)} {note}")
+        R.add(item_id, "SKIP", f"not in this suite run: {', '.join(missing)} {note}", origin="suite")
     else:
         extra = f" (not run: {', '.join(missing + skipped)})" if (missing or skipped) else ""
-        R.add(item_id, "PASS", f"{', '.join(t for t in test_ids if results.get(t) == 'passed')} passed{extra} {note}")
+        R.add(item_id, "PASS", f"{', '.join(t for t in test_ids if results.get(t) == 'passed')} passed{extra} {note}", origin="suite")
 
 
 # ----------------------------------------------------------------------------- sections
@@ -768,34 +807,390 @@ def section_containers(docker_ok: bool):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ----------------------------------------------------------------------------- HOST section
+# Everything here is about *this* machine at *this* moment: the watchdog process, the stats
+# file, the Codex window, the side-track ledger, the running container's environment and the
+# workspace scripts. None of it survives a checkout, so CI cannot check any of it, and none
+# of it gates: a dead watchdog is a loud FAIL and exit 0, because preflight's exit code
+# answers "is the code fit to run", not "is the machine currently running it".
+
+CONFIG_JSON = WORKSPACE / "config.json"
+
+# config.json -> the RK_* the container is started with, one entry per `-e RK_...` line in
+# scripts/run.ps1. The table lives here because preflight is the only place that can compare
+# it against a live container; HOST5 also asserts it still covers run.ps1, so a mapping
+# nobody maintains cannot go on passing.
+RK_ENV_MAP: dict[str, tuple[str, str]] = {
+    "RK_LLM": ("run", "llm"),
+    "RK_SITE": ("run", "site"),
+    "RK_GIT_COMMIT": ("run", "git_commit"),
+    "RK_EVAL_BUDGET": ("run", "eval_budget"),
+    "RK_LLM_EVERY_CYCLES": ("run", "llm_every_cycles"),
+    "RK_CODEX_USAGE_CAP": ("run", "codex_usage_cap_percent"),
+    "RK_LIT_EVERY": ("run", "litreview_every_cycles"),
+    "RK_INTERPRET_EVERY": ("run", "interpret_every_cycles"),
+    "RK_SIDETRACK_EVERY": ("run", "sidetrack_every_cycles"),
+    "RK_SIDETRACK_MAX_SECONDS": ("run", "sidetrack_max_seconds"),
+    "RK_SIDETRACK_TRACKS": ("run", "sidetrack_tracks"),
+    "RK_ENUM_PER_CYCLE": ("run", "enum_per_cycle"),
+    "RK_SEARCH_POLICY": ("run", "search_policy"),
+    "RK_POLICY_BLOCK_CYCLES": ("run", "policy_block_cycles"),
+    "RK_MAX_MINUTES": ("run", "auto_stop_minutes"),
+    "RK_MAX_CYCLES": ("run", "auto_stop_cycles"),
+    "RK_LLM_MODEL": ("run", "llm_model"),
+    "RK_PHASE": ("run", "initial_phase"),
+}
+
+# The scored paths a side track must never write into: the same list the determinism job in
+# .github/workflows/ci.yml asserts about.
+SCORED_PATHS = ("archive", "quarantine", "hypotheses.jsonl", "RUNSTATE.json", "EPOCH_STATUS.json")
+
+_WATCHDOG_ARG_RE = re.compile(
+    r"-(?P<flag>[A-Za-z]+)\s+\$\(\[(?P<cast>[a-z]+)\]\(Cfg\s+'watchdog'\s+'(?P<key>[a-z_]+)'\s+(?P<default>[^)]*)\)\)")
+_RUN_ENV_RE = re.compile(r'"-e",\s*"(RK_[A-Z0-9_]+)=')
+
+
+def _utc_now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _powershell(command: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
+def _checkout_provenance() -> dict:
+    """The local commit and whether the tree still matches it.
+
+    The report is generated from a working tree, not from a commit, so naming the commit is
+    only half the answer; the other half is whether the tree still resembles it.
+    """
+    out = {"commit": "", "dirty": None, "committed_utc": "", "error": ""}
+    try:
+        p = subprocess.run(["git", "-C", str(HARNESS), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        if p.returncode != 0:
+            out["error"] = (p.stderr or "git rev-parse failed").strip()[:120]
+            return out
+        out["commit"] = p.stdout.strip()
+        p = subprocess.run(["git", "-C", str(HARNESS), "status", "--porcelain"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        out["dirty"] = bool(p.stdout.strip())
+        p = subprocess.run(["git", "-C", str(HARNESS), "log", "-1", "--date=iso-strict-local",
+                            "--format=%cd"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30, env={**os.environ, "TZ": "UTC"})
+        stamp = p.stdout.strip() if p.returncode == 0 else ""
+        out["committed_utc"] = stamp.replace("+00:00", "Z")
+    except Exception as e:                                             # noqa: BLE001
+        out["error"] = repr(e)[:120]
+    return out
+
+
+def watchdog_expected_args(start_ps1: str, cfg: dict) -> dict[str, str]:
+    """Expected -Flag values for scripts/watchdog.ps1, derived from start.ps1 and config.json.
+
+    Derived rather than retyped: start.ps1 is the file that builds the command line, so a new
+    watchdog parameter shows up here the moment it shows up there.
+    """
+    wd = (cfg or {}).get("watchdog", {})
+    want: dict[str, str] = {}
+    for m in _WATCHDOG_ARG_RE.finditer(start_ps1):
+        key = m.group("key")
+        default = m.group("default").strip().strip("'\"")
+        value = wd.get(key, default)
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        want[m.group("flag")] = str(value)
+    return want
+
+
+def run_ps1_env_names(run_ps1: str) -> set[str]:
+    """Every RK_* name scripts/run.ps1 passes to `docker run -e`."""
+    return set(_RUN_ENV_RE.findall(run_ps1))
+
+
+def _num_eq(a: str, b: str) -> bool:
+    """Compare two command-line values, tolerating 5 against 5.0."""
+    if a == b:
+        return True
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return False
+
+
+def _live_watchdog_commandline() -> tuple[str, str]:
+    """(command line, error). Matches scripts/watchdog.ps1 only, never watchdog-jobs.ps1."""
+    cmd = ("Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | "
+           "Where-Object { $_.CommandLine -like '*scripts?watchdog.ps1*' } | "
+           "Select-Object -ExpandProperty CommandLine")
+    try:
+        p = _powershell(cmd, timeout=60)
+    except Exception as e:                                             # noqa: BLE001
+        return "", repr(e)[:120]
+    if p.returncode != 0:
+        return "", (p.stderr or "Get-CimInstance failed").strip()[:160]
+    lines = [ln.strip() for ln in p.stdout.splitlines() if "watchdog.ps1" in ln]
+    if not lines:
+        return "", "no powershell process is running scripts/watchdog.ps1"
+    return lines[0], ""
+
+
+def section_HOST(results, docker_ok: bool):
+    """This machine, right now. Deliberately outside the gating set (0/A/B/C/K)."""
+    R.section = "HOST"
+    cfg = _load_config()
+    start_ps1_path = WORKSPACE / "start.ps1"
+    start_ps1 = start_ps1_path.read_text(encoding="utf-8") if start_ps1_path.exists() else ""
+
+    # HOST1 -- the watchdog is running, with the arguments config.json asks start.ps1 for.
+    if not start_ps1:
+        R.add("HOST1", "SKIP", f"{start_ps1_path} absent; the expected watchdog arguments are "
+                               "derived from it", origin="host")
+    else:
+        want = watchdog_expected_args(start_ps1, cfg)
+        line, err = _live_watchdog_commandline()
+        if err:
+            R.add("HOST1", "FAIL", f"watchdog not observed: {err}; start.ps1 and config.json "
+                                   f"declare {len(want)} arguments", origin="host")
+        else:
+            wrong = []
+            for flag, value in sorted(want.items()):
+                m = re.search(r"-" + flag + r"\s+(\"[^\"]*\"|\S+)", line)
+                got = m.group(1).strip('"') if m else None
+                if got is None:
+                    wrong.append(f"-{flag} absent (want {value})")
+                elif not _num_eq(got, str(value)):
+                    wrong.append(f"-{flag}={got} want {value}")
+            R.check("HOST1", not wrong,
+                    f"watchdog running with the {len(want)} arguments derived from start.ps1; "
+                    f"mismatches: {wrong or 'none'}", origin="host")
+
+    # HOST2 -- stats.txt is inside the deadline it prints for itself (status --age, D29).
+    try:
+        p = subprocess.run([PY, "-m", "rk_harness.status", "--age"], cwd=HARNESS, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=60)
+        said = (p.stdout or p.stderr).strip()
+        line = said.splitlines()[-1] if said else ""
+        if p.returncode == 0:
+            R.add("HOST2", "PASS", f"stats.txt is inside its declared deadline: {line}", origin="host")
+        elif p.returncode == 1:
+            R.add("HOST2", "FAIL", f"stats.txt is past its own deadline: {line}. Either nothing is "
+                                   "writing it (stats.ps1 -Loop -Background) or the writer is stuck",
+                  origin="host")
+        else:
+            R.add("HOST2", "FAIL", f"stats.txt unreadable (status --age exit {p.returncode}): {line}",
+                  origin="host")
+    except Exception as e:                                             # noqa: BLE001
+        R.add("HOST2", "FAIL", f"status --age did not run: {e!r}", origin="host")
+
+    # HOST3 -- the newest codex_usage snapshot has not outlived its own window (D18). Read
+    # through status.tail_events, which seeks to the end; events.jsonl is tens of megabytes
+    # and grows forever, so nothing here may read it whole.
+    try:
+        from rk_harness import status as _status
+        evs, err = _status.tail_events(RK_WORK / "events.jsonl", kinds=("codex_usage",))
+        usage = [e for e in evs if e.get("kind") == "codex_usage"]
+        if err:
+            R.add("HOST3", "SKIP", f"events.jsonl not readable: {err}", origin="host")
+        elif not usage:
+            R.add("HOST3", "SKIP", "no codex_usage event in the events tail", origin="host")
+        else:
+            last = usage[-1]
+            window = float(last.get("window_minutes") or last.get("window_min") or 0)
+            ts = str(last.get("ts") or last.get("time") or "")
+            age_min = None
+            try:
+                when = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=_dt.timezone.utc)
+                age_min = (_dt.datetime.now(_dt.timezone.utc) - when).total_seconds() / 60.0
+            except ValueError:
+                pass
+            if age_min is None or window <= 0:
+                R.add("HOST3", "SKIP", f"codex_usage at {ts or 'no timestamp'} declares "
+                                       f"window_minutes={window or 'none'}; nothing to compare against",
+                      origin="host")
+            else:
+                R.check("HOST3", age_min <= window,
+                        f"newest codex_usage is {age_min:.0f} min old against its own "
+                        f"window_minutes={window:.0f}; past that, the percentage it states "
+                        f"describes a window that has already rolled over", origin="host")
+    except Exception as e:                                             # noqa: BLE001
+        R.add("HOST3", "FAIL", f"codex_usage check did not run: {e!r}", origin="host")
+
+    # HOST4 -- the side-track ledger accounts for every catalogue point, and nothing side-track
+    # has been written into a scored path.
+    try:
+        from rk_harness import sidetrack as _sidetrack
+        st = _sidetrack.status()
+        planned = int(st["planned_total"])
+        accounted = int(st["done_total"]) + int(st["set_aside_total"]) + int(st["remaining_total"])
+        strays = [n for n in SCORED_PATHS if (RK_WORK / "sidetrack" / n).exists()]
+        R.check("HOST4", accounted == planned and not strays,
+                f"catalogue {planned} points = {st['done_total']} done + {st['set_aside_total']} set "
+                f"aside + {st['remaining_total']} remaining (accounted {accounted}); scored paths "
+                f"under rk-work/sidetrack: {strays or 'none'}", origin="host")
+    except Exception as e:                                             # noqa: BLE001
+        R.add("HOST4", "FAIL", f"side-track status did not run: {e!r}", origin="host")
+
+    # HOST5 -- the running container's RK_* matches config.json, and the mapping table still
+    # covers every `-e RK_...` line in scripts/run.ps1.
+    declared = run_ps1_env_names((HARNESS / "scripts" / "run.ps1").read_text(encoding="utf-8"))
+    uncovered = sorted(declared - set(RK_ENV_MAP))
+    if uncovered:
+        R.add("HOST5", "FAIL", f"scripts/run.ps1 passes {', '.join(uncovered)} and preflight's "
+                               "RK_ENV_MAP does not name it; the table has gone stale, and a stale "
+                               "table passes forever", origin="host")
+    elif not docker_ok:
+        R.add("HOST5", "SKIP", f"docker unavailable; RK_ENV_MAP covers all {len(declared)} `-e RK_` "
+                               "lines in run.ps1, container environment not compared", origin="host")
+    else:
+        try:
+            p = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Env}}", "rk"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+            if p.returncode != 0:
+                R.add("HOST5", "SKIP", f"no container named rk: {(p.stderr or '').strip()[:120]}",
+                      origin="host")
+            else:
+                live = {}
+                for entry in json.loads(p.stdout):
+                    if entry.startswith("RK_") and "=" in entry:
+                        k, v = entry.split("=", 1)
+                        live[k] = v
+                wrong = []
+                for name, (sec, key) in sorted(RK_ENV_MAP.items()):
+                    if name not in live:
+                        continue                  # run.ps1 passes RK_LLM_MODEL and RK_PHASE conditionally
+                    want = (cfg.get(sec, {}) or {}).get(key, None)
+                    got = live[name]
+                    if name in ("RK_SITE", "RK_GIT_COMMIT"):
+                        want = "on" if (want is None or bool(want)) else "off"
+                    elif name == "RK_LLM" and want in (None, "auto"):
+                        # run.ps1 resolves auto to codex or off from the presence of auth.json
+                        want = got if got in ("codex", "off") else "auto"
+                    elif want is None:
+                        continue
+                    if str(want) != got and not _num_eq(got, str(want)):
+                        wrong.append(f"{name}={got} but config.json {sec}.{key}={want}")
+                R.check("HOST5", not wrong,
+                        f"{len(live)} RK_* on the running container; RK_ENV_MAP covers all "
+                        f"{len(declared)} `-e RK_` lines in run.ps1; mismatches: {wrong or 'none'}",
+                        origin="host")
+        except Exception as e:                                         # noqa: BLE001
+            R.add("HOST5", "FAIL", f"docker inspect rk did not run: {e!r}", origin="host")
+
+    # HOST6 -- the restorable workspace copies match the workspace root. CI cannot do this:
+    # the root scripts live in the parent repository and CI sees one checkout.
+    try:
+        if str(HARNESS / "scripts") not in sys.path:
+            sys.path.insert(0, str(HARNESS / "scripts"))
+        import hygiene as _hygiene
+        ok, detail = _hygiene.check_workspace_copies(WORKSPACE, HARNESS)
+        status = "SKIP" if (ok and detail.startswith(_hygiene.SKIP)) else ("PASS" if ok else "FAIL")
+        R.add("HOST6", status, detail, origin="host")
+    except Exception as e:                                             # noqa: BLE001
+        R.add("HOST6", "FAIL", f"workspace drift check did not run: {e!r}", origin="host")
+
+
 # ----------------------------------------------------------------------------- report
 
-def write_report(path: Path, suite_ran: bool, docker_ok: bool) -> None:
-    today = _dt.date.today().isoformat()
-    secs = ["0", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"]
+def write_report(path: Path, suite_ran: bool, docker_ok: bool, evidence: dict | None = None,
+                 checkout: dict | None = None) -> None:
+    """Write docs/REVIEW-REPORT.md, dated by evidence rather than by the calendar.
+
+    The old header carried one date, `date.today()`, over rows that were not all measured on
+    that day: with `--reuse-suite` the suite rows come out of a CI artifact built on another
+    machine, possibly days earlier. One date over mixed evidence is a claim about the whole
+    page that is true of only part of it. So every row now names its origin, the provenance
+    table gives each source its own UTC stamp, and the sign-off carries the report date and
+    the suite date separately.
+    """
+    evidence = evidence or {}
+    checkout = checkout if checkout is not None else _checkout_provenance()
+    generated_utc = _utc_now()
+    today = generated_utc[:10]
+    suite_utc = str(evidence.get("merged_at_utc") or "")
+    suite_day = suite_utc[:10] if suite_utc else ""
+    origins = {o for (_, _, _, _, o) in R.items}
+
+    secs = ["0", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "HOST"]
     lines = ["# REVIEW REPORT — pre-flight checklist (docs/REVIEW.md)", "",
-             f"Generated {today} by `scripts/preflight.py` (suite run: {suite_ran}; docker: {docker_ok}).",
-             "Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (prerequisite absent) / INFO (advisory, does not gate).", "",
-             "| Section | Status |", "| --- | --- |"]
+             f"Generated {generated_utc} by `scripts/preflight.py` (suite run: {suite_ran}; docker: {docker_ok}).",
+             "Statuses: PASS / FAIL / MANUAL (needs the host, hardware or a human) / SKIP (prerequisite absent) / INFO (advisory, does not gate).",
+             "Sections 0, A, B, C and K gate: a FAIL there exits 1. HOST does not gate — it describes the machine this ran on, not the code.",
+             "", "### Provenance", "",
+             "Every item row names the evidence it rests on. This table dates each source; they are not required to agree.", "",
+             "| Source | When (UTC) | What it is |", "| --- | --- | --- |",
+             f"| report | {generated_utc} | this run of `scripts/preflight.py` |"]
+    if "host" in origins:
+        lines.append(f"| host | {generated_utc} | checks measured on this machine, in this process |")
+    if suite_utc or "suite" in origins:
+        if suite_utc:
+            what = (f"CI suite artifact, commit `{str(evidence.get('commit', ''))[:12]}`, "
+                    f"run {evidence.get('run_url') or evidence.get('run_id') or 'unknown'}, "
+                    f"shards {', '.join(evidence.get('shards') or []) or 'unrecorded'}, "
+                    f"totals {evidence.get('totals', {})}")
+        else:
+            what = ("pytest run by this process, or an artifact with no `preflight-evidence.json` "
+                    "beside it; provenance unrecorded")
+        lines.append(f"| suite | {suite_utc or 'unrecorded'} | {what} |")
+    ck_when = checkout.get("committed_utc") or "unknown"
+    ck_what = (f"local checkout `{str(checkout.get('commit', ''))[:12] or 'unknown'}`, "
+               f"{'dirty (working tree differs from the commit)' if checkout.get('dirty') else 'clean'}")
+    if checkout.get("error"):
+        ck_what += f"; git said: {checkout['error']}"
+    if suite_utc and checkout.get("commit") and evidence.get("commit"):
+        same = checkout["commit"] == evidence["commit"]
+        ck_what += ("; same commit as the suite artifact" if same
+                    else "; NOT the commit the suite artifact was built from")
+    lines.append(f"| checkout | {ck_when} | {ck_what} |")
+
+    lines += ["", "| Section | Status |", "| --- | --- |"]
     for s in secs:
         lines.append(f"| {s} | {R.section_status(s)} |")
-    lines += ["", "| Item | Status | Measured / evidence |", "| --- | --- | --- |"]
-    for sec, item_id, status, detail in R.items:
-        lines.append(f"| {item_id} | {status} | {detail.replace('|', '\\|')} |")
+    lines += ["", "| Item | Status | Evidence | Measured / evidence |", "| --- | --- | --- | --- |"]
+    for sec, item_id, status, detail, origin in R.items:
+        lines.append(f"| {item_id} | {status} | {origin} | {detail.replace('|', '\\|')} |")
     kdec = "proceed"
-    for _, item_id, status, detail in R.items:
+    for _, item_id, status, detail, _origin in R.items:
         if item_id == "K3" and "verdict = kill" in detail:
             kdec = "kill"
     gating = all(R.section_status(s).startswith("green") for s in ("A", "B", "C", "K"))
+
+    def sec_day(sec: str) -> str:
+        """The newest evidence date contributing to a section, not the day it was printed."""
+        srcs = {o for (se, _, _, _, o) in R.items if se == sec}
+        if not srcs:
+            return "n/a"
+        days = {(suite_day or "unrecorded") if o == "suite" else today for o in srcs}
+        dated = sorted(d for d in days if d != "unrecorded")
+        if not dated:
+            return "unrecorded (suite artifact carried no provenance)"
+        return max(dated) + (" (suite evidence undated)" if "unrecorded" in days else "")
+
     lines += ["", "## Sign-off", "", "```",
-              f"Date started:         {today}",
-              f"Section 0 green:      {today if R.section_status('0') == 'green' else 'NO'}",
-              f"A green:              {today if R.section_status('A').startswith('green') else 'NO'}  ({R.section_status('A')})",
-              f"B green:              {today if R.section_status('B') == 'green' else 'NO'}",
-              f"C green:              {today if R.section_status('C') == 'green' else 'NO'}",
-              f"D green:              {today if R.section_status('D').startswith('green') else 'NO'}  ({R.section_status('D')})",
-              f"K decision:           {kdec}",
-              f"First unattended run: {'not yet — clear the MANUAL items first' if not gating else 'gating sections green; MANUAL items remain'}",
+              f"Report generated (UTC): {generated_utc}",
+              f"Suite evidence (UTC):   {suite_utc or 'none — no preflight-evidence.json beside the junit artifact'}",
+              f"  suite commit:         {evidence.get('commit') or 'unrecorded'}",
+              f"  suite run:            {evidence.get('run_url') or evidence.get('run_id') or 'unrecorded'}",
+              f"Checkout:               {checkout.get('commit') or 'unknown'} "
+              f"({'dirty' if checkout.get('dirty') else 'clean'})",
+              f"Section 0 green:        {sec_day('0') if R.section_status('0') == 'green' else 'NO'}",
+              f"A green:                {sec_day('A') if R.section_status('A').startswith('green') else 'NO'}  ({R.section_status('A')})",
+              f"B green:                {sec_day('B') if R.section_status('B') == 'green' else 'NO'}",
+              f"C green:                {sec_day('C') if R.section_status('C') == 'green' else 'NO'}",
+              f"D green:                {sec_day('D') if R.section_status('D').startswith('green') else 'NO'}  ({R.section_status('D')})",
+              f"HOST (non-gating):      {R.section_status('HOST')}",
+              f"K decision:             {kdec}",
+              f"First unattended run:   {'not yet — clear the MANUAL items first' if not gating else 'gating sections green; MANUAL items remain'}",
               "```", ""]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nreport written to {path}")
@@ -807,6 +1202,8 @@ def main(argv=None) -> int:
     ap.add_argument("--quick", action="store_true", help="run only the fast tests")
     ap.add_argument("--docker", action="store_true", help="run the container checks (needs the image built)")
     ap.add_argument("--reuse-suite", action="store_true", help="reuse .fullsend/preflight-junit.xml from the last run")
+    ap.add_argument("--suite-evidence", metavar="PATH", default=str(HARNESS / ".fullsend" / "preflight-evidence.json"),
+                    help="provenance sidecar written beside the junit artifact by scripts/merge_junit.py")
     args = ap.parse_args(argv)
     os.environ.setdefault("RK_WORK_DIR", str(RK_WORK))
     os.environ.setdefault("RK_FINDINGS_DIR", str(RK_FINDINGS))
@@ -818,10 +1215,15 @@ def main(argv=None) -> int:
         docker_ok = p.returncode == 0
         if not docker_ok:
             print("docker image rk-harness:latest not found; container checks skipped")
-    results = {} if args.no_suite else run_suite(args.quick, args.reuse_suite)
+    if args.no_suite:
+        results, evidence = {}, {}
+    else:
+        results, evidence = run_suite(args.quick, args.reuse_suite, Path(args.suite_evidence))
+    checkout = _checkout_provenance()
     for fn, extra in ((section_0, ()), (section_A, (docker_ok,)), (section_containers, None), (section_B, ()), (section_C, ()),
                       (section_D, ()), (section_E, ()), (section_F, (docker_ok,)), (section_G, (docker_ok,)),
-                      (section_H, ()), (section_I, ()), (section_J, ()), (section_K, ())):
+                      (section_H, ()), (section_I, ()), (section_J, ()), (section_K, ()),
+                      (section_HOST, (docker_ok,))):
         print(f"\n== section {fn.__name__.split('_')[-1]} ==")
         try:
             if extra is None:
@@ -831,8 +1233,10 @@ def main(argv=None) -> int:
         except Exception as e:  # noqa: BLE001
             R.add(fn.__name__, "FAIL", f"section crashed: {e!r}")
         os.environ["RK_WORK_DIR"] = str(RK_WORK)
-    write_report(HARNESS / "docs" / "REVIEW-REPORT.md", not args.no_suite, docker_ok)
-    gating_fail = any(status == "FAIL" and sec in ("0", "A", "B", "C", "K") for sec, _, status, _ in R.items)
+    write_report(HARNESS / "docs" / "REVIEW-REPORT.md", not args.no_suite, docker_ok, evidence, checkout)
+    # HOST is deliberately absent from the gating set: it reports on the machine, not the code.
+    gating_fail = any(status == "FAIL" and sec in ("0", "A", "B", "C", "K")
+                      for sec, _, status, _, _ in R.items)
     if gating_fail:
         print("\nGATING FAILURE in section 0/A/B/C/K — do not start the run")
     return 1 if gating_fail else 0

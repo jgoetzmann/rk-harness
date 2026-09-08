@@ -60,6 +60,13 @@ jobs:
             "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or \
              G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or \
              G20_ or K1_ or K2_" tests
+      # Which tests that expression actually selects, against tests/golden_gate.txt. It lives
+      # in this job rather than in `hygiene` because collection needs the package importable
+      # and this job already installed the dependencies. A node id that left the gate is
+      # either a rename or a test that stopped running before the container starts; either
+      # way the diff wants reading, and widening the gate stays a separate decision.
+      - name: the golden gate collects tests/golden_gate.txt
+        run: python scripts/hygiene.py --gate-coverage
 
   # ---------------------------------------------------------------- the full suite, sharded
   # Sharded by test file so wall-clock is one shard, not the whole suite. The groups are
@@ -112,10 +119,120 @@ jobs:
       # available in a job-level env block. test_t10 skips a case when it is unset at
       # import time, and conftest still redirects every individual test to its own
       # tmp_path, so this only un-skips it.
-      - run: python -m pytest -q --durations=10 ${{ matrix.files }}
+      - run: |
+          python -m pytest -q --durations=10 \
+            --junitxml="${{ runner.temp }}/junit-${{ matrix.name }}.xml" ${{ matrix.files }}
         env:
           RK_WORK_DIR: ${{ runner.temp }}/work
           RK_FINDINGS_DIR: ${{ runner.temp }}/findings
+      # if: always() so a failing shard still uploads its junit. A report that reads "suite
+      # not run" because the evidence was thrown away on failure is worse than a red row.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ matrix.name }}
+          path: ${{ runner.temp }}/junit-*.xml
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------- the suite as evidence
+  # The host does not have half an hour of spare CPU to re-run the suite; it has a laptop
+  # with a container on it. So the suite runs here and the host reuses the result:
+  # `gh run download <run-id> -n preflight-suite -D .fullsend/` then
+  # `scripts/preflight.py --reuse-suite`. That only works if the artifact says where it came
+  # from, which is what preflight-evidence.json is for. Without it the report would carry
+  # one date over evidence measured in two places on two days.
+  suite-evidence:
+    needs: [suite]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: junit-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/junit
+      # --expect names every shard: a missing one fails here by name rather than merging
+      # quietly into a smaller, greener-looking suite.
+      - name: merge the shard results and record where they came from
+        run: |
+          python scripts/merge_junit.py \
+            --dir "$RUNNER_TEMP/junit" \
+            --expect "fixedpoint-coeff-cost,order-eval-verify,archive-search-directive,ledger-runner-site-prototypes,validation-benchmark" \
+            --out-xml "$RUNNER_TEMP/out/preflight-junit.xml" \
+            --out-json "$RUNNER_TEMP/out/preflight-evidence.json"
+          cat "$RUNNER_TEMP/out/preflight-evidence.json"
+        env:
+          RK_CI_COMMIT: ${{ github.sha }}
+          RK_CI_REF: ${{ github.ref }}
+          RK_CI_RUN_ID: ${{ github.run_id }}
+          RK_CI_RUN_NUMBER: ${{ github.run_number }}
+          RK_CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RK_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RK_CI_WORKFLOW: ${{ github.workflow }}
+          RK_CI_RUNNER_OS: ${{ runner.os }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preflight-suite
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------- checkout hygiene
+  # No `needs`. This is a checkout, a Python, and no pip install, so it finishes in seconds
+  # and there is no reason to make it wait behind the gate: when it is the thing that broke,
+  # you want to know before the gate has finished.
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      # Standard library only, deliberately: no dependency resolution stands between a push
+      # and finding out that entrypoint.sh came back as CRLF.
+      - name: rules this repository states about itself
+        run: python scripts/hygiene.py --ascii --lf --manifest --gate-expression
+      # pwsh here is PowerShell 7, not the 5.1 the host runs, so this catches syntax errors
+      # and not every 5.1-specific parse failure. That is why the ASCII scan above is a
+      # separate check and stays one: a smart quote parses cleanly in 7 and fails in 5.1.
+      # ParseFile parses without executing; nothing in these files runs on the runner.
+      - name: every .ps1 parses (PowerShell 7, parse only, never executed)
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Path . -Filter *.ps1 -Recurse -File |
+            Where-Object { $_.FullName -notmatch '[\\/](\.git|\.venv|node_modules)[\\/]' } |
+            ForEach-Object {
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+              if ($errors -and $errors.Count -gt 0) {
+                $bad++
+                Write-Host "PARSE ERROR $($_.FullName)"
+                $errors | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" }
+              } else {
+                Write-Host "ok $($_.FullName)"
+              }
+            }
+          if ($bad -gt 0) { exit 1 }
+      # A raw fetch rather than actions/checkout: read-only, cross-repo, no token, and the
+      # rule that CI lives in the repository it checks stays intact. rk-overview publishes a
+      # tier table derived from this repo's collection, so a new tests/test_tN_*.py with no
+      # _SUITE_DESC entry breaks that site's build; this turns it into a named log line here.
+      - name: every test tier is described in rk-overview
+        run: |
+          url=https://raw.githubusercontent.com/jgoetzmann/rk-overview/main/tools/generate.py
+          if ! curl -fsSL "$url" -o "$RUNNER_TEMP/generate.py"; then
+            echo "FETCH FAILED: could not read $url"
+            echo "This is not a tier-coverage failure. Either rk-overview is unreachable or"
+            echo "its main branch does not have tools/generate.py at that path."
+            exit 1
+          fi
+          python scripts/hygiene.py --suite-desc="$RUNNER_TEMP/generate.py"
 
   # ---------------------------------------------------------------- reproducibility
   # The side-track design rests on artifacts being pure functions of (code, params):
@@ -162,8 +279,13 @@ jobs:
           # the ledger carries timestamps and durations by design; the artifacts must not
           diff -r -x ledger.jsonl "$RUNNER_TEMP/c/sidetrack" "$RUNNER_TEMP/d/sidetrack"
           n=$(find "$RUNNER_TEMP/c/sidetrack" -name '*.json' | wc -l)
-          echo "$n artifacts identical across runs"
-          test "$n" -eq 40
+          # Derived from the catalogue, not typed here. This was a literal 40 and went stale
+          # the moment the catalogue grew, which is the failure mode CLAUDE.md names for
+          # hand-kept counts. If the budget above stops covering the catalogue, this row goes
+          # red with a number to raise rather than passing on a count nobody maintains.
+          want=$(python -c "from rk_harness import sidetrack as s; print(sum(len(j.points()) for j in s.jobs_for(s.TRACKS)))")
+          echo "$n artifacts identical across runs; the catalogue declares $want"
+          test "$n" -eq "$want"
       - name: nothing scored was written
         run: |
           for run in c d; do

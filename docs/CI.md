@@ -18,18 +18,24 @@ minutes are free and unmetered; the only cost is the workflow file.
 
 ## What runs
 
-Five jobs. `gate` runs first and everything else waits on it, because a failure there is the one
-that would stop the container from starting at all.
+Seven jobs. `gate` runs first and most of the others wait on it, because a failure there is the
+one that would stop the container from starting at all. `hygiene` and `pins` do not wait: neither
+installs anything, both finish in seconds, and when one of them is the thing that broke you want
+to know before the gate has finished.
 
 | Job | What it proves | Rough time |
 | --- | --- | --- |
 | `gate` | The verifier hash matches its pin (K3), then the golden and canary tests G1-G20, K1-K2. This is `entrypoint.sh`'s check, run in the same order. | 32 s |
 | `suite` | The full suite, sharded five ways by test file. `--durations=10` in every shard so the log carries its own balance data. | 25-87 s per shard, in parallel |
-| `determinism` | Both prototype curves and all 40 side-track artifacts reproduce byte for byte across two independent runs, and no scored file is created. Invariants I5 and D5 in `SIDETRACK-AUTOMATION.md`. | 130 s |
+| `determinism` | Both prototype curves and every side-track artifact the catalogue declares reproduce byte for byte across two independent runs, and no scored file is created. The expected count is read from the catalogue in the job rather than written here. Invariants I5 and D5 in `SIDETRACK-AUTOMATION.md`. | 130 s |
 | `image` | The Dockerfile still builds, the entrypoint gate passes **inside the image on Python 3.12**, and the harness mount is read-only (K4). | 156 s cold, less once cached |
 | `pins` | The Dockerfile and `pyproject.toml` pin the same versions of the same nine packages. | 4 s |
+| `hygiene` | The rules this repository states about itself: every `.ps1` is pure ASCII, `entrypoint.sh` is LF with the right shebang, `VERIFIER_FILES.txt` matches the pinned tuple, the golden-gate `-k` expression is identical in `entrypoint.sh` and both copies in this file, every `.ps1` parses, and every test tier is described in rk-overview. Checkout only, no `pip install`. | |
+| `suite-evidence` | Merges the five shards' junit XML into one `preflight-junit.xml` and writes `preflight-evidence.json` beside it, so the host can reuse the suite instead of re-running it. Uploaded as the `preflight-suite` artifact. | |
 
-Two of those deserve their reasons stated.
+Job times are measured, not estimated; the two new rows stay blank until a run fills them in.
+
+Three of those deserve their reasons stated.
 
 **`image` is not redundant with `suite`.** The suite runs on `setup-python` 3.12 because it is
 fast; the image job runs the real container. A developer's host can be newer than the container
@@ -41,6 +47,21 @@ which nothing else covers because the harness is mounted rather than copied (P1)
 `pyproject.toml` declares them. If they drift, the container runs one set while every local test
 and every CI run uses another, and results stop being comparable across the two. They agree today;
 this keeps them agreeing.
+
+**`hygiene` is a byte scan and a parse, and they are not the same check.** `pwsh` on a runner is
+PowerShell 7. It catches syntax errors, and it accepts a smart quote and an em dash that Windows
+PowerShell 5.1 on the host will not parse at all. So the ASCII scan is a separate step and stays
+one: the parse step would go green on exactly the file that stops `start.ps1` from running.
+
+The gate-coverage check sits in `gate` rather than in `hygiene`, because collection needs the
+package importable and `gate` has already installed the dependencies. It compares what the `-k`
+expression collects against `tests/golden_gate.txt`. Recording the gate is not an argument for
+widening it: every test the gate selects is time the container spends before the runner starts,
+and G21-G27 and K7-K16 are outside it deliberately. A node id that disappears from that file is
+either a rename or a test that stopped running before the container starts, so read the diff
+rather than regenerating reflexively. One command updates it when the change is intended:
+
+    python scripts/hygiene.py --gate-coverage --write
 
 ## What CI cannot check, and what it must not touch
 
@@ -58,6 +79,20 @@ This is a design decision, not an omission.
 CI also never writes to any of them: it has no credentials, and the only push-capable token in
 this system stays on the host (P5).
 
+**The workspace scripts are outside this checkout.** `start.ps1`, `stop.ps1`, `watcher.ps1`,
+`stats.ps1` and `configure.py` live in the parent workspace repository. `scripts/workspace/` holds
+a restorable copy of each so the workspace can be rebuilt from a clone, and those copies are only
+worth anything while they are byte-identical to the ones that run. CI sees one checkout and cannot
+compare them, so that check is a HOST row in `scripts/preflight.py` (HOST6), which is the one place
+both trees exist. `python scripts/hygiene.py --workspace-copies=<workspace root>` runs it alone.
+
+**The HOST section is preflight's, not CI's.** HOST1 to HOST6 cover the running watchdog and its
+arguments, the freshness of `stats.txt`, the Codex usage window, the side-track ledger's
+accounting, the running container's `RK_*` against `config.json`, and the workspace copies above.
+None of it survives a checkout. It is also deliberately outside the gating set: a dead watchdog is
+a loud FAIL and exit 0, because preflight's exit code answers whether the code is fit to run, not
+whether the machine is currently running it.
+
 ## One cross-repo coupling to know about
 
 `rk-overview` derives its published test count and its tier table by running
@@ -69,6 +104,16 @@ The consequence for work in *this* repo: **adding or removing a `tests/test_tN_*
 rk-overview build** until `_SUITE_DESC` in `rk-overview/tools/generate.py` has a one-line
 description for it. That is deliberate. It converts a silent stale number into a build failure with
 an instruction, and it costs one line.
+
+That coupling is now checked here as well. The `hygiene` job fetches
+`tools/generate.py` from rk-overview's pushed `main` over `raw.githubusercontent.com` and asserts
+that every `tests/test_tN_*.py` tier in this repo has a `_SUITE_DESC` entry. A raw fetch rather
+than a second `actions/checkout`, so no token is involved and CI still lives only in the repository
+it checks. Three failures are possible and the messages distinguish them: a tier with no
+description, a fetch that did not return `generate.py` at all, and a `_SUITE_DESC` entry that
+exists locally but has not been pushed. The last one is the one that surprises people, and it is
+why the message says so. The suite's own copy of this check (C36) reads the local file instead, so
+running the tests never needs a network.
 
 It does not affect this repo, this workflow, or the container. Nothing here reads rk-overview, and
 the `determinism` job deliberately points only at the prototype curves and the side-track
@@ -120,6 +165,29 @@ of minutes:
 
 Run the whole suite locally only when there is a reason to, and expect the watchdog to pause the
 container while it runs. That pause is the guard working; it is also the argument for this file.
+
+The checkout-hygiene checks need nothing installed and take about a second:
+
+    python scripts/hygiene.py --all
+
+### Reusing CI's suite instead of re-running it
+
+`scripts/preflight.py` normally runs the suite itself, which is the half hour this file exists to
+avoid. When a CI run for the commit under test has finished, take its result instead:
+
+    gh run download <run-id> -n preflight-suite -D .fullsend/
+    .venv/Scripts/python.exe scripts/preflight.py --reuse-suite --docker
+
+The artifact holds two files. `preflight-junit.xml` is the merged suite result, and preflight reads
+it the same way it reads a local run. `preflight-evidence.json` is the provenance: the commit, the
+ref, the run URL, the shards that were merged, the totals, and `merged_at_utc`. The report uses it
+to date the suite rows separately from the host rows, so a report generated today from a suite that
+ran three days ago says so on its face. Every item row in `docs/REVIEW-REPORT.md` names its origin
+in an Evidence column, and the sign-off carries the report date, the suite date, and the local
+checkout's commit with whether the working tree is clean.
+
+Without the sidecar the suite rows still work and the provenance table says the provenance is
+unrecorded, which is the honest reading of a junit file that arrived from nowhere in particular.
 
 ## What is deliberately not here
 

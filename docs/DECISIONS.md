@@ -17,8 +17,8 @@ hand-typed in three places.
 
 Rulings D13 to D25 were made 2026-09-07/08 alongside `UNBLOCK-2026-09-07.md`, which carries the
 measurements they rest on. D26 and D29 onward came out of implementing `docs/proposals/`.
-**D27 and D28 are deliberately unused**, reserved when the proposal batches were sequenced and
-then not needed; a reader looking for them is not missing anything.
+The numbering is dense: D26 through D31 all came from that work, and the file is kept in numeric
+order even though entries were written in batch order.
 
 ---
 
@@ -708,6 +708,124 @@ hash is byte-identical before and after
 
 ---
 
+## D27 - Every row of the review report names the evidence it rests on, and the two dates are allowed to differ (2026-09-08)
+
+**Decision.** `Report.items` carries an origin per row, `host` or `suite`, and
+`docs/REVIEW-REPORT.md` gains three things that follow from it: an Evidence column on the item
+table, a Provenance table that gives each source its own UTC timestamp, and a sign-off that prints
+`Report generated (UTC)` and `Suite evidence (UTC)` as separate lines with the suite commit, the run
+URL and the local checkout's sha and clean/dirty state beside them. Per-section dates come from the
+newest evidence that contributed to the section, not from the calendar. `date.today()` is gone from
+the report entirely.
+
+**Why.** The report used to print one date, taken from the clock at the moment it was written, over
+every row on the page. That was true while preflight ran the suite itself. It stopped being true
+the moment `--reuse-suite` existed, because the suite rows can now come out of a CI artifact built
+on another machine, on another commit, days earlier, while the host rows are measured in the same
+second the file is written. One date over mixed evidence is a claim about the whole page that is
+true of only part of it, and the part it is false about is the part a reader is most likely to
+trust. So the origin column and the provenance table land before the first HOST row, not after.
+
+`scripts/merge_junit.py` is what makes the suite half answerable. It merges the five shards into one
+`<testsuites>` document, which preflight's existing `root.iter('testcase')` walk reads without a
+parser change, and writes `preflight-evidence.json` beside it carrying the commit, the ref, the run
+URL, the shards actually merged, the totals and `merged_at_utc`. The field is named for what it is:
+the moment of the merge step, not the moment the suite started. A shard that did not upload fails
+the merge by name, because a partial merge parses cleanly, counts cleanly, and reports a green suite
+for tests that never ran.
+
+**Rejected.** Dating the whole report by the suite artifact, which would make the host rows lie
+instead of the suite rows. Rejected: refusing to reuse an artifact from a different commit, because
+the useful case is exactly a report generated from a working tree that has moved on, and the honest
+answer is to say so rather than to forbid it; the provenance table prints `NOT the commit the suite
+artifact was built from` and lets the reader decide. Rejected: making the HOST rows gate. Preflight's
+exit code answers whether the code is fit to run, not whether this machine happens to be running it,
+and a dead watchdog is a loud FAIL and exit 0.
+
+**Evidence.** `scripts/preflight.py`: `Report.add(..., origin=)`, `run_suite` returning
+`(results, evidence)`, `--suite-evidence`, `_checkout_provenance`, `section_HOST` with HOST1 to
+HOST6, and the rewritten `write_report`. `scripts/merge_junit.py`. `.github/workflows/ci.yml`: the
+`suite` job's `--junitxml` and artifact upload, and the `suite-evidence` job. Tests C37, C37b, C37c,
+C38 and C38b in `tests/test_t5_hygiene.py`.
+
+**Consequence.** `Report.items` widened from four fields to five and is unpacked in five places; all
+five moved together. The host procedure is now `gh run download <run-id> -n preflight-suite -D
+.fullsend/` followed by `scripts/preflight.py --reuse-suite --docker`, which is the docker and HOST
+checks only rather than half an hour of contended CPU. HOST5 keeps its own copy of the
+config-to-`RK_*` mapping honest by asserting the table names every `-e RK_...` line in
+`scripts/run.ps1`; without that assertion the check would pass forever on a mapping nobody
+maintains. HOST1 derives the expected watchdog arguments by reading them out of `start.ps1` rather
+than retyping them, for the same reason.
+
+**Still open.** `docs/REVIEW-REPORT.md` has not been regenerated. Doing so changes the PASS/FAIL/
+MANUAL counts that `rk-overview` publishes as prose, and those counts trace to none of the four
+sources rule 10 allows. The report and the routing of its counts through `key_findings.json` have to
+land together or the public page states a number that is both stale and untraceable.
+
+**Epoch impact.** None. `scripts/`, `tests/`, `.github/` and `docs/`; no verifier-pinned file, no
+`VERIFIER_HASH`, no `Dockerfile`, no `entrypoint.sh`, no score.
+
+---
+
+---
+
+## D28 - The golden gate and the restorable workspace copies are recorded as they are, and recording is kept apart from widening (2026-09-08)
+
+**Decision.** `scripts/hygiene.py` machine-checks the rules this repository states about itself, and
+two of its checks are tripwires. `tests/golden_gate.txt` pins the 55 node ids the container's `-k`
+expression collects today, and `check_workspace_copies` byte-compares
+`scripts/workspace/{start,stop,watcher,stats}.ps1` and `configure.py` against the workspace root.
+Both go red the moment anything moves. `VERIFIER_FILES.txt` joins them as a plain manifest of the
+ten pinned paths: a second copy whose only job is to make changing the pinned set loud.
+
+**Why these are tripwires and not targets.** The gate currently selects G1 through G20 and K1, K2.
+G21 to G27 and K7 to K16 exist in the suite and are outside the gate deliberately, because every
+test the gate selects is time the container spends before the runner starts. A coverage check
+invites the reflex of widening the gate until it covers everything, which would buy nothing and cost
+container start time on every restart. So the check records the gate rather than arguing for it, and
+the failure message says as much in the same breath as it names what entered and what left. A node
+id that disappears is either a rename or a test that stopped running before the container starts;
+those want different responses, and only a person reading the diff can tell them apart.
+`--gate-coverage --write` makes the intended update one command.
+
+The workspace copies are the same shape of problem. The root copies are the ones that run; the repo
+copies exist so the workspace can be rebuilt from a clone, which they can only do while they are
+identical. That check cannot run in CI, because the root scripts live in the parent repository and
+CI sees one checkout, so it is HOST6 in preflight, where both trees are present.
+
+**Rejected.** Asserting that every test prefix under `tests/` is covered by the gate filter. It is
+the obvious form of the check and it is wrong: it fails immediately on G21 to G27 and K7 to K16, and
+the only ways to make it pass are to widen the gate or to delete tests. C33 asserts coverage of the
+prefixes the gate is *meant* to select, and says so in the assertion message. Rejected: folding the
+ASCII scan into the PowerShell parse step. `pwsh` on a runner is PowerShell 7, which parses a smart
+quote and an em dash that Windows PowerShell 5.1 on the host will not, so the parse step would go
+green on exactly the file that stops `start.ps1` from running. Rejected: checking the workspace
+copies from CI by fetching them out of the parent repository, which would need either that repo to
+be public, which is not stated anywhere in the workspace, or a read-only credential, in a system
+whose rule is that the only push-capable token stays on the host.
+
+**Evidence.** `scripts/hygiene.py` with `check_ps1_ascii`, `check_entrypoint_lf`,
+`check_verifier_manifest`, `check_gate_expression`, `check_gate_coverage`, `check_workspace_copies`
+and `check_suite_desc`. `VERIFIER_FILES.txt`, `tests/golden_gate.txt` (55 ids, generated). Tests C30
+to C36 in `tests/test_t5_hygiene.py`. The `hygiene` job and the `gate` job's gate-coverage step in
+`.github/workflows/ci.yml`. Negative controls run by hand on 2026-09-08: an em dash planted in a
+scratch `.ps1` is reported as `scripts/b.ps1:1:16 U+2014`; a CRLF copy of `entrypoint.sh` is refused
+by line number; a line removed from `tests/golden_gate.txt` is named in the failure.
+
+**Consequence.** Three copies of the golden-gate `-k` expression, in `entrypoint.sh` and twice in
+`ci.yml`, are now asserted identical, so CI can no longer go green on a set the container never
+runs. Renaming a test inside the gate churns `tests/golden_gate.txt`, which is intended. Changing
+the pinned verifier set now requires editing two files, one of which exists only to make that edit
+loud; the manifest is not read by `verifier_hash.compute_verifier_hash` and does not move the hash,
+which C34 asserts three ways rather than assuming. The `hygiene` job installs nothing and has no
+`needs`, so it does not wait on the gate.
+
+**Epoch impact.** None. The pinned hash is byte-identical before and after
+(`de5bec229ffa404a85b9172fdc808ef6035716c3df8b308c816e90ffb54fd6e9`); `VERIFIER_FILES.txt` sits
+beside `VERIFIER_HASH` and is read by nothing that computes it.
+
+---
+
 ## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
 
 **Decision.** `stats.txt` declares a staleness deadline on both paths, not only when a loop wrote
@@ -863,3 +981,6 @@ container, and a shared machine whose other containers no status file mentioned.
 
 **Epoch impact.** None. Host scripts and host-side reporting; no verifier-pinned file, no
 `VERIFIER_HASH`, no `Dockerfile`, no `entrypoint.sh`, no score.
+
+
+---

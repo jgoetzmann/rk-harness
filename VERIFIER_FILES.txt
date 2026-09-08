@@ -1,0 +1,10 @@
+rk_harness/coeffrep.py
+rk_harness/orderconditions.py
+rk_harness/verifier.py
+rk_harness/costmodel.py
+rk_harness/evaluator.py
+rk_harness/problems.py
+fixtures/classical.json
+fixtures/problems.json
+fixtures/q15.json
+fixtures/known_sequence.s
