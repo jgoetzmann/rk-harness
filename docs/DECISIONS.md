@@ -311,7 +311,7 @@ its tier and its verifier hash. Only the choice of which cell to search next cha
 
 ---
 
-## D20 - The CPU pause guard holds where it is until the host baseline is measured on a quiet machine (2026-09-07)
+## D20 - The CPU pause guard returns to its shipped thresholds, on a measured baseline (2026-09-07, resolved 2026-09-08)
 
 **Decision.** Do not restore the shipped 70/30/60/40 thresholds. Measure the non-container idle
 baseline once the host is quiet, then choose thresholds from that measurement. Also replace the
@@ -373,8 +373,51 @@ CPU to roughly 3 GB free at a median of 80.6 percent. That is the baseline a fut
 choice should be derived from, once it is sampled in the guard's own metric rather than in total
 host CPU.
 
-**Closes.** Nothing. It records why the guard stays where commit `0ad6348` put it, what has to be
-true before that changes, and what the guard actually does when it fires.
+**Resolved 2026-09-08. The thresholds are back to 70/30/60/40.** Both conditions this record set
+have now been met, and the measurement reverses its own decision.
+
+*The prerequisite, cleared.* This record said to replace the per-poll `docker stats` call before
+tuning anything, because it sets the sampling cadence the thresholds are judged against, and
+`CLAUDE.md` records that call at 47 s on this host. Measured over five consecutive calls on the
+cleaned machine: **1.41 s min, 2.01 s median**. With `Get-Counter` at 1.63 s and a 10 s poll sleep,
+the watchdog's real period is about 13 s, so `CpuSustainSeconds = 30` is roughly three consecutive
+samples and the 300 s window holds about 22. That is the cadence the thresholds assume, so nothing
+needs replacing. The 47 s figure is not withdrawn, because it was plausibly real: this host was
+observed at 100 percent CPU with 1 GB free earlier the same day, and a saturated Docker Desktop is
+exactly where a 47 s `docker stats` comes from. It is a saturated-host number being used as a
+quiet-host constant, which is the same error as the one below.
+
+*The baseline, measured in the guard's own metric.* Thirty samples over 5.9 minutes at the
+watchdog's own cadence, computing what `watchdog.ps1` computes: total processor time minus the
+container's share, both normalised to whole-machine percent.
+
+| min | p10 | p25 | median | p75 | p90 | max | mean |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 9.1 | 10.9 | 14.2 | **25.0** | 31.5 | 39.2 | 54.2 | 24.7 |
+
+Total CPU ran a median of 30.6 with the container taking 6.2 of it.
+
+*What that overturns.* The "roughly 64 percent idle baseline" this record argued from was not a
+property of the machine. It was the crash-looping supabase stack, 24 orphaned pytest processes and
+an abandoned vite dev server, all since stopped. The real baseline is a median of 25. So the
+premise for raising the thresholds is gone, and every objection this record raised against
+restoring them fails against the distribution: a 70 percent spike gate sits 16 points above the
+observed maximum, so it will not fire on ambient load; a 30 percent resume gate sits above the
+median, so more than half of samples clear it and three consecutive are ordinary; and the 40
+percent average resume sits 15 points above the mean, which makes the average path a reliable
+backstop even when spikes do not line up. The run cannot strand.
+
+*Applied without touching the container.* `configure.py set` rather than `reset`, because `cmd_set`
+enforces low below high and `cmd_reset` does not, and because a bare `reset` would also have
+flipped `run.litreview_every_cycles` from 8 back to 50. Thresholds are watchdog launch parameters,
+so only the watchdog needed restarting, not the run: `--apply` would have bounced a container that
+had no reason to stop. The watchdog is built for this, adopting an existing pause rather than
+stranding or killing it. Verified: six minutes under the restored thresholds with no pause, the
+container still at zero restarts and never touched.
+
+**Closes.** Itself. The guard is back to the protection it was designed to give, on a number
+measured in the metric it actually uses rather than inherited from a machine full of dead
+processes.
 
 **Epoch impact.** None. Config and host state only.
 
