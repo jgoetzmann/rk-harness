@@ -291,6 +291,59 @@ FLOAT_RHS = {
 }
 
 
+# --------------------------------------------------------------------------- analytic Jacobians
+
+# Hand-derived df/dy for the three stiff members, in the same physical units and
+# on the same time scaling as FLOAT_RHS above. None for the five non-stiff
+# problems: an implicit method has no reason to run on them, and an entry nobody
+# has differentiated by hand would be a liability rather than a convenience.
+#
+# These exist for the epoch-3 side track (docs/SIDETRACK-AUTOMATION.md, job J11).
+# EPOCH3-DESIGN.md carries an optional analytic-Jacobian field whose saving is
+# unpriced, because every side-track SDIRK number so far is costed with the
+# finite difference, which spends n extra rhs evaluations and n*n of assembly
+# arithmetic per step. Supplying the exact derivative is what lets that saving be
+# measured instead of asserted. Nothing scored reads this map.
+
+
+def _jac_servo_load_step(t: float, y: tuple[float, ...]) -> list[list[float]]:
+    return [[_SRV_A11, _SRV_A12], [_SRV_A21, 0.0]]
+
+
+def _jac_enzyme_qssa(t: float, y: tuple[float, ...]) -> list[list[float]]:
+    u, v = y[0], y[1]
+    return [
+        [-1.0 + v, u + _ENZ_K - _ENZ_LAM],
+        [(1.0 - v) / _ENZ_EPS, -(u + _ENZ_K) / _ENZ_EPS],
+    ]
+
+
+def _jac_robertson_scaled(t: float, y: tuple[float, ...]) -> list[list[float]]:
+    _y1, y2, y3 = y[0], y[1], y[2]
+    return [
+        [-_ROB_A, (_ROB_B / 10.0) * y3, (_ROB_B / 10.0) * y2],
+        [10.0 * _ROB_A, -_ROB_B * y3 - (_ROB_C / 5.0) * y2, -_ROB_B * y2],
+        [0.0, (_ROB_C / 50.0) * y2, 0.0],
+    ]
+
+
+ANALYTIC_JACOBIAN: dict = {
+    "buck_converter": None,
+    "battery_2rc": None,
+    "bicycle_lateral": None,
+    "pll_lock": None,
+    "glucose_minimal": None,
+    "servo_load_step": _jac_servo_load_step,
+    "enzyme_qssa": _jac_enzyme_qssa,
+    "robertson_scaled": _jac_robertson_scaled,
+}
+
+assert set(ANALYTIC_JACOBIAN) == set(VALIDATION_NAMES), (
+    "ANALYTIC_JACOBIAN must carry an entry, possibly None, for every validation problem")
+assert all(ANALYTIC_JACOBIAN[n] is not None for n in STIFF_NAMES), (
+    "the stiff problems are the ones an implicit method runs on; they need the derivative")
+
+
 # --------------------------------------------------------------------------- references
 
 def _augmented_ref(aug: np.ndarray, y0: tuple[float, ...]):

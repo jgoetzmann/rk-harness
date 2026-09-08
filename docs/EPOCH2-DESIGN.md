@@ -67,6 +67,23 @@ that floor. This is a measurement limit of Q15 itself, the same mechanism that p
 rc_thermal on a quantization floor in epoch 1, and it must be documented with the
 scores rather than papered over.
 
+The "roughly 2 LSB" above is an argument, not a measurement, and it is to be
+replaced by one rather than defended. `rk_harness/prototypes/adaptive_q15.py`
+instruments every floor: for one `q15_apply(v, m, s)` the discarded quantity is
+exactly `(v*m) mod 2**s`, so that term's bias is exactly `-r / 2**s` LSB and the
+per-term mean is `-sum / (count * 2**s)`, exact. Side-track job J6 sweeps that over
+every validation problem at three scales
+(`docs/SIDETRACK-AUTOMATION.md` section 4); the number to quote here is the
+`mean_bias_lsb_total` of those artifacts, which is the median over the ladder rungs
+that finish of the four-term bias of one estimate. The initial measurement on
+buck_converter is -1.81 LSB, so the estimate above holds within about 10 percent,
+but the figure for each problem and scale belongs to the artifact rather than to
+this paragraph. Two things the pooled statistics show and the argument did not: at
+tight tolerances the terms underflow to zero entirely, so the bias in LSB goes
+*down* while the estimate becomes useless, and the achieved error then rises as the
+tolerance tightens, which is the flattening this section predicts arriving as a
+reversal rather than a plateau.
+
 Acceptance is division-free: accept iff `max_m |E_m| <= tol_q`, with tol_q a
 precomputed Q15 constant per (problem, target). A relative component would add one
 `q15_mul` and one `q15_add` per state; the initial epoch-2 ladder uses absolute
@@ -90,15 +107,52 @@ iterations on an int16, at most 31 on the int32 accumulator); the cost model boo
 it at its worst case to keep cycle counts deterministic. With alpha = 1/4 and
 beta = 1/8 the PI exponent is the integer `nu = e_prev - 2*e` in units of eighths:
 
-    h_q' = q15_mul(h_q, ftab[clamp(nu)])
+    h_q' = (h_q * ftab[clamp(nu)]) >> 14
 
-where ftab is a small precomputed table of Q15 values `round(32768 * (7/8) *
-2^(nu/8))`, clamped so the factor stays inside [1/4, 2] (33 entries at most, and a
-coarser 9-entry quarter-step table is an option if the archive shows no
-sensitivity). Total controller cost per attempted step: two bit scans, two adds,
-one table load, one `q15_mul`. Rejected attempts loop with the same table; the
-bounded factor plus the 1-LSB minimum step gives a provable worst-case number of
-rejections per step, which section 6 needs.
+where ftab is a small precomputed table of **Q14** values `round(16384 * (7/8) *
+2^(nu/8))`, clamped so the factor stays inside [1/4, 2 - 2^-14], which puts every
+entry in [4096, 32767]. 33 entries at one eighth of a power of two each, and a
+coarser 9-entry table sampling the same range every four eighths is an option if the
+archive shows no sensitivity. Total controller cost per attempted step: two bit
+scans, two adds, one table load, one multiply and one shift. Rejected attempts loop
+with the same table; the bounded factor plus the 1-LSB minimum step gives a provable
+worst-case number of rejections per step, which section 6 needs.
+
+**Open item, and an owner decision: the factor-table encoding.** The Q14 above is a
+correction to what this section originally said, which was `q15_mul(h_q,
+ftab[clamp(nu)])` with entries `round(32768 * (7/8) * 2^(nu/8))` clamped to
+[1/4, 2]. That cannot be implemented at all: a factor of 1.0 is 32768 in Q15 and 2.0
+is 65536, both outside int16, and `fixedpoint.q15_mul` range-checks both operands.
+Three resolutions exist and they are not equivalent:
+
+1. **Q14 table with the factor capped at 2 - 2^-14** (implemented, and the default
+   in `adaptive_q15.FACTOR_Q_BITS`). Keeps the method exactly as specified and
+   changes only the encoding. The update is a multiply and a shift by 14 with an
+   explicit int16 range check, not `q15_mul`, because the operand is not a Q15
+   value.
+2. **Cap growth below 1.** Keeps Q15 but changes the method: a controller that can
+   never grow the step is a different controller, and every work-precision number
+   would be measured under it.
+3. **Carry the factor as a shift-and-add coefficient** through `CoeffRep` rather
+   than as a fixed-point scalar, which is the shape every other coefficient in this
+   harness already uses, at the cost of a per-entry CSD weight in the cycle count.
+
+The choice changes the controller's per-step cycle number, which enters the pinned
+epoch-2 cost model, so it has to be settled before the boundary rather than
+discovered at it. `FACTOR_Q_BITS` is a single named constant so that reversing the
+default is one edit and one re-measurement.
+
+**A stated change to what the published cycle number means.** DESIGN.md's
+static-cycle-counting decision reads a cycle count off the tableau exactly.
+`costmodel._MNEMONIC_CLASS` prices eight mnemonics and no branch class, and adding
+one is an epoch boundary. The controller's bit scan is a data-dependent loop, so it
+is booked at its worst case (31 iterations on the int32 accumulator, 15 on the int16
+tolerance) and its branches are reported as a separate stated allowance beside the
+`count_sequence` figure. The consequence is that the controller's analytic cycle
+count is an upper bound rather than an exact figure, which is a real change in what
+the number means and belongs in the epoch-2 write-up rather than being absorbed
+silently. `adaptive_q15.sequence_costs()` reports the bound, the per-section
+breakdown and the branch allowance separately, under all three cost models.
 
 Step-size bounds: `h_q` stays the Q15 scalar that `solve_q15` already builds from
 `h / DERIV_SCALE`. The floor is 1 LSB; a controller that wants less has hit the
@@ -233,5 +287,16 @@ shape; rejections stay in single digits everywhere on these smooth problems. The
 curve gives the epoch-2 evaluator a known-good reference to reproduce once the
 same pair runs under Q15, where the section-3 tolerance floor should appear as a
 flattening of the curve at tight tolerances. Measuring where that flattening sits,
-per problem and per scale, is the next prototype step and the last open input to
-the tolerance-ladder choice in section 5.
+per problem and per scale, is the last open input to the tolerance-ladder choice in
+section 5.
+
+That prototype now exists: `rk_harness/prototypes/adaptive_q15.py`, tested by T11's
+`test_B7x_*`. It runs the same pair through the pinned Q15 primitives with the
+table-driven controller and the Q31 time register, instruments every floor, and
+carries an `arithmetic="float"` mode that reproduces all 18 points of the frozen
+curve above exactly, counter for counter, which is the gate on believing anything it
+says in Q15. Side-track job J6 sweeps it over all eight validation problems at three
+scales. The flattening is recorded per point by a stated rule rather than read off a
+plot: the largest tolerance on the ladder for which halving it improves the achieved
+error by less than 10 percent, or null when the curve is still improving at the
+tightest rung.

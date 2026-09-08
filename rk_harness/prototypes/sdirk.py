@@ -118,18 +118,38 @@ def _abs_sq_on_imaginary_axis(p: Poly) -> Poly:
     return out
 
 
-def order2_tableau_exact(gamma: Fraction) -> dict:
-    """The order-2 SDIRK2 tableau for a given gamma, solved exactly, with its
-    stability data. Every value returned is a Fraction or a bool.
+def stability_num(gamma: Fraction) -> Poly:
+    """The numerator of R(z) for this construction, as a function of gamma alone.
 
-    Raises ValueError for a gamma the construction cannot use (0 or 1).
+    With A = [[gamma, 0], [a21, gamma]], c the row sums and b solved from the two
+    order-2 conditions, the a21 terms cancel out of det(I - zA + z 1 b^T) and the
+    numerator is (1, 1 - 2*gamma, 1/2 - 2*gamma + gamma**2) whatever a21 is. The
+    denominator (1 - gamma*z)**2 never had an a21 in it. So |R(inf)|, A-stability
+    and L-stability are functions of gamma alone, and the second free parameter
+    moves the order-3 residuals, stiff accuracy, the exactness of b and the cost,
+    but not the stability picture. order2_tableau_exact_a21 asserts this equality
+    on every call so the claim stays enforced rather than remembered.
+    """
+    return (Fraction(1), 1 - 2 * gamma, Fraction(1, 2) - 2 * gamma + gamma ** 2)
+
+
+def order2_tableau_exact_a21(gamma: Fraction, a21: Fraction) -> dict:
+    """The order-2 SDIRK2 tableau for a given (gamma, a21), solved exactly, with
+    its stability data. Every value returned is a Fraction, a tuple or a bool.
+
+    c = (gamma, a21 + gamma) is the row sum of A, and b comes from the two order
+    conditions b1 + b2 = 1 and b.c = 1/2, which give b2 = (1/2 - gamma) / a21.
+
+    Raises ValueError for a gamma the construction cannot use (0 or 1) or for
+    a21 = 0, where c2 = c1 and the order-2 system is singular.
     """
     if gamma <= 0 or gamma >= 1:
         raise ValueError(f"gamma must lie strictly inside (0, 1), got {gamma}")
-    a21 = 1 - gamma
-    b2 = (Fraction(1, 2) - gamma) / (1 - gamma)         # from b.c = 1/2 with c = (gamma, 1)
+    if a21 == 0:
+        raise ValueError("a21 must be nonzero: c2 would equal c1 and b is then unsolvable")
+    b2 = (Fraction(1, 2) - gamma) / a21                 # from b.c = 1/2
     b1 = 1 - b2
-    c = (gamma, Fraction(1))
+    c = (gamma, a21 + gamma)
     b = (b1, b2)
 
     # R(z) = det(I - zA + z 1 b^T) / det(I - zA), both exact polynomials in z.
@@ -138,6 +158,9 @@ def order2_tableau_exact(gamma: Fraction) -> dict:
         _poly_mul((Fraction(0), b2), (Fraction(0), b1 - a21)),
     )
     den = _poly_mul((Fraction(1), -gamma), (Fraction(1), -gamma))
+    if num != stability_num(gamma):
+        raise AssertionError(
+            f"numerator {num} depends on a21 = {a21}; stability_num says {stability_num(gamma)}")
 
     # L-stability margin |R(inf)|: the ratio of leading coefficients, zero when the
     # numerator degree is the lower one.
@@ -174,6 +197,15 @@ def order2_tableau_exact(gamma: Fraction) -> dict:
     }
 
 
+def order2_tableau_exact(gamma: Fraction) -> dict:
+    """The J4 family: a21 fixed at 1 - gamma so that c2 = 1.
+
+    Kept as a one-line delegation so the nine measured gamma_dyadic_scan points
+    reproduce byte for byte under the generalized construction.
+    """
+    return order2_tableau_exact_a21(gamma, 1 - gamma)
+
+
 def spec_from_exact(t: dict, newton_iters: int = NEWTON_ITERS) -> Sdirk2Spec:
     """Float Sdirk2Spec for a tableau from order2_tableau_exact."""
     return Sdirk2Spec(gamma=float(t["gamma"]), a21=float(t["a21"]),
@@ -190,6 +222,37 @@ def dyadic_neighbours(target: float, s: int, width: int = 8) -> list[Fraction]:
         if 0 < m < (1 << s):
             out.append(Fraction(m, 1 << s))
     return out
+
+
+# The J7 scan widens both axes. `full_below` is the size at which enumerating the
+# whole representable set is cheaper than arguing about which part of it to look
+# at: at s = 4, 5 and 6 there are 15, 31 and 63 gammas in (0, 1) and taking all of
+# them costs less than the window would, while from s = 7 on the window bounds the
+# work at 2*width + 1 candidates.
+
+def dyadic_window(target: float, s: int, width: int, full_below: int = 65) -> list[Fraction]:
+    """Every dyadic m / 2**s in (0, 1) when there are at most `full_below` of them,
+    otherwise `width` of them either side of `target`."""
+    if (1 << s) - 1 <= full_below:
+        return [Fraction(m, 1 << s) for m in range(1, 1 << s)]
+    return dyadic_neighbours(target, s, width)
+
+
+def a21_window(s: int, width: int, full_below: int = 65) -> list[Fraction]:
+    """The a21 axis: dyadics m / 2**s with 0 < m / 2**s <= 2, centred on 1 - GAMMA.
+
+    Same rule as dyadic_window. a21 is not confined to (0, 1) the way gamma is:
+    the construction only needs a21 != 0, and a21 > 1 puts c2 past 1, which is a
+    legitimate 2-stage SDIRK and worth including in a census of what the second
+    parameter does.
+    """
+    top = 2 << s                                        # m runs 1 .. 2 * 2**s
+    if top <= full_below:
+        return [Fraction(m, 1 << s) for m in range(1, top + 1)]
+    centre = round((1.0 - GAMMA) * (1 << s))
+    return [Fraction(m, 1 << s)
+            for m in range(centre - width, centre + width + 1)
+            if 0 < m <= top]
 
 
 # --------------------------------------------------------------------------- small dense LU

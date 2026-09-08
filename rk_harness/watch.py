@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import shutil
@@ -434,6 +435,23 @@ def results_panel(arch: ArchiveState, records) -> Panel:
     return Panel(grid, title="results")
 
 
+# The side-track firing budget, duplicated here rather than imported: viewers do not
+# import runner.py (house rule 8). runner._sidetrack_max_seconds is the original and
+# these three numbers must match it.
+_SIDETRACK_BUDGET_MIN = 30.0
+_SIDETRACK_BUDGET_MAX = 600.0
+_SIDETRACK_BUDGET_DEFAULT = 180.0
+
+
+def _sidetrack_budget() -> float:
+    try:
+        return max(_SIDETRACK_BUDGET_MIN,
+                   min(_SIDETRACK_BUDGET_MAX,
+                       float(os.environ.get("RK_SIDETRACK_MAX_SECONDS", "180") or 180)))
+    except ValueError:
+        return _SIDETRACK_BUDGET_DEFAULT
+
+
 def health_panel(events: list[dict], now, scope: str) -> Panel:
     rows: list[tuple[str, str]] = []
     try:
@@ -448,8 +466,18 @@ def health_panel(events: list[dict], now, scope: str) -> Panel:
         if st["ledger_lines"]:
             fired = [e for e in events if e.get("kind") == "sidetrack_done"]
             last = f"; last {fired[-1].get('job')}:{fired[-1].get('key')} at {fmt_ct(fired[-1].get('ts'))}" if fired else ""
+            left = int(st.get("remaining_total") or 0)
+            secs = st.get("estimated_seconds_remaining")
+            if left and secs:
+                firings = math.ceil(secs / _sidetrack_budget())
+                refill = (f"; {left} remaining, about {firings} "
+                          + ("firing" if firings == 1 else "firings"))
+            elif left:
+                refill = f"; {left} remaining, not yet estimable"
+            else:
+                refill = "; plan exhausted, extend the catalogue"
             rows.append(("side tracks", f"{st['done_total']} of {st['planned_total']} points measured "
-                                        f"(code {st['code_hash']}){last}"))
+                                        f"(code {st['code_hash']}){refill}{last}"))
         elif os.environ.get("RK_SIDETRACK_EVERY", "0") not in ("0", ""):
             rows.append(("side tracks", f"enabled, nothing measured yet ({st['planned_total']} points planned)"))
     except Exception:  # noqa: BLE001 - the live view must never fail on an optional panel row

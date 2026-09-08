@@ -48,7 +48,12 @@ def test_ST1_plan_is_deterministic_finite_and_unique():
     second = [(p.job, p.key) for j in sidetrack.JOBS for p in j.points()]
     assert first == second, "a plan must not depend on when it is asked for"
     assert len(first) == len(set(first)), "duplicate points would be measured twice"
-    assert len(first) == 40, "the catalogue in SIDETRACK-AUTOMATION.md section 4 has 40 points"
+    assert len(first) == 103, (
+        "the catalogue in SIDETRACK-AUTOMATION.md section 4 is J1-J9 and J11, and the "
+        "arithmetic at the end of that section is "
+        "8 + 16 + 3 + 9 + 4 + 25 + 8 + 3 + 3 + 24 = 103. Moving this literal without "
+        "moving that sentence is how the plan and its published description drift apart; "
+        "test_ST22 carries the same total broken down per job.")
     assert {j.track for j in sidetrack.JOBS} == set(sidetrack.TRACKS)
     for job in sidetrack.JOBS:
         assert job.closes, f"{job.name} must name the design-doc question it closes"
@@ -245,6 +250,157 @@ def test_ST19_max_seconds_is_clamped(monkeypatch):
     assert runner._sidetrack_max_seconds() == 600.0
     monkeypatch.setenv("RK_SIDETRACK_MAX_SECONDS", "nonsense")
     assert runner._sidetrack_max_seconds() == 180.0
+
+
+# --------------------------------------------------------------------------- the second catalogue
+
+def test_ST22_catalogue_point_counts_are_declared():
+    """The per-job breakdown of test_ST1's single total.
+
+    A plan constant edited without intent moves one job's count and another's the
+    other way, and a single total hides that. This is the place a deliberate change
+    has to be written down.
+    """
+    counts = {job.name: len(job.points()) for job in sidetrack.JOBS}
+    assert counts == {
+        "adaptive.suite_sweep": 8,
+        "adaptive.controller_gains": 16,
+        "sdirk.stiff_suite": 3,
+        "sdirk.gamma_dyadic_scan": 9,
+        "sdirk.newton_iters": 4,
+        "sdirk.gamma_a21_scan": 25,
+        "adaptive.pair_census": 8,
+        "sdirk.stiff_suite_budget": 3,
+        "sdirk.jacobian_cost": 3,
+        "adaptive.q15_estimate_floor": 24,
+    }
+    assert sum(counts.values()) == 103
+
+
+def test_ST23_the_widened_scan_contains_the_narrow_family():
+    """The J4 refactor must not have moved a published number.
+
+    J4's nine measured points come from `order2_tableau_exact`, which is now a
+    delegation to the two-parameter form. Two things have to hold: the wide gamma
+    window covers the narrow one at the same denominator exponent, and the narrow
+    construction is still a21 = 1 - gamma with b solved from the order conditions.
+    """
+    from fractions import Fraction
+
+    from rk_harness.prototypes.sdirk import (
+        GAMMA, dyadic_neighbours, dyadic_window, order2_tableau_exact,
+        order2_tableau_exact_a21)
+
+    narrow = dyadic_neighbours(GAMMA, 8, sidetrack.GAMMA_WIDTH)
+    wide = dyadic_window(GAMMA, 8, sidetrack.WIDE_GAMMA_WIDTH, sidetrack.WIDE_FULL_BELOW)
+    assert set(narrow) <= set(wide) and len(wide) > len(narrow)
+
+    for gamma in narrow:
+        a = order2_tableau_exact(gamma)
+        b = order2_tableau_exact_a21(gamma, 1 - gamma)
+        assert set(a) == set(b)
+        for key in a:
+            assert a[key] == b[key], key
+        # and the construction itself, independent of the delegation
+        b2 = (Fraction(1, 2) - gamma) / (1 - gamma)
+        assert a["a21"] == 1 - gamma
+        assert a["c"] == (gamma, Fraction(1))
+        assert a["b"] == (1 - b2, b2)
+
+
+def test_ST24_r_at_infinity_does_not_move_with_a21():
+    """The invariance the J7 run function relies on, and reports as a result.
+
+    With this construction the numerator of R(z) is (1, 1 - 2g, 1/2 - 2g + g^2)
+    whatever a21 is, so the L-stability margin, A-stability and L-stability are
+    functions of gamma alone. The gamma below is the one the stored J4 artifact
+    reports |R(inf)| = -7/5625 for.
+    """
+    from fractions import Fraction
+
+    from rk_harness.prototypes.sdirk import order2_tableau_exact_a21, stability_num
+
+    gamma = Fraction(75, 256)
+    ref = None
+    for a21 in (Fraction(181, 256), Fraction(149, 256), Fraction(1, 4),
+                Fraction(7, 8), Fraction(3, 2)):
+        t = order2_tableau_exact_a21(gamma, a21)
+        assert t["num"] == stability_num(gamma)
+        got = (t["num"], t["den"], t["r_at_infinity"], t["l_stable"], t["a_stable"])
+        if ref is None:
+            ref = got
+        assert got == ref, f"a21 = {a21} moved the stability data"
+    assert ref[2] == Fraction(-7, 5625)
+
+
+def test_ST25_the_census_caps_deterministically():
+    """A space bigger than the cap is reported, not walked, and a walked space
+    gives the same counts twice."""
+    capped = sidetrack._run_pair_census({"stages": 4, "s_max": 3})
+    assert capped["summary"]["status"] == "capped"
+    assert capped["summary"]["space_size"] == 16777216
+    assert capped["counts"] == {} and capped["fsal_examples"] == []
+
+    # CENSUS_CAP also holds back (4, s_max 2): 262144 matrices measured at 83 s, which
+    # is half a firing against the 31.8 s of the largest point measured before it.
+    over = sidetrack._run_pair_census({"stages": 4, "s_max": 2})
+    assert over["summary"]["status"] == "capped"
+    assert over["summary"]["space_size"] == 262144
+    assert sidetrack.CENSUS_CAP < 262144
+
+    first = sidetrack._run_pair_census({"stages": 3, "s_max": 1})
+    second = sidetrack._run_pair_census({"stages": 3, "s_max": 1})
+    assert first["summary"]["status"] == "ok"
+    assert first["counts"]["matrices"] == 64
+    assert first["counts"] == second["counts"]
+
+
+def test_ST26_budget_steps_match_the_published_validation_numbers():
+    """J9's ladder is anchored on the same arithmetic that produced the published
+    validation table, so the two cannot say different things about the same method."""
+    from rk_harness import validation as V
+    from rk_harness.costmodel import M0PLUS_FAST
+    from rk_harness.simulate import steps_for_budget
+    from rk_harness.tableau import classical
+
+    assert sidetrack.BUDGET_CYCLES == V.BUDGET_CYCLES
+    cl = classical()
+    expected = {"euler": 4369, "heun2": 1680, "midpoint": 1985, "rk4": 661}
+    for method, steps in expected.items():
+        assert steps_for_budget(cl[method], M0PLUS_FAST, 3,
+                                sidetrack.BUDGET_CYCLES) == steps, method
+
+
+def test_ST27_status_reports_the_refill_figures(only_fake):
+    """The catalogue exhausts, so 'how much is left' is the number that decides when
+    to extend it. Before anything is measured there is no basis for a time estimate
+    and status says so rather than guessing."""
+    before = sidetrack.status()
+    assert before["remaining_total"] == before["planned_total"] == 4
+    assert before["estimated_seconds_remaining"] is None
+
+    sidetrack.run_until(600.0)
+
+    after = sidetrack.status()
+    assert after["done_total"] == 4
+    assert after["remaining_total"] == 0
+    assert after["estimated_seconds_remaining"] == 0.0
+
+
+def test_ST28_the_q15_floor_plan_is_twenty_four_points(only_fake):
+    """One point per (validation problem, scale factor), with the scale in the key so
+    the three scales of one problem are three separate measurements."""
+    plan = sidetrack._plan_q15_estimate_floor()
+    assert len(plan) == 24
+    keys = [k for k, _ in plan]
+    assert len(set(keys)) == 24
+    assert sidetrack.Q15_SCALE_FACTORS == ((1, 1), (1, 2), (1, 4))
+    for name in sidetrack.VALIDATION_NAMES:
+        assert [k for k in keys if k.startswith(name + "_s")] == [
+            f"{name}_s1", f"{name}_s2", f"{name}_s4"]
+    for _key, params in plan:
+        assert set(params) == {"problem", "scale_factor"}
+        assert params["problem"] in sidetrack.VALIDATION_NAMES
 
 
 # --------------------------------------------------------------------------- the commit set

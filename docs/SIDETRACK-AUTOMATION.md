@@ -251,19 +251,123 @@ error and estimated cycles per step on the stiff problems.
 Value: the iteration count becomes part of the pinned evaluator config at the epoch boundary, so
 it should be chosen on data.
 
-### J6 `adaptive.q15_estimate_floor` (track B, phase 3, not a sweep)
+### J6 `adaptive.q15_estimate_floor` (track B)
 
-Closes: EPOCH2-DESIGN section 10's stated next step, where the Q15 error estimate's roughly 2 LSB
-bias floor flattens the work-precision curve, which is the last open input to the tolerance
-ladder.
-This one needs new prototype code (a Q15 realization of the estimate and the table-driven
-controller), not a parameter sweep. It is listed so the catalogue is complete, and it is gated
-behind phase 3. Do not start it as part of the configuration change.
+Closes: EPOCH2-DESIGN section 3, where the Q15 error estimate's roughly 2 LSB bias floor is an
+estimate rather than a measurement, and section 5, which needs the scored tolerance ladder to sit
+above whatever that floor turns out to be.
+This one needed new prototype code rather than a parameter sweep, which is why DECISIONS.md D17
+answered owner question 3 with "neither": write `rk_harness/prototypes/adaptive_q15.py` as
+unpinned code, then add J6 as an ordinary sweep once there is something to sweep. That prototype
+now exists, so J6 is a job like any other.
+Plan: 24 points, one per (validation problem, scale factor) over scales 1, 1/2 and 1/4 of the
+suite's own scale, keyed `<problem>_s<denominator>`. Halving the scale halves the resolution of
+the state and should raise the LSB floor, which is the scale dependence section 3 leaves open.
+Result per point: the exact error weights d = b - b_hat with their `CoeffRep`; a tolerance ladder
+of 1 to 512 LSB of the scaled state run under both controller tables, with accepted, rejected,
+function-evaluation counts, achieved error and status per rung; the measured floor statistics of
+the estimate (per-term count, exact remainder sum, 16-bucket histogram and mean bias in LSB); the
+Q31 time register terms; and the ARMv6-M reference sequence priced under all three cost models
+with its branch allowance stated separately.
+Cost: roughly 8 s per point on a smooth problem, plus a one-time reference-solution build per
+problem which is shared across that problem's three points.
+Value: replaces the roughly 2 LSB figure with a number. The measurement so far, on
+buck_converter, is a median four-term bias of -1.81 LSB across the rungs that finish, which
+confirms the design's estimate within a stated margin rather than replacing it.
+
+### J7 `sdirk.gamma_a21_scan` (track C)
+
+Closes: EPOCH3-DESIGN, where the L-stability window J4 reports is 17 candidates wide and nothing
+pins that width, and where the second free parameter of the 2-stage SDIRK is never varied.
+Plan: 25 points, one per (gamma denominator exponent, a21 denominator exponent) over
+{4, 6, 8, 10, 12} squared. Each walks every dyadic gamma in the window and every dyadic a21 in
+(0, 2] at that exponent, up to 65 of each, so at most 4225 pairs per point.
+Result per point: per gamma, the exact stability data and the a21 with the smallest order-3
+residual, with that a21's b, whether b is exactly `m / 2**s`, its CSD weight, stiff accuracy and
+the measured order on dahlquist. Only the 16 gammas with the smallest |R(inf)| keep a row and only
+those rows get an order fit; a full dump of every pair would be about a megabyte per point against
+the 3 KB/day budget in risk R3.
+Cost: 0.5 s to 2 s per point.
+Value, stated precisely, because half of what this job was proposed for is not true. With
+A = [[gamma, 0], [a21, gamma]], c the row sums and b solved from the two order-2 conditions, the
+numerator of R(z) is (1, 1 - 2 gamma, 1/2 - 2 gamma + gamma^2) and the denominator is
+(1 - gamma z)^2, both independent of a21. Verified against the stored artifact
+`rk-work/sidetrack/sdirk.gamma_dyadic_scan/s08.json`: gamma = 75/256 gives |R(inf)| = -7/5625 for
+a21 = 181/256, 149/256, 1/4, 7/8 and 3/2 alike. So |R(inf)|, A-stability and L-stability are
+functions of gamma alone, the `NOT_L_STABLE` threshold question is answered by widening the gamma
+window and by nothing else, and no dyadic gamma is ever exactly L-stable, because
+gamma^2 - 2 gamma + 1/2 = 0 has only irrational roots. That is why every J4 artifact reports
+`l_stable 0`. What the a21 axis does move is the order-3 residuals, stiff accuracy, the exact
+representability of b, its CSD cost and the measured order, and those are what the rows carry.
+`prototypes.sdirk.order2_tableau_exact_a21` asserts the invariance on every call, so it is
+enforced rather than remembered.
+
+### J8 `adaptive.pair_census` (track B)
+
+Closes: EPOCH2-DESIGN section 2, whose search-space note assumes a dyadic A admits both an order-p
+b and an order-(p-1) b_hat with a free parameter left over, so that the pair has an error estimate
+at all. Nobody had counted it.
+Plan: 8 points, one per (stage count, lattice size) over stages {3, 4} and s_max {1, 2, 3, 4}.
+Each walks every strictly lower-triangular dyadic A with entries `m / 2**s`, s <= s_max,
+0 < |entry| <= 1, and counts: order-3 solvable, order-2 solvable, order-2 solvable with a free
+column (so d is not forced to zero), FSAL, and order-2 solutions that are exactly representable.
+Enumeration sizes are `len(lattice)**entries`: (3,1) 64, (3,2) 512, (3,3) 4096, (3,4) 32768,
+(4,1) 4096, (4,2) 262144, (4,3) 16777216, (4,4) 1073741824.
+`CENSUS_CAP` is 100000, so the three largest 4-stage points report their space size instead of
+walking it, which is itself the answer to where an exhaustive epoch-2 enumeration stops being
+possible. The cap was set from a measurement rather than an estimate: (4, s_max 2) at 262144
+matrices runs in 83 s here, half of one firing, against the 31.8 s of the largest point the
+catalogue had before it, and the deadline gates starting a point rather than finishing one.
+Cost: 0.02 s to 7 s per enumerated point; the capped points return immediately.
+Value: turns a stated assumption into a count. Two structural facts are already visible from the
+small points and would be worth stating in the epoch-2 write-up: with 3 or 4 stages the order-2
+system has at most rank 2, so a free column always survives and `d_forced_zero` is structurally
+zero; and no fully dyadic A can be FSAL at order 3, because b.c^2 = 1/3 has no dyadic solution.
+
+### J9 `sdirk.stiff_suite_budget` (track C)
+
+Closes: EPOCH3-DESIGN, where the stiff ladder in J3 stops at 256 steps while the harness scores at
+a matched cycle budget, and a cheap explicit method buys thousands of steps for that money.
+Plan: 3 points, one per stiff problem. Per method the ladder is its own step count at
+`BUDGET_CYCLES` = 65536 (the same constant `validation.BUDGET_CYCLES` uses, held equal by
+`test_ST26`) and a quarter, a half, twice and four times that.
+Result per point: per method the cycles per step, the step count the budget buys, the error there,
+the whole ladder with the analytic cycles each rung would cost, and a diverged rung recorded as a
+result rather than a gap. Nothing is read from `rk-work/validation/results.json`: an artifact that
+depended on host state would stop being reproducible, so the agreement with the published step
+counts is held by a test instead.
+Cost: 1 s to 4 s per point once the reference solutions are warm.
+Value: J3 compares methods at equal step counts, which flatters the implicit method by hiding what
+it pays per step. This is the comparison the harness actually scores.
+
+### J11 `sdirk.jacobian_cost` (track C)
+
+Closes: EPOCH3-DESIGN, where the optional analytic Jacobian field is unpriced because every
+side-track SDIRK number is costed with the finite difference.
+Plan: 3 points, one per stiff problem, using the hand-derived `validation.ANALYTIC_JACOBIAN`
+entries added for this job.
+Result per point: both matrices in full at two fixed sample states (t = 0, and t_end / 2 reached by
+float RK4 at a fixed 1024 steps so the sample is a pure function of the code), their largest
+absolute and relative disagreement, the same fixed-step SDIRK2 run at 32, 64 and 128 steps with
+each Jacobian, and the per-step cycle estimate under both.
+Cost: well under a second per point.
+Value: prices a design option. `validation.py` is unpinned and outside `SIDETRACK_FILES`, so a
+constant moving there would not re-open these points; recording both sampled matrices in full is
+the mitigation, and it is weaker than hashing rather than equivalent to it.
+
+### J10, held for P04
+
+`validation.stiff_screen` is not in the catalogue. P04 defines the screen, but its admission
+thresholds and its four candidate problems (the van der Pol mu, the flame eps and t_end, the
+tightened thermal network, the shortened battery_2rc time constant) are all unwritten and all
+owner decisions. A job whose plan is a placeholder is not a job, so it is left out entirely rather
+than shipped empty.
 
 Ordering across tracks is a two-letter rotation `"BC"`, so consecutive firings alternate adaptive
 and implicit. Within a track, jobs run in catalogue order and each job runs to exhaustion before
-the next begins. Total plan size for J1-J5 is 8 + 16 + 3 + 9 + 4 = 40 points, which at one firing
-per 20 cycles (about 3.1 hours at M1's median) is roughly five days of unattended work.
+the next begins. Total plan size for J1 to J9 and J11 is
+8 + 16 + 3 + 9 + 4 + 25 + 8 + 3 + 3 + 24 = 103 points. `test_ST1` holds that total and `test_ST22`
+holds the breakdown per job, so neither can move by accident.
 
 ## 5. Change set
 
@@ -282,6 +386,12 @@ per 20 cycles (about 3.1 hours at M1's median) is roughly five days of unattende
 | C10 | `docs/ROADMAP.md` | Records the ruling and links this document | yes |
 | C11 | `rk_harness/watch.py` | One row in the live view: points measured of planned, code hash, last job | yes |
 | C12 | `tests/test_t5_config_watch.py` | `test_C14`'s read-only assertion now ignores `HEARTBEAT` (see below) | yes |
+| C14 | `rk_harness/prototypes/pair_census.py` (new) | Exact dyadic census behind J8: `census_lattice`, Gaussian elimination over Fractions, `contains_vector`, `census(stages, s_max, cap)`. Independent of `search.py` on purpose, since importing it would pull the optimizer into a firing and would make artifacts depend on a module the side-track digest does not cover | yes |
+| C15 | `rk_harness/prototypes/adaptive_q15.py` (new) | The Q15 estimate, the instrumented floors, the bounded bit scan, the Q14 controller tables, the Q31 time register, the ARMv6-M reference listing and `build_point`, behind J6 | yes |
+| C16 | `rk_harness/prototypes/sdirk.py` | Additive only: `order2_tableau_exact_a21`, `stability_num`, `dyadic_window`, `a21_window`. `order2_tableau_exact` is now a one-line delegation, and the s08 artifact was rebuilt and diffed byte for byte to prove the nine published J4 points did not move | yes |
+| C17 | `rk_harness/validation.py` | `ANALYTIC_JACOBIAN`, hand-derived for the three stiff problems and `None` for the other five. Not a pinned file and not an epoch boundary; `test_analytic_jacobians_match_finite_differences` in T8 holds it against `fd_jacobian` | yes |
+| C18 | `rk_harness/sidetrack.py` | `SIDETRACK_FILES` gains `pair_census.py`, `adaptive_q15.py`, `simulate.py` and `fixedpoint.py`; four constants blocks and five plan/run pairs for J6 to J9 and J11; `status()` gains `remaining_total` and `estimated_seconds_remaining` | yes |
+| C19 | `rk_harness/watch.py` | The side-track row now carries the refill figures: how many points remain and roughly how many firings that is, from the median measured duration under the current code hash | yes |
 
 Nothing in `VERIFIER_FILES` appears in this table, which is the point. The verifier hash is
 identical before and after the entire change set (A1.2, verified).
@@ -719,13 +829,22 @@ Rollback, in increasing order of severity:
 
 Outstanding work, in order:
 
-1. **Enable it.** `python configure.py set run.sidetrack_every_cycles=20 --apply`. Nothing runs
-   until this happens; every phase-3 criterion is waiting on it, and so is the page, which stays
-   absent until a ledger exists.
-2. **Extend the catalogue.** The 40 points measure in about 60 s once the references are warm, so
-   the plan exhausts within a firing or two of being enabled. J6 (the Q15 estimate floor) is the
-   obvious next job and the last open input to the epoch-2 tolerance ladder, but it needs
-   hand-written prototype code rather than a sweep.
+1. **Enable it.** Done: `run.sidetrack_every_cycles` was set to 20 and the 40 points of the
+   original catalogue are all measured, every one of them status ok under a single code hash. The
+   `duration_s` column of that 40-line ledger sums to 56.43 s, so the whole of the original plan
+   costs about one firing to re-measure.
+2. **Keep the catalogue ahead of the executor.** The refill rule: extend the catalogue while at
+   least one firing of headroom remains, never after the plan has already exhausted. `status()`
+   reports `remaining_total` and `estimated_seconds_remaining` (the median measured duration under
+   the current code hash times the number of points left) and the live view turns that into a
+   count of firings, so the headroom is visible without arithmetic. The rule matters because an
+   exhausted plan is not idle in a useful way: the executor logs `sidetrack_exhausted` and the
+   published page stops moving, while the design documents still have open questions.
+
+   Note what extending the catalogue costs. Any edit to a file in `SIDETRACK_FILES` moves
+   `code_hash` and re-opens every measured point, which is correct, because a measurement is only
+   valid under the code that produced it. Land a catalogue extension as one change set: a staged
+   landing pays the re-measurement once per stage.
 
 Decisions that are the owner's:
 
@@ -734,8 +853,22 @@ Decisions that are the owner's:
 2. **Whether the gains ruling changes.** J2 says alpha=3/8 gives lower rejection rates than the
    alpha=1/4 that EPOCH2-DESIGN section 4 proposes freezing. Revisiting that is a design decision,
    not a measurement one.
-3. **J6 timing.** Schedule it as a side-track job, or hold it for the epoch-2 change set itself?
+3. **J6 timing.** Answered on 2026-09-07 by DECISIONS.md D17: neither. Write the Q15 estimate
+   and the table-driven controller as unpinned prototype code, then add J6 to the catalogue as an
+   ordinary sweep once there is something to sweep. Both halves are now done, and J6 is 24 of the
+   103 points.
 4. **Publication surface.** `sitegen` builds the findings site every cycle, so `sidetrack.html`
    will update itself once C5 lands. The rk-overview `tracks.html` page is regenerated by hand
    (`rk-overview/tools/generate.py`) and is currently stale. Should that regeneration become part
    of the same routine, or stay a deliberate act?
+5. **The Q15 factor-table encoding.** Open, and it is an owner decision because it changes a
+   number that enters the pinned epoch-2 cost model. EPOCH2-DESIGN section 4 as written cannot be
+   implemented: it holds the controller factor table in Q15, where 1.0 is 32768 and 2.0 is 65536,
+   both outside int16. The prototype implements Q14 with the factor capped at 2 - 2**-14 and the
+   update done as `(h_q * f) >> 14` with an explicit range check, behind the single constant
+   `adaptive_q15.FACTOR_Q_BITS`, so reversing it is one edit. The alternative, capping growth
+   below 1, changes the method rather than the encoding. The question is recorded as an open item
+   in EPOCH2-DESIGN section 4.
+6. **Whether J10 enters the catalogue.** `validation.stiff_screen` is specified in P04 but its
+   admission thresholds and its four candidate problems are unwritten owner decisions, so it is
+   deliberately absent (section 4).

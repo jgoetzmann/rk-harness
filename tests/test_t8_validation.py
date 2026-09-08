@@ -403,3 +403,35 @@ def test_write_results_deterministic(tmp_path, synthetic_doc):
     b1, b2 = p1.read_bytes(), p2.read_bytes()
     assert b1 == b2
     assert b"\r\n" not in b1  # byte-deterministic LF output
+
+
+def test_analytic_jacobians_match_finite_differences():
+    """The hand-derived Jacobians for the three stiff problems.
+
+    Nothing scored reads them; the epoch-3 side track prices what an analytic
+    derivative saves against the finite difference it uses today (job J11), and a
+    hand-derived matrix that is quietly wrong would make that number meaningless.
+    Checked at t = 0 and at t_end / 2, since three of the entries are functions of
+    the state rather than constants.
+    """
+    from rk_harness.prototypes.sdirk import fd_jacobian
+
+    assert set(V.ANALYTIC_JACOBIAN) == set(V.VALIDATION_NAMES)
+    for name in V.VALIDATION_NAMES:
+        if name not in V.STIFF_NAMES:
+            assert V.ANALYTIC_JACOBIAN[name] is None, name
+
+    for name in V.STIFF_NAMES:
+        jac = V.ANALYTIC_JACOBIAN[name]
+        rhs = V.FLOAT_RHS[name]
+        y0 = V.Y0_PHYS[name]
+        t_end = V.PROBLEMS[name].t_end
+        n = V.PROBLEMS[name].n_states
+        y_mid = solve_float(classical()["rk4"], rhs, y0, t_end / 2.0, 1024)
+        for t, y in ((0.0, y0), (t_end / 2.0, y_mid)):
+            exact = jac(t, y)
+            approx = fd_jacobian(rhs, t, y)
+            for i in range(n):
+                for j in range(n):
+                    tol = 1e-5 * max(1.0, abs(exact[i][j]))
+                    assert abs(exact[i][j] - approx[i][j]) <= tol, (name, t, i, j)

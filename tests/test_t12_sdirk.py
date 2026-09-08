@@ -126,3 +126,41 @@ def test_curve_artifact_schema_and_claims():
     assert any(p["status"] == "diverged" for p in stiff["rk4"]["points"])
     assert any(p["status"] == "diverged" for p in stiff["euler"]["points"])
     assert "cycles/step" in d["cost_note"]
+
+
+def test_generalized_tableau_solves_order_two_for_any_a21():
+    """The two-parameter form of the exact construction.
+
+    a21 was fixed at 1 - gamma so that c2 = 1; the side-track scan (J7) opens it.
+    Whatever a21 is, b must still satisfy the two order-2 conditions exactly, c2 is
+    the row sum, and stiff accuracy is the separate question of whether b happens to
+    equal the last row of A.
+    """
+    from fractions import Fraction
+
+    for gamma in (Fraction(1, 4), Fraction(75, 256), Fraction(3, 8), Fraction(7, 16)):
+        for a21 in (Fraction(1, 4), Fraction(1, 2), Fraction(3, 4), Fraction(1),
+                    Fraction(3, 2), Fraction(-1, 2)):
+            t = sdirk.order2_tableau_exact_a21(gamma, a21)
+            b, c = t["b"], t["c"]
+            assert c == (gamma, a21 + gamma)
+            assert b[0] + b[1] == Fraction(1)
+            assert b[0] * c[0] + b[1] * c[1] == Fraction(1, 2)
+            assert t["stiffly_accurate"] == (b == (a21, gamma))
+
+    # a21 = 0 puts c2 on top of c1 and the order-2 system has no solution.
+    for bad in (Fraction(0), 0):
+        try:
+            sdirk.order2_tableau_exact_a21(Fraction(1, 4), Fraction(bad))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a21 = 0 must raise")
+    # and the gamma guard is unchanged
+    for bad_gamma in (Fraction(0), Fraction(1), Fraction(-1, 4)):
+        try:
+            sdirk.order2_tableau_exact_a21(bad_gamma, Fraction(1, 2))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"gamma = {bad_gamma} must raise")

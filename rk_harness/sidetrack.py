@@ -21,10 +21,12 @@ Two write rules keep the results trustworthy:
 * An artifact is a pure function of (code, params). No clock, no host detail, no
   unseeded randomness. Reproducing a point means running it again and getting the
   same bytes.
-* Every ledger line carries `code_hash`, a digest over this module and the
-  prototypes. A point counts as measured only under the code that measured it, so
-  editing a prototype re-opens its points instead of leaving stale numbers on the
-  site.
+* Every ledger line carries `code_hash`, a digest over this module, the
+  prototypes it drives (the pair census and the Q15 adaptive prototype included)
+  and the two unpinned arithmetic modules the Q15 job measures, `simulate.py` and
+  `fixedpoint.py`. A point counts as measured only under the code that measured
+  it, so editing any of them re-opens its points instead of leaving stale numbers
+  on the site.
 
 CLI, in the style of rk_harness.saturation:
 
@@ -56,7 +58,22 @@ SIDETRACK_FILES: tuple[str, ...] = (
     "rk_harness/sidetrack.py",
     "rk_harness/prototypes/__init__.py",
     "rk_harness/prototypes/adaptive.py",
+    "rk_harness/prototypes/adaptive_q15.py",
+    "rk_harness/prototypes/pair_census.py",
     "rk_harness/prototypes/sdirk.py",
+    # Not prototypes, and not pinned either: the Q15 job measures the arithmetic
+    # these two define, so a change to either invalidates its numbers exactly the
+    # way a change to a prototype does. Neither is in verifier_hash.VERIFIER_FILES
+    # (test_ST12 holds that), but fixedpoint.py is on the scored path, so editing
+    # it was always a large act.
+    "rk_harness/simulate.py",
+    # Added 2026-09-08 with J8 and J11. enumeration.lattice defines the exact space
+    # the pair census counts over, and validation.ANALYTIC_JACOBIAN supplies the
+    # matrices the Jacobian-cost job prices. Both decide published numbers and
+    # neither is pinned, so both belong in the digest.
+    "rk_harness/enumeration.py",
+    "rk_harness/validation.py",
+    "rk_harness/fixedpoint.py",
 )
 
 
@@ -335,14 +352,39 @@ def status(tracks: Iterable[str] = TRACKS) -> dict:
             "set_aside": sum(1 for p in pts if p.ident in dead),
             "closes": job.closes,
         })
+    left = remaining(tracks, led)
     return {
         "code_hash": code_hash(),
         "ledger_lines": len(led),
         "planned_total": sum(j["planned"] for j in jobs),
         "done_total": sum(j["done"] for j in jobs),
         "set_aside_total": sum(j["set_aside"] for j in jobs),
+        "remaining_total": len(left),
+        "estimated_seconds_remaining": _estimated_seconds(led, len(left)),
         "jobs": jobs,
     }
+
+
+def _estimated_seconds(ledger: Sequence[dict], remaining_total: int) -> float | None:
+    """Seconds of measurement still owed, from the median point already measured.
+
+    The median rather than the mean because the durations are lopsided: one point
+    of the catalogue runs for tens of seconds and most run in milliseconds, so a
+    mean would report a refill bill no firing has ever paid. None until something
+    has been measured under this code hash, because an estimate from zero samples
+    is a guess wearing a number. This reads the ledger and the catalogue and
+    nothing else, so status() stays a pure function of the two.
+    """
+    cur = code_hash()
+    durations = sorted(float(e["duration_s"]) for e in ledger
+                       if e.get("code_hash") == cur and e.get("status") == "ok"
+                       and isinstance(e.get("duration_s"), (int, float)))
+    if not durations:
+        return None
+    mid = len(durations) // 2
+    median = (durations[mid] if len(durations) % 2
+              else (durations[mid - 1] + durations[mid]) / 2.0)
+    return round(median * remaining_total, 1)
 
 
 # =========================================================================== the catalogue
@@ -373,6 +415,45 @@ ORDER_LADDER: tuple[int, ...] = (16, 32, 64, 128)
 GAMMA_EXPONENTS: tuple[int, ...] = (4, 5, 6, 7, 8, 9, 10, 11, 12)
 GAMMA_WIDTH: int = 8
 NEWTON_ITER_CHOICES: tuple[int, ...] = (1, 2, 3, 4)
+
+# ---- second catalogue (J7 to J11) --------------------------------------------
+# J7 widens both axes of the SDIRK2 construction. The gamma axis is widened
+# because the L-stability window J4 reports is 17 candidates wide and nothing
+# pins that width; the a21 axis is opened because it has never been varied.
+WIDE_GAMMA_EXPONENTS: tuple[int, ...] = (4, 6, 8, 10, 12)
+WIDE_A21_EXPONENTS: tuple[int, ...] = (4, 6, 8, 10, 12)
+WIDE_GAMMA_WIDTH: int = 32
+WIDE_A21_WIDTH: int = 32
+WIDE_FULL_BELOW: int = 65
+WIDE_TOP_K: int = 16          # order fits per point, which is what a point costs
+
+# J8, the dyadic pair census. CENSUS_CAP draws the line between a space that is
+# walked and a space that is reported: the two largest 4-stage points are 16.8M
+# and 1.07e9 matrices and were never going to be enumerated, and (4, s_max=2) at
+# 262144 matrices was measured here at 83 s, half of a whole firing, against the
+# 31.8 s of the largest point the catalogue had before. Capping at 100000 leaves
+# the largest census point at 32768 matrices and about 7 s, and the capped count
+# is itself the answer to where an exhaustive epoch-2 enumeration stops.
+CENSUS_STAGES: tuple[int, ...] = (3, 4)
+CENSUS_S_MAX: tuple[int, ...] = (1, 2, 3, 4)
+CENSUS_CAP: int = 100_000
+
+# J9 scores the stiff ladder at a matched cycle budget instead of a matched step
+# count. BUDGET_CYCLES is validation.BUDGET_CYCLES; test_ST26 holds them equal.
+BUDGET_CYCLES: int = 65536
+BUDGET_LADDER: tuple[tuple[int, int], ...] = ((1, 4), (1, 2), (1, 1), (2, 1), (4, 1))
+
+# J11 prices the analytic Jacobian against the finite difference.
+JACOBIAN_LADDER: tuple[int, ...] = (32, 64, 128)
+JACOBIAN_SAMPLE_STEPS: int = 1024      # fixed, so the sample state is a pure function of the code
+
+# J6 sweeps the Q15 error estimate over every validation problem at three scales.
+# Halving the scale halves the resolution of the state, so it should raise the LSB
+# floor, which is the scale dependence EPOCH2-DESIGN section 3 leaves open. The
+# tolerance ladder and the attempt cap belong to the prototype that measures them
+# (prototypes.adaptive_q15.TOL_LADDER_LSB and Q15_MAX_ATTEMPTS) rather than being
+# restated here, so the two cannot drift apart.
+Q15_SCALE_FACTORS: tuple[tuple[int, int], ...] = ((1, 1), (1, 2), (1, 4))
 
 
 def _divergence_bound(name: str) -> float:
@@ -699,6 +780,405 @@ def _run_newton_iters(params: dict) -> dict:
     }
 
 
+# ------------------------------------------------------------ J7 sdirk.gamma_a21_scan
+
+def _plan_gamma_a21_scan() -> list[tuple[str, dict]]:
+    return [(f"s{s:02d}_t{t:02d}", {"s": s, "t": t})
+            for s in WIDE_GAMMA_EXPONENTS for t in WIDE_A21_EXPONENTS]
+
+
+def _run_gamma_a21_scan(params: dict) -> dict:
+    """Both free parameters of the 2-stage SDIRK, over dyadics at two denominators.
+
+    What the a21 axis can and cannot move is settled algebra, not a hope: with A =
+    [[gamma, 0], [a21, gamma]] and b solved from the two order-2 conditions, the
+    numerator of R(z) is (1, 1 - 2*gamma, 1/2 - 2*gamma + gamma**2) and the
+    denominator is (1 - gamma*z)**2, both independent of a21. So |R(inf)|,
+    A-stability and L-stability belong to the gamma axis alone, and widening the
+    gamma window is the whole of this job's bearing on the NOT_L_STABLE threshold.
+    The a21 axis moves the two order-3 residuals, stiff accuracy, whether b is
+    exactly representable as m / 2**s, the CSD cost of applying it, and the
+    measured order. Those are what the rows record.
+    """
+    from rk_harness.coeffrep import to_rep
+    from rk_harness.prototypes.sdirk import (
+        GAMMA, a21_window, dyadic_window, order2_tableau_exact_a21, spec_from_exact,
+        stability_num)
+
+    s = int(params["s"])
+    t = int(params["t"])
+    gammas = dyadic_window(GAMMA, s, WIDE_GAMMA_WIDTH, WIDE_FULL_BELOW)
+    a21s = a21_window(t, WIDE_A21_WIDTH, WIDE_FULL_BELOW)
+
+    per_gamma: list[dict] = []
+    n_pairs = 0
+    n_stiffly_accurate = 0
+    n_b_exact = 0
+    best_residual = None
+    for gamma in gammas:
+        stab: dict | None = None
+        best_pair = None
+        for a21 in a21s:
+            try:
+                tab = order2_tableau_exact_a21(gamma, a21)
+            except ValueError:
+                continue
+            n_pairs += 1
+            if stab is None:
+                stab = tab
+            res3a, res3b = tab["order3_residuals"]
+            resid = abs(res3a) + abs(res3b)
+            r1, r2 = to_rep(tab["b"][0]), to_rep(tab["b"][1])
+            b_exact = bool(r1.exact and r2.exact)
+            if b_exact:
+                n_b_exact += 1
+            if tab["stiffly_accurate"]:
+                n_stiffly_accurate += 1
+            if best_residual is None or resid < best_residual:
+                best_residual = resid
+            cand = (resid, a21)
+            if best_pair is None or cand < best_pair[0]:
+                best_pair = (cand, {
+                    "a21": a21,
+                    "a21_float": float(a21),
+                    "b": list(tab["b"]),
+                    "c2": tab["c"][1],
+                    "b_exact": b_exact,
+                    "b_csd_weight": r1.csd_weight + r2.csd_weight,
+                    "order3_residuals": [res3a, res3b],
+                    "order3_residual_sum_float": float(resid),
+                    "stiffly_accurate": tab["stiffly_accurate"],
+                })
+        if stab is None or best_pair is None:
+            continue
+        if stab["num"] != stability_num(gamma):
+            raise AssertionError("stability numerator moved with a21")
+        per_gamma.append({
+            "gamma": gamma,
+            "gamma_float": float(gamma),
+            "num": list(stab["num"]),
+            "den": list(stab["den"]),
+            "r_at_infinity": stab["r_at_infinity"],
+            "r_at_infinity_float": float(stab["r_at_infinity"]),
+            "l_stable": stab["l_stable"],
+            "a_stable": stab["a_stable"],
+            "a_stable_exact": stab["a_stable_exact"],
+            "best_a21": best_pair[1],
+        })
+
+    # Rows kept: the WIDE_TOP_K gammas with the smallest |R(inf)|, ties by gamma
+    # ascending, each with the a21 that minimises the order-3 residual. A full dump
+    # of every pair would be about a megabyte per point against the 3 KB/day budget
+    # in SIDETRACK-AUTOMATION risk R3, so the cut is size control, not tidiness.
+    ranked = sorted(per_gamma, key=lambda g: (abs(g["r_at_infinity"]), g["gamma"]))
+    rows = []
+    for g in ranked[:WIDE_TOP_K]:
+        row = dict(g)
+        row["measured_order"] = _measured_order_dahlquist(
+            spec_from_exact({"gamma": g["gamma"], "a21": g["best_a21"]["a21"],
+                             "b": g["best_a21"]["b"],
+                             "c": (g["gamma"], g["best_a21"]["c2"])}))["order_estimate"]
+        rows.append(row)
+    rows.sort(key=lambda r: r["gamma"])
+
+    a_stable = [g for g in per_gamma if g["a_stable"]]
+    return {
+        "schema": "one row per kept gamma at this denominator exponent: the exact "
+                  "stability data, which belongs to gamma alone, and the a21 from the "
+                  "second axis with the smallest order-3 residual, with its b, the "
+                  "exactness and CSD weight of that b, stiff accuracy and the measured "
+                  "order on dahlquist",
+        "arithmetic": "tableau and stability algebra exact over Fractions; the measured "
+                      "order is float64",
+        "construction": "A = [[gamma, 0], [a21, gamma]], c is the row sum, b is solved "
+                        "from the two order-2 conditions, so b2 = (1/2 - gamma) / a21. "
+                        "The numerator of R(z) works out to (1, 1 - 2 gamma, 1/2 - 2 "
+                        "gamma + gamma^2) whatever a21 is, so |R(inf)|, A-stability and "
+                        "L-stability are functions of gamma alone. The a21 axis moves "
+                        "the order-3 residuals, stiff accuracy, the exactness of b, its "
+                        "CSD cost and the measured order.",
+        "gamma_denominator_exponent": s,
+        "a21_denominator_exponent": t,
+        "gamma_window": WIDE_GAMMA_WIDTH,
+        "a21_window": WIDE_A21_WIDTH,
+        "rows_kept": len(rows),
+        "rows": rows,
+        "summary": {
+            "pairs": n_pairs,
+            "gammas": len(per_gamma),
+            "a21_values": len(a21s),
+            "a_stable_gammas": len(a_stable),
+            "l_stable_gammas": sum(1 for g in per_gamma if g["l_stable"]),
+            "stiffly_accurate_pairs": n_stiffly_accurate,
+            "b_exact_pairs": n_b_exact,
+            "min_abs_r_inf": (float(min(abs(g["r_at_infinity"]) for g in per_gamma))
+                              if per_gamma else None),
+            "min_order3_residual": float(best_residual) if best_residual is not None else None,
+            "r_inf_a21_invariant": True,
+        },
+    }
+
+
+# ------------------------------------------------------------- J8 adaptive.pair_census
+
+def _plan_pair_census() -> list[tuple[str, dict]]:
+    return [(f"st{stages}_s{s_max}", {"stages": stages, "s_max": s_max})
+            for stages in CENSUS_STAGES for s_max in CENSUS_S_MAX]
+
+
+def _run_pair_census(params: dict) -> dict:
+    from rk_harness.prototypes.pair_census import census
+
+    stages = int(params["stages"])
+    s_max = int(params["s_max"])
+    doc = census(stages, s_max, CENSUS_CAP)
+    counts = doc.get("counts") or {}
+    return {
+        "schema": "counts over every strictly lower-triangular dyadic A at this stage "
+                  "count and lattice size: how many admit an order-3 weight vector, how "
+                  "many admit an order-2 vector with a free column left (so that the "
+                  "embedded estimate is not forced to zero), how many are FSAL, and how "
+                  "many have an exactly representable order-2 vector. A space larger "
+                  "than the cap is reported rather than walked.",
+        "arithmetic": "exact over Fractions; no float and no Q15 arithmetic is involved",
+        "lattice": f"m / 2**s with s <= {s_max} and 0 < |m / 2**s| <= 1 "
+                   f"(enumeration.lattice, abs_max 1)",
+        "definitions": {
+            "b_hat_free": "the order-2 system is solvable and leaves at least one free "
+                          "column, so an embedded b_hat exists that differs from b",
+            "d_forced_zero": "order 3 and order 2 are both solvable but order 2 has a "
+                             "unique solution, so d = b - b_hat can only be zero",
+            "fsal": "c ends at 1 and the last row of A satisfies the order-3 conditions, "
+                    "which is what makes the last stage of an accepted step reusable",
+            "b_hat_exact": "every entry of the order-2 solution with free columns set to "
+                           "zero is exactly m / 2**s under coeffrep.to_rep",
+        },
+        "stages": doc["stages"],
+        "s_max": doc["s_max"],
+        "lattice_size": doc["lattice_size"],
+        "free_entries": doc["free_entries"],
+        "space_size": doc["space_size"],
+        "cap": doc["cap"],
+        "fsal_examples": doc["fsal_examples"],
+        "status": doc["status"],
+        "counts": counts,
+        "summary": {
+            "status": doc["status"],
+            "space_size": doc["space_size"],
+            "matrices": counts.get("matrices", 0),
+            "both_solvable": counts.get("both_solvable"),
+            "b_hat_free": counts.get("b_hat_free"),
+            "d_forced_zero": counts.get("d_forced_zero"),
+            "fsal": counts.get("fsal"),
+            "b_hat_exact": counts.get("b_hat_exact"),
+        },
+    }
+
+
+# ------------------------------------------------------- J9 sdirk.stiff_suite_budget
+
+def _plan_stiff_budget() -> list[tuple[str, dict]]:
+    return [(name, {"problem": name}) for name in STIFF_NAMES]
+
+
+def _run_stiff_budget(params: dict) -> dict:
+    """The stiff ladder at a matched cycle budget rather than a matched step count.
+
+    J3 runs every method over the same 8..256 steps, which flatters the implicit
+    method: at equal step counts it is simply paying more. The harness scores at a
+    fixed cycle budget, where a cheap explicit method gets thousands of steps for
+    the same money, so the ladder here is each method's own step count at
+    BUDGET_CYCLES and four neighbours of it.
+    """
+    from rk_harness.costmodel import M0PLUS_FAST, cycle_count
+    from rk_harness.prototypes.sdirk import estimate_sdirk2_cycles
+    from rk_harness.simulate import steps_for_budget
+    from rk_harness.tableau import classical
+    from rk_harness import validation as V
+
+    name = str(params["problem"])
+    bound = _divergence_bound(name)
+    n_states = V.PROBLEMS[name].n_states
+    cl = classical()
+    methods: dict[str, dict] = {}
+    for m in STIFF_METHODS + ("sdirk2",):
+        if m == "sdirk2":
+            est = estimate_sdirk2_cycles(n_states, M0PLUS_FAST, fd=True)
+            per_step, fev = est["total"], est["f_evals_per_step"]
+            n_budget = BUDGET_CYCLES // per_step
+        else:
+            per_step = cycle_count(cl[m], M0PLUS_FAST, n_states)
+            fev = len(cl[m].b)
+            n_budget = steps_for_budget(cl[m], M0PLUS_FAST, n_states, BUDGET_CYCLES)
+        ladder = sorted({max(1, n_budget * num // den) for num, den in BUDGET_LADDER})
+        rows = [_fixed_step_row(m, name, n, bound) for n in ladder]
+        for r in rows:
+            r["analytic_cycles"] = r["n"] * per_step
+        at_budget = next((r for r in rows if r["n"] == max(1, n_budget)), None)
+        methods[m] = {
+            "est_cycles_per_step": per_step,
+            "f_evals_per_step": fev,
+            "steps_at_budget": n_budget,
+            "error_at_budget": at_budget["error"] if at_budget else None,
+            "status_at_budget": at_budget["status"] if at_budget else None,
+            "ladder": ladder,
+            "points": rows,
+        }
+    finishers = sorted(m for m, d in methods.items() if d["error_at_budget"] is not None)
+    return {
+        "schema": "per method, the step count that BUDGET_CYCLES buys on this problem, "
+                  "the error there, and a ladder of a quarter, a half, one, two and four "
+                  "times that count with the analytic cycles each rung would cost; a "
+                  "diverged rung is a result, not a gap",
+        "arithmetic": "float64 only; no Q15 effects are included",
+        "note": "cycle estimates exclude rhs and Jacobian evaluations, matching "
+                "costmodel.cycle_count; SDIRK2 is priced with a finite-difference "
+                "Jacobian because that is how every other side-track SDIRK number is "
+                "costed. The budget is not read from any results file: an artifact that "
+                "depended on host state would stop being reproducible.",
+        "problem": name,
+        "stiffness_ratio": V.STIFFNESS_RATIO.get(name),
+        "n_states": n_states,
+        "budget_cycles": BUDGET_CYCLES,
+        "budget_ladder": [f"{num}/{den}" for num, den in BUDGET_LADDER],
+        "divergence_bound": bound,
+        "methods": methods,
+        "summary": {
+            "budget_cycles": BUDGET_CYCLES,
+            "steps_at_budget": {m: d["steps_at_budget"] for m, d in methods.items()},
+            "error_at_budget": {m: d["error_at_budget"] for m, d in methods.items()},
+            "finishers_at_budget": finishers,
+            "sdirk2_error_at_budget": methods["sdirk2"]["error_at_budget"],
+        },
+    }
+
+
+# ---------------------------------------------------------- J11 sdirk.jacobian_cost
+
+def _plan_jacobian_cost() -> list[tuple[str, dict]]:
+    return [(name, {"problem": name}) for name in STIFF_NAMES]
+
+
+def _run_jacobian_cost(params: dict) -> dict:
+    """What the optional analytic Jacobian is worth, in cycles and in error.
+
+    validation.ANALYTIC_JACOBIAN is unpinned and sits outside SIDETRACK_FILES, so
+    a constant moving there would not re-open these points. The artifact records
+    both sampled matrices in full instead: if a coefficient in validation.py moves,
+    the recorded numbers stop matching a re-derivation and the discrepancy is
+    visible. That is a weaker guarantee than hashing and is not a substitute for it.
+    """
+    from rk_harness.costmodel import M0PLUS_FAST
+    from rk_harness.prototypes.sdirk import (
+        DEFAULT_SPEC, estimate_sdirk2_cycles, fd_jacobian, solve_sdirk2)
+    from rk_harness.simulate import float_tableau, rk_step_float
+    from rk_harness.tableau import classical
+    from rk_harness import validation as V
+
+    name = str(params["problem"])
+    jac = V.ANALYTIC_JACOBIAN[name]
+    rhs = V.FLOAT_RHS[name]
+    y0 = V.Y0_PHYS[name]
+    t_end = V.PROBLEMS[name].t_end
+    n_states = V.PROBLEMS[name].n_states
+    bound = _divergence_bound(name)
+
+    # Sample state at t_end / 2: float RK4 at a fixed step count, so the sample is a
+    # pure function of this code and never of a stored trajectory.
+    A, b, c = float_tableau(classical()["rk4"])
+    h = (t_end / 2.0) / JACOBIAN_SAMPLE_STEPS
+    y_mid = tuple(float(v) for v in y0)
+    for k in range(JACOBIAN_SAMPLE_STEPS):
+        y_mid = rk_step_float(A, b, c, rhs, k * h, y_mid, h)
+
+    samples = []
+    for label, tt, yy in (("t0", 0.0, tuple(float(v) for v in y0)),
+                          ("t_end_half", t_end / 2.0, y_mid)):
+        exact = jac(tt, yy)
+        approx = fd_jacobian(rhs, tt, yy)
+        diffs = [abs(exact[i][j] - approx[i][j])
+                 for i in range(n_states) for j in range(n_states)]
+        rels = [abs(exact[i][j] - approx[i][j]) / max(1.0, abs(exact[i][j]))
+                for i in range(n_states) for j in range(n_states)]
+        samples.append({
+            "at": label,
+            "t": tt,
+            "y": list(yy),
+            "analytic": [list(row) for row in exact],
+            "finite_difference": [list(row) for row in approx],
+            "max_abs_diff": max(diffs) if diffs else 0.0,
+            "max_rel_diff": max(rels) if rels else 0.0,
+        })
+
+    ladder = []
+    for n in JACOBIAN_LADDER:
+        row: dict = {"n": n}
+        for label, j in (("analytic", jac), ("finite_difference", None)):
+            try:
+                y = solve_sdirk2(rhs, y0, t_end, n, jac=j, spec=DEFAULT_SPEC,
+                                 diverge_at=bound)
+                err = V.validation_error(name, y)
+                row[label] = err if math.isfinite(err) else None
+                row[f"{label}_status"] = "ok" if math.isfinite(err) else "diverged"
+            except (OverflowError, ZeroDivisionError, ValueError):
+                row[label] = None
+                row[f"{label}_status"] = "diverged"
+        ladder.append(row)
+
+    est_fd = estimate_sdirk2_cycles(n_states, M0PLUS_FAST, fd=True)
+    est_an = estimate_sdirk2_cycles(n_states, M0PLUS_FAST, fd=False)
+    errs_an = [r["analytic"] for r in ladder if r["analytic"] is not None]
+    errs_fd = [r["finite_difference"] for r in ladder if r["finite_difference"] is not None]
+    return {
+        "schema": "the analytic Jacobian and the one-sided finite difference, sampled as "
+                  "whole matrices at two fixed states, then the same fixed-step SDIRK2 run "
+                  "with each of them at three step counts, plus the per-step cycle "
+                  "estimate under both",
+        "arithmetic": "float64 only; no Q15 effects are included",
+        "note": "the analytic Jacobian evaluation is excluded from the cycle count by the "
+                "same convention costmodel.cycle_count uses for rhs evaluations, since "
+                "both are application-supplied code. The reported saving is therefore the "
+                "finite-difference assembly arithmetic plus the n extra rhs evaluations "
+                "per step that assembly needs.",
+        "problem": name,
+        "n_states": n_states,
+        "sample_steps": JACOBIAN_SAMPLE_STEPS,
+        "samples": samples,
+        "ladder": ladder,
+        "cycles": {
+            "finite_difference": est_fd,
+            "analytic": est_an,
+            "difference": est_fd["total"] - est_an["total"],
+            "f_evals_per_step_finite_difference": est_fd["f_evals_per_step"],
+            "f_evals_per_step_analytic": est_an["f_evals_per_step"],
+        },
+        "summary": {
+            "max_abs_diff": max(s["max_abs_diff"] for s in samples),
+            "max_rel_diff": max(s["max_rel_diff"] for s in samples),
+            "cycles_finite_difference": est_fd["total"],
+            "cycles_analytic": est_an["total"],
+            "cycles_saved": est_fd["total"] - est_an["total"],
+            "f_evals_saved": est_fd["f_evals_per_step"] - est_an["f_evals_per_step"],
+            "best_error_analytic": min(errs_an, default=None),
+            "best_error_finite_difference": min(errs_fd, default=None),
+        },
+    }
+
+
+# ------------------------------------------------- J6 adaptive.q15_estimate_floor
+
+def _plan_q15_estimate_floor() -> list[tuple[str, dict]]:
+    return [(f"{name}_s{den}", {"problem": name, "scale_factor": [num, den]})
+            for name in VALIDATION_NAMES for num, den in Q15_SCALE_FACTORS]
+
+
+def _run_q15_estimate_floor(params: dict) -> dict:
+    from rk_harness.prototypes.adaptive_q15 import build_point
+
+    num, den = params["scale_factor"]
+    return build_point(str(params["problem"]), (int(num), int(den)))
+
+
 # --------------------------------------------------------------------------- registry
 
 JOBS: tuple[Job, ...] = (
@@ -721,6 +1201,28 @@ JOBS: tuple[Job, ...] = (
     Job("sdirk.newton_iters", "implicit",
         "EPOCH3-DESIGN: three Newton iterations is the prototype's setting, not a ruling",
         _plan_newton_iters, _run_newton_iters),
+    Job("sdirk.gamma_a21_scan", "implicit",
+        "EPOCH3-DESIGN: the L-stability window in J4 is 17 candidates wide and nothing "
+        "pins that width, and the second free parameter of the 2-stage SDIRK is never varied",
+        _plan_gamma_a21_scan, _run_gamma_a21_scan),
+    Job("adaptive.pair_census", "adaptive",
+        "EPOCH2-DESIGN section 2: the search-space note assumes a dyadic A admits both an "
+        "order-p b and an order-(p-1) b_hat with a free parameter left, and that has not "
+        "been counted",
+        _plan_pair_census, _run_pair_census),
+    Job("sdirk.stiff_suite_budget", "implicit",
+        "EPOCH3-DESIGN: the stiff ladder in J3 stops at 256 steps while the harness scores "
+        "at a matched cycle budget, where the cheap explicit methods take thousands of steps",
+        _plan_stiff_budget, _run_stiff_budget),
+    Job("sdirk.jacobian_cost", "implicit",
+        "EPOCH3-DESIGN: the optional analytic Jacobian field is unpriced because every "
+        "side-track SDIRK number is costed with the finite difference",
+        _plan_jacobian_cost, _run_jacobian_cost),
+    Job("adaptive.q15_estimate_floor", "adaptive",
+        "EPOCH2-DESIGN section 3: the roughly 2 LSB floor-bias figure for the Q15 error "
+        "estimate is an estimate, and section 5 needs the scored tolerance ladder to sit "
+        "above whatever that floor turns out to be",
+        _plan_q15_estimate_floor, _run_q15_estimate_floor),
 )
 
 JOBS_BY_NAME: dict[str, Job] = {j.name: j for j in JOBS}

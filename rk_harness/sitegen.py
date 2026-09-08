@@ -185,7 +185,7 @@ details.led{background:var(--surface-1);border:1px solid var(--line);border-radi
 details.led>summary{cursor:pointer;list-style:none;font-variant-numeric:tabular-nums}
 details.led>summary::-webkit-details-marker{display:none}
 details.led>summary::before{content:"+";color:var(--text-3);font-weight:600}
-details.led[open]>summary::before{content:"\2212"}
+details.led[open]>summary::before{content:"\\2212"}
 details.led[open]>summary{border-bottom:1px solid var(--line)}
 details.led>div{padding:10px 16px 12px 40px}
 details.led .pred{font:12px ui-monospace,Consolas,monospace;color:var(--text-2);
