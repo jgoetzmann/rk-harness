@@ -168,7 +168,7 @@ def suite_check(item_id: str, results: dict[str, str], test_ids: list[str], note
 
 def section_0(results):
     R.section = "0"
-    from rk_harness import evaluator, verifier, costmodel, coeffrep, tableau, runner, ledger, sitegen, dashboard
+    from rk_harness import evaluator, verifier, costmodel, coeffrep, tableau, runner, ledger, sitegen
     ct = tableau.classical()
     mo, pts = evaluator.measured_order_with_points(ct["rk4"])
     R.check("0.1", abs(mo - 4.0) <= 0.10 and pts == 3 and abs(mo - 4.0706) < 5e-4,
@@ -205,7 +205,6 @@ def section_0(results):
         runner: ["run_cycle", "heartbeat", "load_state", "save_state"],
         ledger: ["parse_predicate", "evaluate_predicate", "append_hypothesis", "resolve_open"],
         sitegen: ["build", "BANNED_WORDS"],
-        dashboard: ["render"],
     }
     missing = [f"{m.__name__.split('.')[-1]}.{n}" for m, ns in expect.items() for n in ns if not hasattr(m, n)]
     R.check("0.8", not missing, f"§4.12 names present; missing: {missing or 'none'}")

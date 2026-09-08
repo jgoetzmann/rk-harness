@@ -7,8 +7,9 @@ Evaluates, on the seven frozen scored problems from ``rk_harness.problems``:
   scale``, one Q15 least significant bit, the atol expressed in physical units),
 * a hand-rolled float64 fixed-step rk4 at the step counts the 65,536-cycle
   budget implies for each Q15 method,
-* the Q15 champion methods and classical rk4 through the pinned ``solve_q15``
-  machinery, with tableaus fetched from ``rk-work/validation/results.json``
+* the Q15 champion methods and every classical anchor (euler, heun2,
+  midpoint, rk4, rk38) through the pinned ``solve_q15`` machinery, with
+  tableaus fetched from ``rk-work/validation/results.json``
   ``methods[].tableau`` (exact fraction strings; discovered hashes re-verified
   against ``tableau.content_hash``).
 
@@ -63,6 +64,7 @@ from pathlib import Path
 
 import numpy as np
 
+from rk_harness.coeffmem import coefficient_memory
 from rk_harness.costmodel import M0PLUS_FAST, cycle_count
 from rk_harness.paths import work_dir
 from rk_harness.problems import DERIV_SCALE, FLOAT_RHS, PROBLEMS, error_metric, load_fixture
@@ -130,16 +132,20 @@ def load_validation_doc(path: Path | str | None = None) -> dict:
 
 
 def select_benchmark_methods(doc: dict) -> list[dict]:
-    """Classical rk4 plus every discovered method from a validation results
-    document. Tableaus are parsed from the exact fraction strings; a discovered
-    entry whose content hash disagrees with its recorded name is a provenance
-    failure and raises ValueError."""
+    """Every method in a validation results document: all of its classical
+    anchors plus every discovered method. Tableaus are parsed from the exact
+    fraction strings; a discovered entry whose content hash disagrees with its
+    recorded name is a provenance failure and raises ValueError.
+
+    The classical set used to be narrowed to rk4 alone, which left the
+    trade-offs matrix with four measured rows and five dashes. euler, heun2,
+    midpoint and rk38 are already carried by the validation document with
+    verified tableaus, so benchmarking them costs only host time and fills
+    the cheap end of the cycle range the correlation is fitted over."""
     out: list[dict] = []
     for m in doc["methods"]:
         name = m["name_or_hash"]
         kind = m["kind"]
-        if kind == "classical" and name != "rk4":
-            continue
         t = from_json(m["tableau"])
         if kind == "discovered" and content_hash(t) != name:
             raise ValueError(
@@ -393,21 +399,34 @@ def _geomean(vals: list[float]):
 def per_method_us_per_step(fixed_rows: list[dict]) -> dict:
     """Absolute measured time per method: median microseconds per step across
     the problems whose Q15 run finished, plus the per-problem values, so a
-    site can chart measured time directly."""
+    site can chart measured time directly.
+
+    min/max carry the problem-to-problem spread; median_relative_iqr carries
+    the repeat-to-repeat spread, the median over the same problems of
+    iqr_s / median_s. The two answer different questions and a reader who has
+    only the min-max range cannot tell a method that is genuinely cheaper on
+    one problem from a machine that was noisy while it was timed."""
     per: dict[str, dict[str, float]] = {}
+    rel_iqr: dict[str, list[float]] = {}
     for r in fixed_rows:
         q = r["q15"]
         if q.get("status") == "ok" and "per_step_median_s" in q:
             per.setdefault(r["method"], {})[r["problem"]] = round(
                 q["per_step_median_s"] * 1e6, 3)
+            tm = q["timing"]
+            if tm["median_s"] > 0:
+                rel_iqr.setdefault(r["method"], []).append(
+                    tm["iqr_s"] / tm["median_s"])
     out: dict[str, dict] = {}
     for m, vals in per.items():
         us = sorted(vals.values())
+        spread = rel_iqr.get(m, [])
         out[m] = {
             "per_problem_us_per_step": vals,
             "median_us_per_step": _fin(statistics.median(us)),
             "min_us_per_step": us[0],
             "max_us_per_step": us[-1],
+            "median_relative_iqr": _fin(statistics.median(spread)) if spread else None,
             "n_problems": len(us),
         }
     return out
@@ -663,11 +682,17 @@ _SCHEMA_DOC: dict[str, str] = {
                        "(quartile 3 minus quartile 1), min_s, n and warmup",
     "problems": "the seven frozen scored problems: name, n_states, t_end, "
                 "scale, deriv_scale, family, peak, and the matched rtol/atol",
-    "methods": "fixed-step methods under benchmark: classical rk4 plus every "
-               "discovered method from the validation document, with kind, "
-               "roles, order, stages, tableau (exact fraction strings), "
-               "cycles_per_step and steps per problem, and archive provenance "
-               "for discovered entries",
+    "methods": "fixed-step methods under benchmark: the classical anchors "
+               "plus every discovered method from the validation document, "
+               "with kind, roles, order, stages, tableau (exact fraction "
+               "strings), cycles_per_step and steps per problem, and archive "
+               "provenance for discovered entries; coefficient_memory holds "
+               "the int16 constant words a tableau would need if every "
+               "non-trivial entry of A and b were held in a table (words, "
+               "bytes = 2 * words, max_shift, entries, trivial), which is an "
+               "upper bound on such a table and not a measurement of the "
+               "reference C, since costmodel.emit_c inlines the mantissa and "
+               "the shift as literals and builds no table at all",
     "adaptive_results": "table 1, one row per (scipy integrator, problem): "
                         "accuracy at matched tolerance with wall clock. Fields: "
                         "rtol, atol, status ok|failed|skipped (reason on "
@@ -698,7 +723,12 @@ _SCHEMA_DOC: dict[str, str] = {
                "geometric-mean measured and predicted speedups, the count of "
                "problems where the champion error is lower, and "
                "per_method_us_per_step (median measured microseconds per step "
-               "per method across problems) for direct charting",
+               "per method across problems, with the problem-to-problem "
+               "min-max range and median_relative_iqr, the median over that "
+               "method's finished problems of the timing iqr_s divided by "
+               "median_s, which is the repeat-to-repeat spread of the clock "
+               "rather than a difference between problems) for direct "
+               "charting",
     "verdicts": "per_problem best library and best Q15 entries with error "
                 "ratios, the two median ratios, and honest prose for the "
                 "matched-tolerance table, the fixed-step table, the cycle "
@@ -763,6 +793,7 @@ def build_results(validation_doc: dict | None = None,
                 name: steps_for_budget(t, COST_MODEL, PROBLEMS[name].n_states,
                                        BUDGET_CYCLES)
                 for name in PROBLEM_NAMES},
+            "coefficient_memory": coefficient_memory(t),
         }
         if "archive" in m:
             entry["archive"] = m["archive"]
@@ -865,9 +896,26 @@ def validate_results(doc: dict) -> None:
     for m in doc["methods"]:
         if m["kind"] not in ("classical", "discovered"):
             fail(f"method {m['name_or_hash']!r} has bad kind {m['kind']!r}")
-        for k in ("roles", "order", "stages", "tableau", "cycles_per_step", "steps"):
+        for k in ("roles", "order", "stages", "tableau", "cycles_per_step",
+                  "steps", "coefficient_memory"):
             if k not in m:
                 fail(f"method {m['name_or_hash']!r} missing {k!r}")
+        cm = m["coefficient_memory"]
+        for k in ("words", "bytes", "max_shift", "entries", "trivial"):
+            if k not in cm:
+                fail(f"method {m['name_or_hash']!r} coefficient_memory missing {k!r}")
+        if not (isinstance(cm["words"], int) and cm["words"] >= 0):
+            fail(f"method {m['name_or_hash']!r} coefficient_memory words "
+                 "must be a non-negative integer")
+        if cm["bytes"] != 2 * cm["words"]:
+            fail(f"method {m['name_or_hash']!r} coefficient_memory bytes "
+                 "must be 2 * words")
+        if cm["entries"] < cm["words"]:
+            fail(f"method {m['name_or_hash']!r} coefficient_memory entries "
+                 "below words")
+        if cm["max_shift"] < 0:
+            fail(f"method {m['name_or_hash']!r} coefficient_memory max_shift "
+                 "must be non-negative")
         t = from_json(m["tableau"])
         if m["kind"] == "discovered" and content_hash(t) != m["name_or_hash"]:
             fail(f"method {m['name_or_hash']!r} tableau hash mismatch")
@@ -1021,6 +1069,15 @@ def validate_results(doc: dict) -> None:
         if not math.isclose(s["median_us_per_step"], statistics.median(vals),
                             rel_tol=1e-9):
             fail(f"per_method_us_per_step {m!r} median inconsistent")
+        if "median_relative_iqr" not in s:
+            fail(f"per_method_us_per_step {m!r} missing median_relative_iqr")
+        riqr = s["median_relative_iqr"]
+        # null when no row carried a usable spread. A number that is not available says
+        # so rather than reporting 0.0, which would read as perfectly repeatable timing.
+        if riqr is not None and not (isinstance(riqr, (int, float))
+                                     and math.isfinite(riqr) and riqr >= 0):
+            fail(f"per_method_us_per_step {m!r} median_relative_iqr must be "
+                 "null or finite and non-negative")
 
     v = doc["verdicts"]
     for k in ("per_problem", "matched_tolerance", "fixed_step", "cycle_model",

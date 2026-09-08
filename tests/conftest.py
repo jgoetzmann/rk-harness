@@ -17,4 +17,7 @@ def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("RK_LLM", "off")
     monkeypatch.delenv("RK_CLOCK", raising=False)
     monkeypatch.delenv("RK_PHASE", raising=False)
+    from rk_harness import archive
+    archive.clear_cache()
     yield
+    archive.clear_cache()

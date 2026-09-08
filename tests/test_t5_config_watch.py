@@ -364,3 +364,79 @@ def test_C22_every_codex_gate_names_itself_when_it_suppresses(tmp_path, monkeypa
         if e.get("kind") == "llm_skipped":
             assert e["reason"] == "plan usage cap"
             assert e["used_percent"] == 95.0 and e["cap_percent"] == 80.0
+
+
+def _watch_events_file(work: Path) -> None:
+    """One of each kind the scoped rows count: a cycle, an accepted, a rejected, an LLM
+    call and an abandoned cycle."""
+    lines = [
+        {"ts": "2026-09-21T10:00:00Z", "kind": "cycle_done", "cycle_id": 1, "phase": 2,
+         "improved": False, "stall_counter": 1, "accepted": 1, "rejected": 1,
+         "spend_usd": 0.0, "cap_usd": 50.0},
+        {"ts": "2026-09-21T10:00:01Z", "kind": "accepted", "tableau_hash": "a" * 8, "cycle_id": 1},
+        {"ts": "2026-09-21T10:00:02Z", "kind": "rejected", "code": "ORDER_NOT_MET", "tableau_hash": "b" * 8},
+        {"ts": "2026-09-21T10:00:03Z", "kind": "llm_call", "cycle_id": 1, "cost_usd": 0.0},
+        {"ts": "2026-09-21T10:00:04Z", "kind": "cycle_abandoned", "cycle_id": 1, "error": "boom"},
+    ]
+    (work / "events.jsonl").write_text(
+        "".join(json.dumps(d) + chr(10) for d in lines), encoding="utf-8")
+
+
+def _watch_module(tmp_path, monkeypatch, work: Path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"watcher": {"refresh_seconds": 5, "events_tail": 10}}), encoding="utf-8")
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    monkeypatch.setenv("RK_CONFIG", str(cfg))
+    from rk_harness import watch
+    monkeypatch.setattr(watch, "docker_info", lambda name="rk": {"status": "absent"})
+    monkeypatch.setattr(watch, "watchdog_running", lambda: None)
+    monkeypatch.setattr(watch, "last_push_time", lambda repo: "n/a")
+    return watch
+
+
+def _line_with(text: str, needle: str) -> str:
+    for line in text.splitlines():
+        if needle in line:
+            return line
+    raise AssertionError(f"no line containing {needle!r}")
+
+
+def test_C23_tail_derived_counts_name_their_window(tmp_path, monkeypatch):
+    """events.jsonl has no rotation and the view reads its tail, so a count taken from it
+    is a run total only when the tail is the whole file. Every such row says which."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _watch_events_file(work)
+    watch = _watch_module(tmp_path, monkeypatch, work)
+
+    events, truncated = watch.load_events()
+    assert len(events) == 5 and truncated is False
+    assert watch._scope(truncated, events) == "this run"
+
+    text = watch.render_once(width=200)
+    assert "(this archive)" not in text
+    assert "this run" in _line_with(text, "cycles done")
+    assert "total" not in _line_with(text, "directive calls")
+    assert "this run" in _line_with(text, "directive calls")
+    assert "this run" in _line_with(text, "abandoned cycles")
+
+    # a tail smaller than the file: every one of those counts now names its window
+    monkeypatch.setattr(watch, "EVENTS_TAIL_BYTES", 200)
+    events, truncated = watch.load_events()
+    assert truncated is True and len(events) < 5
+    text = watch.render_once(width=200)
+    assert "this run" not in text
+    assert "since " in _line_with(text, "cycles done")
+
+
+def test_C24_progress_panel_shows_the_heldout_gap_and_surrogate_state(tmp_path, monkeypatch):
+    """The two rows that dashboard.py was the only live display of. DESIGN calls the
+    held-out gap a first-class metric, so it belongs on the view that actually runs."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _watch_events_file(work)
+    watch = _watch_module(tmp_path, monkeypatch, work)
+    text = watch.render_once(width=200)
+    assert "heldout gap" in text
+    assert "mean heldout - search over elites" in text
+    assert "need 5000, have 0" in _line_with(text, "surrogate")

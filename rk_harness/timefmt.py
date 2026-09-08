@@ -2,7 +2,7 @@
 
 Storage stays UTC everywhere (archive records, events, HEARTBEAT: the watchdog's
 staleness math and archive determinism depend on it). This module is the one place
-that converts for human-facing display: watch panels, the dashboard, and site pages.
+that converts for human-facing display: the watch panels, stats.txt and site pages.
 
 Uses the real America/Chicago zone when the tz database is available (it is in the
 container; on the host it needs the tzdata wheel). Falls back to a built-in tzinfo

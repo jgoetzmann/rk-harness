@@ -407,7 +407,7 @@ fixed-point behaviour, V1-V11 verifier verdicts, C1-C10 cost model properties,
 K1-K16 anti-gaming canaries, R1-R5 crash recovery, and E1-E7 end-to-end properties
 including byte-identical same-seed runs. K1 plants a tableau tuned to the search set
 and bad on the held-out set and requires it to tier as search_only; it is the check
-that catches the whole project silently overfitting while its dashboard looks
+that catches the whole project silently overfitting while its live view looks
 healthy<sup class="meth-cite"><a href="#meth-ref-17">[17]</a></sup>.</p>
 
 <p>The pytest suite is organised in numbered tier files that mirror the dependency

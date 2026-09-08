@@ -25,7 +25,7 @@ VERIFIER_HASH          pinned sha256 over the ten verifier files (HANDOFF §4.11
 .venv\Scripts\python.exe -m rk_harness.falsification       # HANDOFF §15 experiment
 $env:RK_WORK_DIR="..\rk-work"; $env:RK_FINDINGS_DIR="..\rk-findings"
 .venv\Scripts\python.exe -m rk_harness.runner --cycles 1   # one cycle
-.venv\Scripts\python.exe -m rk_harness.dashboard           # read-only TUI
+.venv\Scripts\python.exe -m rk_harness.watch               # read-only live view
 ```
 
 The full suite runs in CI (`.github/workflows/ci.yml`), which is where it belongs: locally it
@@ -60,7 +60,7 @@ cd D:\Programming-Projects\Integration-Harness\rk-harness
 
 Watch it: `docker logs -f rk` (entrypoint prints the hash check and the golden gate, then
 the runner is quiet — the event stream is `rk-work\events.jsonl`), or the TUI
-`$env:RK_WORK_DIR="D:/Programming-Projects/Integration-Harness/rk-work"; .venv\Scripts\python.exe -m rk_harness.dashboard`.
+`$env:RK_WORK_DIR="D:/Programming-Projects/Integration-Harness/rk-work"; .venv\Scripts\python.exe -m rk_harness.watch`.
 The site is regenerated every cycle into `rk-findings\docs` and appears at
 https://jgoetzmann.github.io/rk-findings/ a few minutes after the watchdog pushes.
 

@@ -569,6 +569,8 @@ _WORK_EXTRA_PATHS: tuple[str, ...] = (
     "sidetrack",
     "validation",
     "benchmark",
+    "secondpass",
+    "stiffscreen",
 )
 
 
@@ -896,6 +898,18 @@ def _run_cycle(state: RunState) -> RunState:
     if n:
         log_event("baselines_seeded", count=n, verifier_hash=vh)
         arch = archive.replay()
+    # The replay above reads a checkpoint over the closed daily files when one matches them
+    # exactly. A rejection is logged because it means the cycle paid for a full pass, and a
+    # checkpoint that keeps being rejected is a fault rather than a slow day.
+    rep = archive.last_checkpoint_report()
+    if not rep.get("used") and rep.get("reason") != "absent":
+        log_event("archive_checkpoint_rejected", **rep)
+    # Written here, at the start of a cycle, because a checkpoint may only summarise files
+    # that are closed: nothing has been appended yet, so today's file is still empty.
+    if archive.maybe_write_checkpoint(arch, vh) is None:
+        log_event("archive_checkpoint_written",
+                  covered_files=archive.last_checkpoint_write().get("covered_files"),
+                  n_records=arch.n_records)
 
     # 2. encourager
     action = encourager.next_action(state, arch, now())

@@ -1,4 +1,4 @@
-"""T4 — ledger, quarantine, runner, archive recovery, site generator, dashboard.
+"""T4 — ledger, quarantine, runner, archive recovery, and the site generator.
 
 Written from .fullsend/SPEC.md and .fullsend/HANDOFF.md only; no implementation was
 read. Every test name carries the behaviour ID it arbitrates. Tests that call
@@ -20,7 +20,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
-from rich.layout import Layout
 
 from rk_harness.ledger import (
     PredicateSyntaxError, Predicate, Term, Field, parse_predicate, evaluate_predicate,
@@ -40,7 +39,6 @@ from rk_harness.sitegen import (
     render_literature, render_interpretation, render_validation, render_benchmark,
     check_banned, epoch_status_data,
 )
-from rk_harness.dashboard import read_events, build_layout, render
 from rk_harness.tableau import make_tableau, content_hash
 from rk_harness.types import (
     Tableau, ScoreVector, Record, ArchiveState, RunState, CellStat, TIERS,
@@ -2223,60 +2221,40 @@ def test_B62_different_archives_give_different_indexes(monkeypatch, tmp_path):
 
 
 # ======================================================================================
-# Dashboard — B63
+# Runner: the archive checkpoint - R6
 # ======================================================================================
 
-def test_B63_build_layout_returns_rich_layout(monkeypatch, tmp_path):
-    _work, arch = _site_archive(monkeypatch, tmp_path)
-    layout = build_layout(arch, _runstate())
-    assert isinstance(layout, Layout)
-    layout2 = build_layout(_empty_arch(), _runstate(phase=2, current_cell=(4, 2), stall_counter=12))
-    assert isinstance(layout2, Layout)
+def test_R6_the_cycle_writes_a_checkpoint_once_a_day_has_closed(monkeypatch, tmp_path):
+    """One checkpoint per closed day, written at the start of a cycle while the current
+    day file is still empty, and nothing written or logged on the next cycle that day."""
+    work = _setup_env(monkeypatch, tmp_path, phase="0", clock="2026-12-04T10:00:00Z")
+    for r in _site_records():
+        append(r)
+    monkeypatch.setenv("RK_CLOCK", "2026-12-05T10:00:00Z")
+    c = _classical_8()
+    append(_rec(c["heun3"], _sv(23, 50, 0.007, 0.008, 3.0), "unreplicated", 4, None))
+    # the freeze date, so the cycle stops at the encourager instead of searching
+    monkeypatch.setenv("RK_CLOCK", "2026-12-06T10:00:00Z")
+    monkeypatch.setattr("rk_harness.runner.seed_baselines", lambda vh, known=(): 0)
+    assert sorted(p.name for p in archive_dir().glob("*.jsonl")) == ["2026-12-04.jsonl", "2026-12-05.jsonl"]
 
+    run_cycle(_runstate(cycle_id=5, phase=0))
+    ckpt = work / "ARCHIVE_CHECKPOINT.json"
+    assert ckpt.is_file()
+    events = _read_jsonl(work / "events.jsonl")
+    written = [e for e in events if e.get("kind") == "archive_checkpoint_written"]
+    assert len(written) == 1
+    assert written[0]["covered_files"] == 2
+    assert written[0]["n_records"] == 4
+    assert [e for e in events if e.get("kind") == "archive_checkpoint_rejected"] == []
+    assert any(e.get("kind") == "frozen" for e in events)
+    stamp = ckpt.stat().st_mtime_ns
 
-def test_B63_render_prints_and_writes_nothing(monkeypatch, tmp_path, capsys):
-    work, arch = _site_archive(monkeypatch, tmp_path)
-    for i in range(3):
-        log_event("rejected", code="ORDER_NOT_MET", tableau_hash=f"h{i}")
-    save_state(_runstate())
-    before = _snapshot(work)
-    assert before  # archive + events + runstate exist
-
-    render(arch, _runstate(phase=0))
-    out = capsys.readouterr().out
-    assert out.strip() != ""
-    assert re.search(r"\d+\s*/\s*16", out), "phase 0 candidates panel must show visited/16"
-    assert _snapshot(work) == before
-
-    render(arch, _runstate(phase=2, current_cell=(4, 2), stall_counter=3))
-    assert capsys.readouterr().out.strip() != ""
-    assert _snapshot(work) == before
-    assert not (work / "docs").exists()
-    assert not (findings_dir() / "docs").exists()
-
-
-def test_B63_render_on_fresh_work_dir_does_not_raise_or_write(monkeypatch, tmp_path, capsys):
-    work = _setup_env(monkeypatch, tmp_path)
-    before = _snapshot(work)
-    render(_empty_arch(), _runstate(cycle_id=0))
-    assert capsys.readouterr().out.strip() != ""
-    assert _snapshot(work) == before
-    assert not (work / "events.jsonl").exists()
-    assert not (work / "RUNSTATE.json").exists()
-
-
-def test_B63_read_events_returns_the_tail_in_order(monkeypatch, tmp_path):
-    _setup_env(monkeypatch, tmp_path)
-    for i in range(25):
-        log_event("tick", i=i)
-    ev = read_events()
-    assert len(ev) == 20
-    assert [e["i"] for e in ev] == list(range(5, 25))
-    ev3 = read_events(limit=3)
-    assert [e["i"] for e in ev3] == [22, 23, 24]
-    assert all(e["kind"] == "tick" and "ts" in e for e in ev3)
-    assert len(read_events(limit=100)) == 25
-    assert [e["i"] for e in read_events(limit=1)] == [24]
+    run_cycle(_runstate(cycle_id=6, phase=0))
+    events = _read_jsonl(work / "events.jsonl")
+    assert len([e for e in events if e.get("kind") == "archive_checkpoint_written"]) == 1
+    assert [e for e in events if e.get("kind") == "archive_checkpoint_rejected"] == []
+    assert ckpt.stat().st_mtime_ns == stamp
 
 
 # ======================================================================================

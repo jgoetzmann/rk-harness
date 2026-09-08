@@ -10,12 +10,14 @@ import ast
 import datetime
 import json
 import math
+import os
 import random
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
+from rk_harness import archive as archive_mod
 from rk_harness.archive import (
     RecordSchemaError,
     RECORD_KEYS,
@@ -28,6 +30,15 @@ from rk_harness.archive import (
     read_all,
     elites,
     replay,
+    replay_with_records,
+    cached_view,
+    cached_state,
+    clear_cache,
+    checkpoint_path,
+    load_checkpoint,
+    write_checkpoint,
+    maybe_write_checkpoint,
+    last_checkpoint_report,
     fold,
     refresh_hypotheses,
     assign_tier,
@@ -1730,7 +1741,7 @@ def test_K13_no_module_but_runner_reaches_openai():
     expected = {
         "fixedpoint", "coeffrep", "tableau", "orderconditions", "costmodel", "problems",
         "simulate", "evaluator", "verifier", "archive", "surrogate", "encourager",
-        "search", "enumeration", "directive", "prompts", "sitegen", "dashboard",
+        "search", "enumeration", "directive", "prompts", "sitegen",
     }
     assert expected <= set(roots), sorted(expected - set(roots))
     offenders = []
@@ -1746,6 +1757,17 @@ def test_K13_search_and_evaluator_graphs_are_openai_free():
     for root in ("search", "evaluator", "verifier", "archive"):
         for name in _reachable(root, skip=("runner", "credentials")):
             assert "openai" not in _module_path(name).read_text(encoding="utf-8").lower(), (root, name)
+
+
+def test_K17_viewers_do_not_import_runner():
+    """Rule 8, as a check rather than a sentence. Importing runner into a viewer drags the
+    whole search, and the LLM vendor string, into a process that only reads state files."""
+    for viewer in ("watch", "status"):
+        assert _module_path(viewer).is_file(), viewer
+        assert "runner" not in _reachable(viewer), viewer
+    # dashboard.py was retired into watch.py; this canary is what stops it coming back
+    # without the rule being checked.
+    assert not _module_path("dashboard").exists()
 
 
 # --------------------------------------------------------------------------- fold
@@ -1838,3 +1860,334 @@ def test_A80_refresh_hypotheses_rereads_the_ledger_and_keeps_the_rest(monkeypatc
     # nothing else moved
     assert fresh.n_records == state.n_records
     assert fresh.grids is state.grids
+
+
+# ===========================================================================
+# Archive: one pass for both, and the viewer cache  (A81, A82, A83)
+# ===========================================================================
+
+def _read_all_spy(monkeypatch) -> list:
+    """Counts full passes over the archive files, delegating to the real read_all."""
+    calls: list[int] = []
+    real = archive_mod.read_all
+
+    def spy():
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(archive_mod, "read_all", spy)
+    return calls
+
+
+def _states_agree(a, b) -> None:
+    assert a.n_records == b.n_records
+    assert a.last_cycle_id == b.last_cycle_id
+    assert a.record_hashes == b.record_hashes
+    assert a.open_hypotheses == b.open_hypotheses
+    assert a.refuted_hypotheses == b.refuted_hypotheses
+    assert sorted(a.grids) == sorted(b.grids)
+    for order, grid in b.grids.items():
+        assert sorted(a.grids[order]) == sorted(grid), order
+        for key, rec in grid.items():
+            assert a.grids[order][key].tableau_hash == rec.tableau_hash, (order, key)
+            assert a.grids[order][key].cycle_id == rec.cycle_id, (order, key)
+    assert _cell_stats_tuples(a) == _cell_stats_tuples(b)
+
+
+def test_A81_replay_with_records_matches_replay_and_read_all(monkeypatch, tmp_path):
+    """A viewer that wants both the state and the records used to make two full passes."""
+    _work(monkeypatch, tmp_path)
+    for r in _three_records():
+        append(r)
+    calls = _read_all_spy(monkeypatch)
+    state, records = replay_with_records()
+    assert len(calls) == 1, "replay_with_records must read the files once"
+    assert [r.tableau_hash for r in records] == [r.tableau_hash for r in read_all()]
+    _states_agree(state, replay())
+
+
+def test_A82_cached_view_re_reads_only_when_a_file_changes(monkeypatch, tmp_path):
+    _work(monkeypatch, tmp_path)
+    for r in _three_records():
+        append(r)
+    calls = _read_all_spy(monkeypatch)
+
+    state, records = cached_view()
+    assert len(calls) == 1
+    again, records_again = cached_view()
+    assert len(calls) == 1
+    assert again is state and records_again is records
+
+    append(_record(_euler(), _sv_for(_euler(), 0.30, 0.40), cycle_id=9))
+    grown, grown_records = cached_view()
+    assert len(calls) == 2
+    assert grown.n_records == 4 and len(grown_records) == 4
+
+    # a rewrite that keeps the byte length still invalidates, because mtime_ns is in the
+    # key. utime sets the stamp outright rather than trusting the filesystem timestamp
+    # granularity to separate two writes a millisecond apart.
+    path = today_path()
+    data = path.read_bytes()
+    path.write_bytes(data)
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    cached_view()
+    assert len(calls) == 3
+
+    clear_cache()
+    cached_state()
+    assert len(calls) == 4
+    cached_view()
+    assert len(calls) == 5, "cached_state does not retain the records, so a view re-reads"
+
+
+def test_A83_cached_view_is_keyed_on_the_archive_directory(monkeypatch, tmp_path):
+    """archive_dir() reads RK_WORK_DIR on every call. Without the directory in the key a
+    redirected work dir is served the previous directory's records."""
+    _work(monkeypatch, tmp_path / "a")
+    for r in _three_records():
+        append(r)
+    state_a, records_a = cached_view()
+    assert state_a.n_records == 3 and len(records_a) == 3
+
+    monkeypatch.setenv("RK_WORK_DIR", str(tmp_path / "b"))
+    (tmp_path / "b" / "archive").mkdir(parents=True)
+    state_b, records_b = cached_view()
+    assert state_b.n_records == 0
+    assert records_b == []
+
+
+# ===========================================================================
+# Archive: the checkpoint over the closed daily files  (A84 - A91)
+# ===========================================================================
+
+DAY1 = "2026-09-19.jsonl"
+DAY2 = "2026-09-20.jsonl"
+DAY3 = "2026-09-21.jsonl"
+
+
+def _two_closed_days(monkeypatch, tmp_path) -> list:
+    """Two closed archive days, the clock left on an empty third day, and the records that
+    belong to that third day returned rather than appended."""
+    _work(monkeypatch, tmp_path, clock="2026-09-19T10:00:00Z")
+    for r in _three_records():
+        append(r)
+    monkeypatch.setenv("RK_CLOCK", "2026-09-20T10:00:00Z")
+    append(_record(_kutta3(), _sv_for(_kutta3(), 0.020, 0.030), cycle_id=4))
+    append(_record(_heun3(), _sv_for(_heun3(), 0.040, 0.050), cycle_id=5))
+    monkeypatch.setenv("RK_CLOCK", "2026-09-21T10:00:00Z")
+    assert [q.name for q in sorted(archive_dir().glob("*.jsonl"))] == [DAY1, DAY2]
+    # every fold branch: a new cell, an improvement, a loser, an exact tie that must keep
+    # the incumbent, and a second sample so a cell's stats have to accumulate
+    return [
+        _record(_euler(), _sv_for(_euler(), 0.30, 0.40), cycle_id=6),
+        _record(_rk4(), _sv_for(_rk4(), 0.001, 0.002), cycle_id=7),
+        _record(_rk38(), _sv_for(_rk38(), 0.900, 0.990), cycle_id=8),
+        _record(_heun2(), _sv_for(_heun2(), 0.050, 0.060), cycle_id=9),
+        _record(_midpoint(), _sv_for(_midpoint(), 0.070, 0.080), cycle_id=10),
+    ]
+
+
+def _covered_now() -> list[tuple[str, int, int]]:
+    out = []
+    for q in sorted(archive_dir().glob("*.jsonl")):
+        st = q.stat()
+        out.append((q.name, st.st_size, st.st_mtime_ns))
+    return out
+
+
+def test_A84_checkpoint_plus_fold_equals_a_replay_from_scratch(monkeypatch, tmp_path):
+    """The checkpoint is an accelerator and nothing else: the state it produces has to be
+    identical to a full replay, cell by cell and Welford field by Welford field, or the
+    published elites and cell URLs move."""
+    later = _two_closed_days(monkeypatch, tmp_path)
+    assert maybe_write_checkpoint(replay()) is None
+    assert checkpoint_path().is_file()
+    for r in later:
+        append(r)
+
+    with_checkpoint = replay()
+    report = last_checkpoint_report()
+    assert report["used"] is True
+    assert report["covered_files"] == 2 and report["folded_files"] == 1
+    assert report["folded_records"] == 5
+
+    checkpoint_path().unlink()
+    from_scratch = replay()
+    assert last_checkpoint_report()["used"] is False
+    assert from_scratch.n_records == 10
+    _states_agree(with_checkpoint, from_scratch)
+
+
+def test_A85_a_covered_file_that_changed_size_is_rejected(monkeypatch, tmp_path):
+    later = _two_closed_days(monkeypatch, tmp_path)
+    assert maybe_write_checkpoint(replay()) is None
+    for r in later:
+        append(r)
+    with open(archive_dir() / DAY1, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(record_to_json(_record(_rk38(), _sv_for(_rk38(), 0.5, 0.5), cycle_id=11))) + "\n")
+
+    state = replay()
+    report = last_checkpoint_report()
+    assert report["used"] is False
+    assert DAY1 in report["reason"] and "size changed" in report["reason"]
+    checkpoint_path().unlink()
+    _states_agree(state, replay())
+
+
+def test_A86_a_file_older_than_the_covered_set_forces_a_full_replay(monkeypatch, tmp_path):
+    """Welford is order dependent and a grid keeps the earlier record on a tie, so a file
+    that sorts before a covered one cannot be folded on top: it has to be replayed."""
+    later = _two_closed_days(monkeypatch, tmp_path)
+    assert maybe_write_checkpoint(replay()) is None
+    for r in later:
+        append(r)
+    older = archive_dir() / "2026-09-18.jsonl"
+    older.write_text(json.dumps(record_to_json(
+        _record(_rk4(), _sv_for(_rk4(), 0.004, 0.005), cycle_id=0))) + "\n", encoding="utf-8")
+
+    state = replay()
+    report = last_checkpoint_report()
+    assert report["used"] is False
+    assert report["reason"] == "covered files are not the oldest files present"
+    checkpoint_path().unlink()
+    _states_agree(state, replay())
+
+
+@pytest.mark.parametrize("damage", ["absent", "empty", "truncated", "wrong_format",
+                                    "missing_file", "touched", "wrong_verifier_hash",
+                                    "wrong_derivation_hash", "no_derivation_hash"])
+def test_A87_a_missing_or_corrupt_checkpoint_is_ignored_not_fatal(monkeypatch, tmp_path, damage):
+    later = _two_closed_days(monkeypatch, tmp_path)
+    assert maybe_write_checkpoint(replay()) is None
+    for r in later:
+        append(r)
+    path = checkpoint_path()
+    if damage == "absent":
+        path.unlink()
+    elif damage == "empty":
+        path.write_text("", encoding="utf-8")
+    elif damage == "truncated":
+        path.write_text(path.read_text(encoding="utf-8")[: 200], encoding="utf-8")
+    elif damage == "wrong_format":
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d["format"] = 2
+        path.write_text(json.dumps(d), encoding="utf-8")
+    elif damage == "missing_file":
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d["covered"] = [{"name": "2026-09-01.jsonl", "size": 10, "mtime_ns": 1}] + d["covered"]
+        path.write_text(json.dumps(d), encoding="utf-8")
+    elif damage == "touched":
+        # a rewrite that keeps every byte: size cannot see it, the mtime can
+        day1 = archive_dir() / DAY1
+        st = day1.stat()
+        day1.write_bytes(day1.read_bytes())
+        os.utime(day1, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    elif damage == "wrong_derivation_hash":
+        # The verifier hash says what the records were scored under. It says nothing about
+        # the code that folds them into grids, so a change to cycle_bucket or _better
+        # leaves a checkpoint that passes every other check and serves the old layout.
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d["derivation_hash"] = "d" * 64
+        path.write_text(json.dumps(d), encoding="utf-8")
+    elif damage == "no_derivation_hash":
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d.pop("derivation_hash", None)
+        path.write_text(json.dumps(d), encoding="utf-8")
+    else:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d["verifier_hash"] = "c" * 64
+        path.write_text(json.dumps(d), encoding="utf-8")
+
+    state = replay()
+    report = last_checkpoint_report()
+    assert report["used"] is False
+    assert report["reason"]
+    if damage == "absent":
+        assert report["reason"] == "absent"
+    if damage == "touched":
+        assert report["reason"] == f"mtime changed for {DAY1}"
+    if damage == "wrong_verifier_hash":
+        assert report["reason"].startswith("verifier hash changed")
+    if damage == "wrong_derivation_hash":
+        assert report["reason"].startswith("derivation changed")
+    if damage == "no_derivation_hash":
+        assert report["reason"] == "derivation hash not recorded"
+    if path.exists():
+        path.unlink()
+    _states_agree(state, replay())
+
+
+def test_A88_a_checkpoint_is_never_written_over_a_file_still_being_appended_to(monkeypatch, tmp_path):
+    later = _two_closed_days(monkeypatch, tmp_path)
+    append(later[0])
+    reason = maybe_write_checkpoint(replay())
+    assert reason == "the current day file already has records"
+    assert not checkpoint_path().exists()
+
+    # the next day, that file is closed too and the checkpoint covers all three
+    monkeypatch.setenv("RK_CLOCK", "2026-09-22T10:00:00Z")
+    assert maybe_write_checkpoint(replay()) is None
+    loaded, names, why = load_checkpoint()
+    assert why == "" and names == [DAY1, DAY2, DAY3]
+    assert loaded.n_records == 6
+    assert maybe_write_checkpoint(replay()) == "already current"
+
+
+def test_A89_write_then_load_round_trips_the_state_exactly(monkeypatch, tmp_path):
+    _two_closed_days(monkeypatch, tmp_path)
+    state = replay()
+    covered = _covered_now()
+    write_checkpoint(state, covered)
+    loaded, names, why = load_checkpoint()
+
+    assert why == "" and names == [name for name, _, _ in covered]
+    assert loaded.n_records == state.n_records
+    assert loaded.last_cycle_id == state.last_cycle_id
+    assert isinstance(loaded.record_hashes, frozenset)
+    assert loaded.record_hashes == state.record_hashes
+    assert sorted(loaded.grids) == [1, 2, 3, 4], "a missing order must be an empty grid, not a skip"
+    assert all(isinstance(o, int) for o in loaded.grids)
+    for order, grid in state.grids.items():
+        assert sorted(loaded.grids[order]) == sorted(grid), order
+        for key, rec in grid.items():
+            assert isinstance(key, tuple) and len(key) == 2
+            assert loaded.grids[order][key] == rec, (order, key)
+    assert sorted(loaded.cell_stats) == sorted(state.cell_stats)
+    for key, stats in state.cell_stats.items():
+        assert isinstance(key, tuple) and len(key) == 2
+        for name, cs in stats.items():
+            got = loaded.cell_stats[key][name]
+            assert (got.n, got.mean, got.m2, got.min) == (cs.n, cs.mean, cs.m2, cs.min), (key, name)
+    assert loaded.open_hypotheses == () and loaded.refuted_hypotheses == ()
+
+
+def test_A90_the_write_is_atomic_and_deterministic(monkeypatch, tmp_path):
+    _two_closed_days(monkeypatch, tmp_path)
+    state = replay()
+    covered = _covered_now()
+    first = write_checkpoint(state, covered).read_bytes()
+    second = write_checkpoint(state, covered).read_bytes()
+    assert first == second
+    assert [q.name for q in tmp_path.iterdir() if q.name.endswith(".tmp")] == []
+
+
+def test_A91_a_valid_checkpoint_does_not_reread_the_files_it_covers(monkeypatch, tmp_path):
+    """The performance claim, stated as behaviour: the covered files are not opened."""
+    later = _two_closed_days(monkeypatch, tmp_path)
+    assert maybe_write_checkpoint(replay()) is None
+    for r in later:
+        append(r)
+
+    seen: list[str] = []
+    real = archive_mod._read_file
+
+    def spy(path):
+        seen.append(path.name)
+        return real(path)
+
+    monkeypatch.setattr(archive_mod, "_read_file", spy)
+    state = replay()
+    assert last_checkpoint_report()["used"] is True
+    assert seen == [DAY3]
+    assert state.n_records == 10

@@ -7,6 +7,10 @@ the Q15 accuracy numbers with the pinned solve_q15 machinery, the budget to
 step-count rule, schema validity of the built document, timing fields, the
 cycles-vs-time correlation, and the banned-words guard on the verdict prose.
 
+The B70 block covers rk_harness/coeffmem.py and the two numbers the
+trade-offs matrix needs from this document: coefficient memory per method and
+the repeat-to-repeat timing spread per method.
+
 Timings inside the module-scoped document use a reduced repeat count so the
 suite stays quick; the accuracy numbers those tests check are the same ones a
 full run produces because nothing about accuracy depends on the repeat count.
@@ -17,11 +21,15 @@ import copy
 import math
 import os
 import re
+import statistics
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from rk_harness import benchmark as B
+from rk_harness import coeffmem, coeffrep
 from rk_harness.simulate import problem_error, solve_float, steps_for_budget
 from rk_harness.tableau import classical, content_hash, make_tableau, to_json
 from rk_harness.problems import PROBLEMS
@@ -88,7 +96,10 @@ def test_champion_parsing_synthetic():
     methods = B.select_benchmark_methods(_synthetic_validation_doc())
     names = [m["name_or_hash"] for m in methods]
     assert "rk4" in names
-    assert "euler" not in names                      # only rk4 among classicals
+    # Was `"euler" not in names`: select_benchmark_methods used to keep rk4 as
+    # the only classical anchor. Every classical anchor is benchmarked now, so
+    # the trade-offs matrix has a measured row for each of them.
+    assert "euler" in names
     disc = [m for m in methods if m["kind"] == "discovered"]
     assert len(disc) == 1
     assert content_hash(disc[0]["tableau"]) == disc[0]["name_or_hash"]
@@ -118,6 +129,27 @@ def test_champion_parsing_live_file():
     for m in methods:  # select_benchmark_methods re-verified every hash
         if m["kind"] == "discovered":
             assert content_hash(m["tableau"]) == m["name_or_hash"]
+
+
+def test_B70_selection_keeps_every_classical_anchor():
+    """The live validation document carries five classical anchors and three
+    discovered methods, and all eight reach the benchmark pool."""
+    if not _LIVE_WORK:
+        pytest.skip("RK_WORK_DIR not set at import time")
+    path = Path(_LIVE_WORK) / "validation" / "results.json"
+    if not path.is_file():
+        pytest.skip(f"no live validation results at {path}")
+    methods = B.select_benchmark_methods(B.load_validation_doc(path))
+    names = [m["name_or_hash"] for m in methods]
+    for anchor in ("euler", "heun2", "midpoint", "rk4", "rk38"):
+        assert anchor in names, anchor
+    disc = [m for m in methods if m["kind"] == "discovered"]
+    # Not a fixed count: select_discovered returns the champion plus the lowest
+    # held-out elite per symbolic order, so this moves when the archive gains an
+    # elite at a new order. Assert the property, not today's number.
+    assert len(disc) >= 1
+    for m in disc:
+        assert content_hash(m["tableau"]) == m["name_or_hash"]
 
 
 # ------------------------------------------------------- float64 rk4 correct
@@ -200,6 +232,15 @@ def test_schema_validates_and_rejects_violations(doc):
     broken = copy.deepcopy(doc)
     del broken["correlation"]
     with pytest.raises(ValueError, match="correlation"):
+        B.validate_results(broken)
+    broken = copy.deepcopy(doc)
+    del broken["methods"][0]["coefficient_memory"]
+    with pytest.raises(ValueError, match="coefficient_memory"):
+        B.validate_results(broken)
+    broken = copy.deepcopy(doc)
+    for s in broken["speedup"]["per_method_us_per_step"].values():
+        del s["median_relative_iqr"]
+    with pytest.raises(ValueError, match="median_relative_iqr"):
         B.validate_results(broken)
 
 
@@ -394,6 +435,106 @@ def test_speedup_geomean_and_schema_guard(doc):
     del broken["speedup"]
     with pytest.raises(ValueError, match="speedup"):
         B.validate_results(broken)
+
+
+# -------------------------------------------------- B70 coefficient memory
+
+
+def test_B70_coefficient_memory_counts_only_non_trivial_A_and_b_entries():
+    """Fixed vectors from the classical set. Entries are A and b with c
+    excluded, and 0, 1 and -1 cost nothing."""
+    cls = classical()
+    assert coeffmem.coefficient_memory(cls["rk4"]) == {
+        "words": 6, "bytes": 12, "max_shift": 17, "entries": 20, "trivial": 14}
+    assert coeffmem.coefficient_memory(cls["rk38"]) == {
+        "words": 6, "bytes": 12, "max_shift": 16, "entries": 20, "trivial": 14}
+    assert coeffmem.coefficient_memory(cls["heun2"])["words"] == 2
+    assert coeffmem.coefficient_memory(cls["midpoint"])["words"] == 1
+    # c excluded: rk4's c is (0, 1/2, 1/2, 1) and two of those are non-trivial,
+    # so counting c would push entries to 24 and words to 8.
+    assert coeffmem.coefficient_memory(cls["rk4"])["entries"] == (
+        len(cls["rk4"].A) ** 2 + len(cls["rk4"].b))
+    # heun2's b is (1/2, 1/2) and its one non-trivial A entry is 1, so the two
+    # counted words are exactly the two b entries.
+    assert coeffmem.coefficient_memory(cls["heun2"])["trivial"] == 4
+
+
+def test_B70_coefficient_memory_of_euler_is_zero_words():
+    """euler is A = [[0]], b = [1]: nothing to store. The empty case is the
+    one a naive max() over the counted shifts would crash on."""
+    cm = coeffmem.coefficient_memory(classical()["euler"])
+    assert cm == {"words": 0, "bytes": 0, "max_shift": 0,
+                  "entries": 2, "trivial": 2}
+
+
+def test_B70_coefficient_memory_max_shift_matches_to_rep():
+    cls = classical()
+    for name, expect in (("rk4", 17), ("rk38", 16)):
+        t = cls[name]
+        shifts = [coeffrep.to_rep(x).s for x in coeffrep._ab_entries(t)
+                  if not coeffrep.is_trivial(x)]
+        assert coeffmem.coefficient_memory(t)["max_shift"] == max(shifts)
+        assert coeffmem.coefficient_memory(t)["max_shift"] == expect
+
+
+_CLASSICAL_NAMES = tuple(sorted(classical()))
+
+
+@pytest.mark.parametrize("name", _CLASSICAL_NAMES)
+def test_B70_coefficient_memory_word_count_never_exceeds_entries(name):
+    t = classical()[name]
+    cm = coeffmem.coefficient_memory(t)
+    assert 0 <= cm["words"] <= cm["entries"]
+    assert cm["bytes"] == 2 * cm["words"]
+    assert cm["trivial"] == cm["entries"] - cm["words"]
+    assert cm["entries"] == len(t.A) ** 2 + len(t.b)
+
+
+def test_B70_coeffmem_imports_without_numpy():
+    """The reason coeffmem is its own module: importing benchmark sets five
+    BLAS thread variables and pulls in numpy, and the overview generator has
+    no business inheriting either just to print a column."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; import rk_harness.coeffmem; "
+         "print('numpy' in sys.modules, 'scipy' in sys.modules)"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(Path(__file__).resolve().parents[1]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False False", out.stdout
+
+
+@pytest.mark.slow
+def test_B70_method_entries_carry_coefficient_memory(doc):
+    """Every method entry carries the block, and it is what coeffmem returns
+    for the tableau parsed back out of that entry."""
+    assert doc["methods"]
+    for m in doc["methods"]:
+        cm = m["coefficient_memory"]
+        t = make_tableau(**m["tableau"])
+        assert cm == coeffmem.coefficient_memory(t)
+        assert cm["bytes"] == 2 * cm["words"]
+        assert cm["words"] <= cm["entries"]
+    by_name = {m["name_or_hash"]: m["coefficient_memory"] for m in doc["methods"]}
+    assert by_name["euler"]["words"] == 0
+    assert by_name["rk4"]["words"] == 6
+
+
+@pytest.mark.slow
+def test_B70_per_method_relative_iqr_present_and_bounded(doc):
+    """median_relative_iqr is the median of iqr_s / median_s over the same
+    finished Q15 rows the microsecond figures come from."""
+    pm = doc["speedup"]["per_method_us_per_step"]
+    assert pm
+    for name, s in sorted(pm.items()):
+        riqr = s["median_relative_iqr"]
+        assert isinstance(riqr, (int, float)) and math.isfinite(riqr)
+        assert riqr >= 0.0
+        expect = [r["q15"]["timing"]["iqr_s"] / r["q15"]["timing"]["median_s"]
+                  for r in doc["fixed_step_results"]
+                  if r["method"] == name and r["q15"].get("status") == "ok"]
+        assert len(expect) == s["n_problems"]
+        assert math.isclose(riqr, statistics.median(expect), rel_tol=1e-12)
 
 
 # -------------------------------------------------------------------- write

@@ -4,11 +4,16 @@ One grid per order 1..4, keyed by (stages, cycle_bucket); fitness is heldout_err
 (lower is better).  Records are appended one JSON line at a time with
 write-then-fsync; replay discards any line that does not parse (a partial trailing
 line after a crash, R2).  Tier assignment is mechanical (K1/K2/B31).
+
+`replay` reads a checkpoint over the closed daily files when one matches them exactly and
+folds the current day in; `python -m rk_harness.archive --verify-checkpoint` proves that
+path against a full replay.
 """
 from __future__ import annotations
 
 import dataclasses
 import datetime
+import hashlib
 import json
 import os
 import sys
@@ -16,9 +21,10 @@ from pathlib import Path
 
 from rk_harness.ledger import load_hypotheses
 from rk_harness.orderconditions import achieved_order_symbolic
-from rk_harness.paths import archive_dir
+from rk_harness.paths import archive_dir, work_dir
 from rk_harness.problems import FAMILY
 from rk_harness.tableau import content_hash, from_json, stages, to_json
+from rk_harness.verifier_hash import compute_verifier_hash
 from rk_harness.types import TIERS, ArchiveState, CellStat, Record, ScoreVector, Tier
 
 
@@ -222,38 +228,46 @@ def _warn(msg: str) -> None:
     print(f"[archive] warning: {msg}", file=sys.stderr)
 
 
-def read_all() -> list[Record]:
+def _archive_files() -> list[Path]:
+    """Every *.jsonl in the archive directory, in name order, which is date order."""
     d = archive_dir()
     if not d.is_dir():
         return []
-    files = sorted((p for p in d.iterdir() if p.is_file() and p.name.endswith(".jsonl")),
-                   key=lambda p: p.name)
+    return sorted((p for p in d.iterdir() if p.is_file() and p.name.endswith(".jsonl")),
+                  key=lambda p: p.name)
+
+
+def _read_file(path: Path) -> list[Record]:
+    """The records in one archive file, with the discards read_all has always made."""
     out: list[Record] = []
-    for path in files:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            _warn(f"cannot read {path.name}: {e!r}")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        _warn(f"cannot read {path.name}: {e!r}")
+        return out
+    lines = text.split("\n")
+    # A file ending in "\n" yields a trailing empty element; drop it so the
+    # "last line" is the last real line.
+    if lines and lines[-1] == "":
+        lines.pop()
+    last = len(lines) - 1
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
             continue
-        lines = text.split("\n")
-        # A file ending in "\n" yields a trailing empty element; drop it so the
-        # "last line" is the last real line.
-        if lines and lines[-1] == "":
-            lines.pop()
-        last = len(lines) - 1
-        for i, raw in enumerate(lines):
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                out.append(record_from_json(json.loads(line)))
-            except (ValueError, RecordSchemaError) as e:   # JSONDecodeError is a ValueError
-                if i != last:
-                    _warn(f"{path.name}:{i + 1}: discarded unparsable line ({e.__class__.__name__})")
-                elif isinstance(e, RecordSchemaError):
-                    _warn(f"{path.name}:{i + 1}: discarded invalid record ({e})")
-                # a partial trailing line after a crash is discarded silently (R2)
+        try:
+            out.append(record_from_json(json.loads(line)))
+        except (ValueError, RecordSchemaError) as e:   # JSONDecodeError is a ValueError
+            if i != last:
+                _warn(f"{path.name}:{i + 1}: discarded unparsable line ({e.__class__.__name__})")
+            elif isinstance(e, RecordSchemaError):
+                _warn(f"{path.name}:{i + 1}: discarded invalid record ({e})")
+            # a partial trailing line after a crash is discarded silently (R2)
     return out
+
+
+def read_all() -> list[Record]:
+    return [r for path in _archive_files() for r in _read_file(path)]
 
 
 # --------------------------------------------------------------------------- grids
@@ -330,8 +344,9 @@ def _hypothesis_ids() -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(open_ids), tuple(refuted)
 
 
-def replay() -> ArchiveState:
-    records = read_all()
+def _state_from(records: list[Record]) -> ArchiveState:
+    """The state those records describe. The whole of what `replay` used to be, over a
+    record list the caller already has."""
     orders = [record_order(r) for r in records]
     grids = _grids_from(records, orders)
     last_cycle = max((r.cycle_id for r in records), default=0)
@@ -356,6 +371,49 @@ def replay() -> ArchiveState:
         cell_stats=cell_stats,
         record_hashes=frozenset(r.tableau_hash for r in records),
     )
+
+
+def _replay_all() -> ArchiveState:
+    """Every file, every record, no checkpoint. The fallback `replay` drops to, and the
+    reference every checkpoint is checked against."""
+    return _state_from(read_all())
+
+
+def replay_with_records() -> tuple[ArchiveState, list[Record]]:
+    """(state, records) from one full pass, for callers that want both.
+
+    `replay()` alone reads the archive and throws the records away, so a viewer that
+    wants both was making two passes over the same files. This makes one.
+    """
+    records = read_all()
+    return _state_from(records), records
+
+
+def replay() -> ArchiveState:
+    """The state of the whole archive.
+
+    Tries the checkpoint over the closed daily files first and folds the rest in; falls
+    back to a full pass whenever the checkpoint does not match the files exactly. The
+    checkpoint is an accelerator and never a source of truth: `load_checkpoint` rejects
+    it on any change of name, size, mtime, file order or verifier hash, and the rejection
+    is warned about and reported through `last_checkpoint_report()`. Either path ends in
+    code that re-reads the hypothesis ids, because `replay` promises the ledger's current
+    verdicts.
+    """
+    global _LAST_CHECKPOINT
+    base, covered, reason = load_checkpoint()
+    if base is None:
+        _LAST_CHECKPOINT = {"used": False, "reason": reason, "covered_files": 0,
+                            "folded_files": len(_archive_files())}
+        if reason != "absent":
+            _warn(f"checkpoint not used: {reason}")
+        return _replay_all()
+    rest = _archive_files()[len(covered):]
+    delta = [r for path in rest for r in _read_file(path)]
+    _LAST_CHECKPOINT = {"used": True, "reason": "", "covered_files": len(covered),
+                        "covered_records": base.n_records, "folded_files": len(rest),
+                        "folded_records": len(delta)}
+    return fold(base, delta)
 
 
 def fold(state: ArchiveState, records: list[Record]) -> ArchiveState:
@@ -419,6 +477,388 @@ def refresh_hypotheses(state: ArchiveState) -> ArchiveState:
     return dataclasses.replace(state, open_hypotheses=open_ids, refuted_hypotheses=refuted)
 
 
+# --------------------------------------------------------------------------- checkpoint
+
+CHECKPOINT_FORMAT = 1
+
+# What the last replay() in this process did with the checkpoint. Read by the runner,
+# which logs a rejection, and by --verify-checkpoint.
+_LAST_CHECKPOINT: dict = {"used": False, "reason": "absent", "covered_files": 0,
+                          "folded_files": 0}
+
+# What the last maybe_write_checkpoint did, for the event the runner logs.
+_LAST_WRITE: dict = {"written": False, "reason": "not attempted", "covered_files": 0,
+                     "n_records": 0}
+
+
+def checkpoint_path() -> Path:
+    return work_dir() / "ARCHIVE_CHECKPOINT.json"
+
+
+def last_checkpoint_report() -> dict:
+    """What the most recent replay() in this process did with the checkpoint."""
+    return dict(_LAST_CHECKPOINT)
+
+
+def _checkpoint_stamp() -> str:
+    """UTC ISO stamp for the checkpoint file, honouring RK_CLOCK the way today_path does."""
+    raw = os.environ.get("RK_CLOCK")
+    dt = None
+    if raw:
+        txt = raw.strip()
+        if txt.endswith("Z") or txt.endswith("z"):
+            txt = txt[:-1] + "+00:00"
+        try:
+            dt = datetime.datetime.fromisoformat(txt)
+        except ValueError:
+            dt = None
+        if dt is not None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc) if dt.tzinfo is None else dt
+            dt = dt.astimezone(datetime.timezone.utc)
+    if dt is None:
+        dt = datetime.datetime.now(datetime.timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_DERIVATION_FILES: tuple[str, ...] = ("archive.py", "tableau.py")
+
+
+def _derivation_hash() -> str | None:
+    """sha256 over the modules that decide the SHAPE of a replayed state, or None if they
+    cannot be read.
+
+    The verifier hash covers the ten pinned files, which is what the records were scored
+    under. It says nothing about the code that folds records into grids and cell statistics,
+    and that code is here and in tableau.py: cycle_bucket, _cell_key, _better,
+    update_cell_stat, metric_value. Change one of those and a checkpoint written under the
+    old rules is still internally consistent, still passes every size and mtime check, and
+    still serves the old cell layout while a full replay produces a new one. That failure is
+    silent and it moves published elite pages, so the document pins its own derivation.
+    """
+    h = hashlib.sha256()
+    here = Path(__file__).resolve().parent
+    for name in _DERIVATION_FILES:
+        try:
+            h.update((here / name).read_bytes())
+        except OSError:
+            return None
+    return h.hexdigest()
+
+
+def _current_verifier_hash() -> str | None:
+    """The verifier hash now, or None if it cannot be computed. A checkpoint records the
+    hash the files it covers were scored under, and is not used under a different one."""
+    try:
+        return compute_verifier_hash()
+    except Exception:  # noqa: BLE001 - an unreadable pinned file must not break a replay
+        return None
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write through a temp sibling and os.replace, so a reader never sees half a file.
+    archive.py must not import runner for this: runner imports archive."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _state_to_json(state: ArchiveState, covered, verifier_hash: str | None) -> dict:
+    """The checkpoint document.
+
+    `covered` is a sequence of (name, size, mtime_ns) triples: everything a later load
+    needs to prove the files have not moved under it. Every list is sorted, so two writes
+    of one state are byte-identical. Floats are emitted untouched, so the shortest
+    round-trip repr carries them back bit for bit. Hypothesis ids are deliberately not
+    stored: replay re-reads them from the ledger on every call, and so must the checkpoint
+    path.
+    """
+    grids: dict[str, list] = {}
+    for order in (1, 2, 3, 4):
+        grid = state.grids.get(order) or {}
+        grids[str(order)] = [[[int(stg), int(bucket)], record_to_json(rec)]
+                             for (stg, bucket), rec in sorted(grid.items())]
+    cell_stats: list = []
+    for key in sorted(state.cell_stats):
+        stats = state.cell_stats[key]
+        cell_stats.append([[int(key[0]), int(key[1])],
+                           [[name, [stats[name].n, stats[name].mean, stats[name].m2, stats[name].min]]
+                            for name in sorted(stats)]])
+    return {
+        "format": CHECKPOINT_FORMAT,
+        "written_at": _checkpoint_stamp(),
+        "verifier_hash": verifier_hash,
+        "derivation_hash": _derivation_hash(),
+        "covered": [{"name": str(name), "size": int(size), "mtime_ns": int(mtime_ns)}
+                    for name, size, mtime_ns in covered],
+        "n_records": int(state.n_records),
+        "last_cycle_id": int(state.last_cycle_id),
+        "grids": grids,
+        "cell_stats": cell_stats,
+        "record_hashes": sorted(state.record_hashes),
+    }
+
+
+def _state_from_json(d: dict) -> ArchiveState:
+    """The inverse of _state_to_json. Any shape error is a RecordSchemaError, which
+    load_checkpoint turns into a rejection rather than a crash."""
+    try:
+        grids: dict[int, dict[tuple[int, int], Record]] = {}
+        for order in (1, 2, 3, 4):
+            grid: dict[tuple[int, int], Record] = {}
+            for key, rec in d["grids"][str(order)]:
+                grid[(int(key[0]), int(key[1]))] = record_from_json(rec)
+            grids[order] = grid
+        cell_stats: dict[tuple[int, int], dict[str, CellStat]] = {}
+        for key, stats in d["cell_stats"]:
+            cell: dict[str, CellStat] = {}
+            for name, (n, mean, m2, mn) in stats:
+                cell[str(name)] = CellStat(n=int(n), mean=float(mean), m2=float(m2), min=float(mn))
+            cell_stats[(int(key[0]), int(key[1]))] = cell
+        return ArchiveState(
+            n_records=int(d["n_records"]),
+            last_cycle_id=int(d["last_cycle_id"]),
+            grids=grids,
+            open_hypotheses=(),
+            refuted_hypotheses=(),
+            cell_stats=cell_stats,
+            record_hashes=frozenset(str(h) for h in d["record_hashes"]),
+        )
+    except RecordSchemaError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        raise RecordSchemaError(f"bad checkpoint shape: {e!r}") from e
+
+
+def _load_checkpoint_doc() -> tuple[dict | None, list[str], str]:
+    """(document, covered file names, reason it was rejected), without rebuilding the
+    state. Every rule that decides whether a checkpoint may be used lives here; the write
+    path needs the answer but not the records."""
+    path = checkpoint_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, [], "absent"
+    except OSError as e:
+        return None, [], f"unreadable: {e.__class__.__name__}"
+    try:
+        d = json.loads(text)
+    except ValueError as e:
+        return None, [], f"unreadable: {e.__class__.__name__}"
+    if not isinstance(d, dict):
+        return None, [], "unreadable: not an object"
+    fmt = d.get("format")
+    if fmt != CHECKPOINT_FORMAT:
+        return None, [], f"format {fmt!r} is not {CHECKPOINT_FORMAT}"
+    stored_vh = d.get("verifier_hash")
+    if not isinstance(stored_vh, str):
+        return None, [], "verifier hash not recorded"
+    current_vh = _current_verifier_hash()
+    if current_vh is None:
+        return None, [], "verifier hash unavailable"
+    if current_vh != stored_vh:
+        return None, [], f"verifier hash changed: {stored_vh[:12]} != {current_vh[:12]}"
+    stored_dh = d.get("derivation_hash")
+    if not isinstance(stored_dh, str):
+        return None, [], "derivation hash not recorded"
+    current_dh = _derivation_hash()
+    if current_dh is None:
+        return None, [], "derivation hash unavailable"
+    if current_dh != stored_dh:
+        return None, [], f"derivation changed: {stored_dh[:12]} != {current_dh[:12]}"
+    covered = d.get("covered")
+    if not isinstance(covered, list) or not covered:
+        return None, [], "no covered files"
+    names: list[str] = []
+    stamps: list[tuple[int, int]] = []
+    for entry in covered:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
+                or not _is_int(entry.get("size")) or not _is_int(entry.get("mtime_ns"))):
+            return None, [], "malformed covered entry"
+        names.append(entry["name"])
+        stamps.append((int(entry["size"]), int(entry["mtime_ns"])))
+    d_dir = archive_dir()
+    for name, (size, mtime_ns) in zip(names, stamps):
+        try:
+            st = (d_dir / name).stat()
+        except OSError:
+            return None, [], f"covered file is gone: {name}"
+        if st.st_size != size:
+            return None, [], f"size changed for {name}: {size} != {st.st_size}"
+        if st.st_mtime_ns != mtime_ns:
+            return None, [], f"mtime changed for {name}"
+    present = [q.name for q in _archive_files()]
+    if present[:len(names)] != names:
+        return None, [], "covered files are not the oldest files present"
+    return d, names, ""
+
+
+def load_checkpoint() -> tuple[ArchiveState | None, list[str], str]:
+    """(state, covered file names, reason it was rejected).
+
+    A checkpoint is used only when it summarises exactly the oldest files present, in
+    order, each still the size it was when the checkpoint was written. That prefix rule
+    is what makes checkpoint-plus-fold identical to a replay rather than merely close:
+    Welford is order dependent and a grid keeps the earlier record on a tie, so a file
+    that sorts before a covered one has to force a full replay.
+    """
+    d, names, reason = _load_checkpoint_doc()
+    if d is None:
+        return None, [], reason
+    try:
+        return _state_from_json(d), names, ""
+    except RecordSchemaError as e:
+        return None, [], f"unreadable: {e}"
+
+
+def write_checkpoint(state: ArchiveState, covered, verifier_hash: str | None = None) -> Path:
+    """Write the checkpoint for `state` over `covered`, a sequence of (name, size,
+    mtime_ns) triples. `verifier_hash` defaults to the current one, because a checkpoint
+    without a hash is never used. Unconditional; maybe_write_checkpoint is what decides
+    whether writing is safe."""
+    path = checkpoint_path()
+    doc = _state_to_json(state, covered, _current_verifier_hash() if verifier_hash is None else verifier_hash)
+    _atomic_write_text(path, json.dumps(doc, sort_keys=True, separators=(",", ":")))
+    return path
+
+
+def last_checkpoint_write() -> dict:
+    """What the most recent maybe_write_checkpoint in this process did, so the caller can
+    log the covered file count without re-reading the file it just wrote."""
+    return dict(_LAST_WRITE)
+
+
+def maybe_write_checkpoint(state: ArchiveState, verifier_hash: str | None = None) -> str | None:
+    """Write a checkpoint if `state` provably describes exactly the closed daily files.
+
+    None means written; a string is the reason it was skipped, and skipping is the normal
+    case, since a checkpoint is owed about once a day. The state must have been built
+    while the current day file was still empty, which is why the runner calls this at the
+    start of a cycle, before anything is appended.
+    """
+    global _LAST_WRITE
+    reason, covered_files = _maybe_write_checkpoint(state, verifier_hash)
+    _LAST_WRITE = {"written": reason is None, "reason": reason,
+                   "covered_files": covered_files, "n_records": int(state.n_records)}
+    return reason
+
+
+def _maybe_write_checkpoint(state: ArchiveState, verifier_hash: str | None) -> tuple[str | None, int]:
+    files = _archive_files()
+    today = today_path().name
+    if any(p.name > today for p in files):
+        return "a file dated after today is present", 0
+    closed = [p for p in files if p.name != today]
+    if not closed:
+        return "no closed archive files", 0
+    today_file = archive_dir() / today
+    try:
+        if today_file.stat().st_size > 0:
+            return "the current day file already has records", 0
+    except OSError:
+        pass
+    covered: list[tuple[str, int, int]] = []
+    for p in closed:
+        try:
+            st = p.stat()
+        except OSError as e:
+            return f"cannot stat {p.name}: {e.__class__.__name__}", 0
+        covered.append((p.name, st.st_size, st.st_mtime_ns))
+    # only the covered names matter here, so the document is read without rebuilding the
+    # state: this runs at the start of every cycle and the file is about 7 MB
+    current, current_names, _ = _load_checkpoint_doc()
+    if current is not None and current_names == [name for name, _, _ in covered]:
+        return "already current", len(covered)
+    path = write_checkpoint(state, covered, verifier_hash)
+    moved = False
+    for name, size, mtime_ns in covered:
+        try:
+            st = (archive_dir() / name).stat()
+            if st.st_size != size or st.st_mtime_ns != mtime_ns:
+                moved = True
+        except OSError:
+            moved = True
+    try:
+        if today_file.stat().st_size > 0:
+            moved = True
+    except OSError:
+        pass
+    if moved:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return "the archive moved while writing", 0
+    return None, len(covered)
+
+
+# --------------------------------------------------------------------------- viewer cache
+
+_VIEW_CACHE: dict = {"key": None, "state": None, "records": None}
+
+
+def _dir_signature() -> tuple:
+    """Cheap proof that the append-only archive has not changed: the directory itself,
+    then name, size and mtime_ns per file.
+
+    archive_dir() reads RK_WORK_DIR on every call, so the directory has to be in the key.
+    Without it, a test or host tool that redirects the work dir is served another
+    directory records.
+    """
+    try:
+        return (str(archive_dir()),) + tuple(
+            (p.name, p.stat().st_size, p.stat().st_mtime_ns)
+            for p in sorted(archive_dir().glob("*.jsonl")))
+    except OSError:
+        return (str(archive_dir()),)
+
+
+def cached_view() -> tuple[ArchiveState, list[Record]]:
+    """(state, records), re-read only when the archive files actually change.
+
+    Viewers and host tools only, never the runner: the runner uses `fold`, because it
+    knows what it appended and a cache can only be wrong there. The archive is
+    append-only, so a rewrite that preserves both size and mtime_ns is not a case this
+    system produces.
+    """
+    key = _dir_signature()
+    if _VIEW_CACHE["key"] == key and _VIEW_CACHE["records"] is not None:
+        return _VIEW_CACHE["state"], _VIEW_CACHE["records"]
+    state, records = replay_with_records()
+    _VIEW_CACHE["key"] = key
+    _VIEW_CACHE["state"] = state
+    _VIEW_CACHE["records"] = records
+    return state, records
+
+
+def cached_state() -> ArchiveState:
+    """The state alone, cached on the same signature.
+
+    Same rule as cached_view: viewers and host tools only. Holding the record list for
+    the life of a process costs about a gigabyte on a full archive, so a caller that does
+    not need the records asks for this instead.
+    """
+    key = _dir_signature()
+    if _VIEW_CACHE["key"] == key and _VIEW_CACHE["state"] is not None:
+        return _VIEW_CACHE["state"]
+    state = replay()
+    _VIEW_CACHE["key"] = key
+    _VIEW_CACHE["state"] = state
+    _VIEW_CACHE["records"] = None
+    return state
+
+
+def clear_cache() -> None:
+    """Forget the cached view. The test suite calls this around every test, because a
+    cached view must not survive into another work dir."""
+    _VIEW_CACHE["key"] = None
+    _VIEW_CACHE["state"] = None
+    _VIEW_CACHE["records"] = None
+
+
 # --------------------------------------------------------------------------- tiers
 
 def _families_improved(cand: ScoreVector, inc: ScoreVector) -> int:
@@ -444,3 +884,96 @@ def assign_tier(cand: ScoreVector, incumbent: ScoreVector | None) -> Tier:
     if beats_search and not beats_heldout:
         return "search_only"
     return "unreplicated"
+
+
+# --------------------------------------------------------------------------- CLI
+
+def _same_number(a, b) -> bool:
+    """Equality that treats two NaNs as the same value, because a cell stat over a
+    non-finite score is NaN on both sides and that is agreement, not a difference."""
+    if isinstance(a, float) and isinstance(b, float) and a != a and b != b:
+        return True
+    return a == b
+
+
+def _diff_states(fast: ArchiveState, full: ArchiveState) -> list[str]:
+    """Every way the checkpoint path and a full replay disagree. Empty means identical."""
+    diffs: list[str] = []
+    if fast.n_records != full.n_records:
+        diffs.append(f"n_records {fast.n_records} != {full.n_records}")
+    if fast.last_cycle_id != full.last_cycle_id:
+        diffs.append(f"last_cycle_id {fast.last_cycle_id} != {full.last_cycle_id}")
+    for order in (1, 2, 3, 4):
+        a = fast.grids.get(order) or {}
+        b = full.grids.get(order) or {}
+        if sorted(a) != sorted(b):
+            only_a = sorted(set(a) - set(b))
+            only_b = sorted(set(b) - set(a))
+            diffs.append(f"grid {order} cells differ: checkpoint only {only_a}, replay only {only_b}")
+        for key in sorted(set(a) & set(b)):
+            if (a[key].tableau_hash, a[key].cycle_id) != (b[key].tableau_hash, b[key].cycle_id):
+                diffs.append(f"grid {order} cell {key}: {a[key].tableau_hash[:12]}/{a[key].cycle_id} "
+                             f"!= {b[key].tableau_hash[:12]}/{b[key].cycle_id}")
+    if sorted(fast.cell_stats) != sorted(full.cell_stats):
+        only_a = sorted(set(fast.cell_stats) - set(full.cell_stats))
+        only_b = sorted(set(full.cell_stats) - set(fast.cell_stats))
+        diffs.append(f"cell_stats keys differ: checkpoint only {only_a}, replay only {only_b}")
+    for key in sorted(set(fast.cell_stats) & set(full.cell_stats)):
+        sa, sb = fast.cell_stats[key], full.cell_stats[key]
+        if sorted(sa) != sorted(sb):
+            diffs.append(f"cell_stats {key} metric names differ")
+        for name in sorted(set(sa) & set(sb)):
+            ta = (sa[name].n, sa[name].mean, sa[name].m2, sa[name].min)
+            tb = (sb[name].n, sb[name].mean, sb[name].m2, sb[name].min)
+            if not all(_same_number(x, y) for x, y in zip(ta, tb)):
+                diffs.append(f"cell_stats {key} {name}: {ta} != {tb}")
+    if len(fast.record_hashes) != len(full.record_hashes):
+        diffs.append(f"record_hashes {len(fast.record_hashes)} != {len(full.record_hashes)}")
+    sym = fast.record_hashes ^ full.record_hashes
+    if sym:
+        diffs.append(f"record_hashes differ by {len(sym)} hashes, e.g. {sorted(sym)[:3]}")
+    return diffs
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    from rk_harness import verifier_hash as vh_module
+
+    ap = argparse.ArgumentParser(prog="rk_harness.archive",
+                                 description="archive checkpoint maintenance (read-only apart from --checkpoint)")
+    ap.add_argument("--checkpoint", action="store_true",
+                    help="replay every file, then write a checkpoint over the closed daily files")
+    ap.add_argument("--verify-checkpoint", action="store_true",
+                    help="compare the checkpoint path against a full replay, field by field")
+    args = ap.parse_args(argv)
+
+    if args.checkpoint:
+        state = _replay_all()
+        today = today_path().name
+        closed = [q.name for q in _archive_files() if q.name != today]
+        reason = maybe_write_checkpoint(state, vh_module.compute_verifier_hash())
+        if reason is None:
+            print(f"wrote {checkpoint_path()}: {len(closed)} closed files, {state.n_records} records")
+        else:
+            print(f"no checkpoint written: {reason}")
+        return 0
+
+    if args.verify_checkpoint:
+        fast = replay()
+        report = last_checkpoint_report()
+        full = _replay_all()
+        print(f"checkpoint used: {report.get('used')} reason: {report.get('reason') or 'none'} "
+              f"covered files: {report.get('covered_files')} folded files: {report.get('folded_files')}")
+        diffs = _diff_states(fast, full)
+        for line in diffs:
+            print(f"DIFFERENCE {line}")
+        print(f"{len(diffs)} differences; {full.n_records} records in the archive")
+        return 1 if diffs else 0
+
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

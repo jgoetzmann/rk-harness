@@ -5,6 +5,7 @@ Read-only: reads config.json, the rk-work event stream / archive / state / hypot
 
     python -m rk_harness.watch            live, refreshes every config watcher.refresh_seconds
     python -m rk_harness.watch --once     one snapshot to stdout
+    python -m rk_harness.watch --cells    the per-cell table alone, under the header
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from rich.text import Text
 
 from rk_harness import archive, encourager, ledger, verifier_hash
 from rk_harness import tableau as tableau_mod
-from rk_harness.paths import archive_dir, findings_dir, work_dir
+from rk_harness.paths import findings_dir, work_dir
 from rk_harness.timefmt import fmt_ct, to_ct
 from rk_harness.types import ArchiveState
 
@@ -92,18 +93,27 @@ def load_config() -> dict:
 EVENTS_TAIL_BYTES = 4 * 1024 * 1024
 
 
-def load_events(max_bytes: int = EVENTS_TAIL_BYTES) -> list[dict]:
+def load_events(max_bytes: int | None = None) -> tuple[list[dict], bool]:
+    """(events, truncated). `truncated` is True when the file was longer than the tail,
+    which is what every count derived from these events has to say about itself.
+
+    max_bytes defaults to EVENTS_TAIL_BYTES read at call time rather than bound at import,
+    so a test can shrink the tail and see what the scoped rows say then.
+    """
+    limit = EVENTS_TAIL_BYTES if max_bytes is None else max_bytes
     path = work_dir() / "events.jsonl"
     out: list[dict] = []
+    truncated = False
     try:
         size = path.stat().st_size
+        truncated = size > limit
         with open(path, "rb") as fh:
-            if size > max_bytes:
-                fh.seek(size - max_bytes)
+            if truncated:
+                fh.seek(size - limit)
                 fh.readline()                     # discard the partial line at the seam
             raw = fh.read().decode("utf-8", errors="replace")
     except OSError:
-        return out
+        return out, False
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -114,19 +124,19 @@ def load_events(max_bytes: int = EVENTS_TAIL_BYTES) -> list[dict]:
             continue
         if isinstance(ev, dict):
             out.append(ev)
-    return out
+    return out, truncated
 
 
-def _archive_signature() -> tuple:
-    """Cheap proof that the append-only archive has not changed: name, size and mtime per file."""
-    try:
-        out = []
-        for path in sorted(archive_dir().glob("*.jsonl")):
-            st = path.stat()
-            out.append((path.name, st.st_size, int(st.st_mtime)))
-        return tuple(out)
-    except OSError:
-        return ()
+def _scope(truncated: bool, events: list[dict]) -> str:
+    """The window a tail-derived count actually covers, as a phrase a row can end with.
+
+    events.jsonl has no rotation, so a count of cycles or calls in the tail is a run total
+    only when the tail is the whole file. Any row that prints such a count says which.
+    """
+    if not truncated:
+        return "this run"
+    first = events[0].get("ts") if events else None
+    return f"since {fmt_ct(first, default='?')}"
 
 
 def archive_view() -> tuple[ArchiveState, list]:
@@ -134,17 +144,10 @@ def archive_view() -> tuple[ArchiveState, list]:
 
     build_layout used to call replay() and read_all() on every refresh, which is two full
     passes over a 230 MB append-only archive every few seconds: more archive I/O than the
-    run it is watching does in a whole cycle. The container appends once per cycle, so a
-    size-and-mtime signature is enough to know when a re-read is owed.
+    run it is watching does in a whole cycle. The cache itself lives in archive.py now, so
+    the host tools that read the same files share it.
     """
-    sig = _archive_signature()
-    hit = _cache.get("archive")
-    if hit is not None and hit[0] == sig:
-        return hit[1], hit[2]
-    arch = archive.replay()
-    records = archive.read_all()
-    _cache["archive"] = (sig, arch, records)
-    return arch, records
+    return archive.cached_view()
 
 
 def docker_info(name: str = "rk") -> dict:
@@ -276,19 +279,19 @@ def settings_panel(cfg: dict, dk: dict) -> Panel:
     return _kv_table(rows, "settings (python configure.py explain)")
 
 
-def progress_panel(st, arch: ArchiveState, events: list[dict], records, now) -> Panel:
+def progress_panel(st, arch: ArchiveState, events: list[dict], records, now, scope: str) -> Panel:
     accepted = [e for e in events if e.get("kind") == "accepted"]
     rejected = [e for e in events if e.get("kind") == "rejected"]
     cycles = [e for e in events if e.get("kind") == "cycle_done"]
     recent = [e for e in accepted if (_parse_ts(e.get("ts")) or now) > now - datetime.timedelta(minutes=10)]
     rate_h = len(recent) * 6
     rows: list[tuple[str, str]] = [
-        ("cycles done", f"{len(cycles)} (this archive)   last: " + (fmt_ct(cycles[-1].get("ts"), default="?") if cycles else "none")),
-        ("candidates", f"accepted {len(accepted)}   rejected {len(rejected)}   rate {rate_h}/h (last 10 min)"),
+        ("cycles done", f"{len(cycles)} {scope}   last: " + (fmt_ct(cycles[-1].get("ts"), default="?") if cycles else "none")),
+        ("candidates", f"accepted {len(accepted)}   rejected {len(rejected)} {scope}   rate {rate_h}/h (last 10 min)"),
     ]
     if rejected:
         top = Counter(e.get("code") for e in rejected).most_common(3)
-        rows.append(("reject codes", ", ".join(f"{c} x{n}" for c, n in top)))
+        rows.append(("reject codes", ", ".join(f"{c} x{n}" for c, n in top) + f" {scope}"))
     enum = [e for e in events if e.get("kind") == "enumeration"]
     if enum and st.phase in (0, 1):
         e = enum[-1]
@@ -302,8 +305,17 @@ def progress_panel(st, arch: ArchiveState, events: list[dict], records, now) -> 
     cov = {o: (len(g), len(encourager.stage_domain(o)) * 8) for o, g in arch.grids.items()}
     rows.append(("grid coverage",
                  "  ".join(f"order {o}: {n}/{tot} cells" for o, (n, tot) in sorted(cov.items()))))
+    # The held-out gap and surrogate eligibility, kept from the retired dashboard: DESIGN
+    # calls the gap a first-class metric, so it has to be on the view that actually runs.
+    rows.append(("heldout gap", f"{encourager.heldout_gap(arch):.4g} (mean heldout - search over elites)"))
+    rows.append(("surrogate", "eligible" if arch.n_records >= 5000
+                 else f"not trained (need 5000, have {arch.n_records})"))
     improved = [e for e in cycles if e.get("improved")]
-    rows.append(("last improvement", fmt_ct(improved[-1].get("ts"), default="?") if improved else "none yet"))
+    if improved:
+        last_improved = fmt_ct(improved[-1].get("ts"), default="?")
+    else:
+        last_improved = "none yet" if scope == "this run" else f"none {scope}"
+    rows.append(("last improvement", last_improved))
     rows.append(("current cell", str(st.current_cell)))
     return _kv_table(rows, "progress")
 
@@ -354,7 +366,7 @@ def working_panel(events: list[dict], hyps: list[dict]) -> Panel:
     return _kv_table(rows, "what it is working on")
 
 
-def llm_panel(events: list[dict], dk: dict) -> Panel:
+def llm_panel(events: list[dict], dk: dict, scope: str) -> Panel:
     def last(kind):
         for e in reversed(events):
             if e.get("kind") == kind:
@@ -363,7 +375,7 @@ def llm_panel(events: list[dict], dk: dict) -> Panel:
     env = dk.get("env", {})
     rows: list[tuple[str, str]] = [("mode", f"RK_LLM={env.get('RK_LLM', os.environ.get('RK_LLM', '?'))}  model={env.get('RK_LLM_MODEL', 'default')}")]
     calls = [e for e in events if e.get("kind") == "llm_call"]
-    rows.append(("directive calls", f"{len(calls)} total; last {fmt_ct(calls[-1].get('ts')) if calls else 'none'}"))
+    rows.append(("directive calls", f"{len(calls)} {scope}; last {fmt_ct(calls[-1].get('ts')) if calls else 'none'}"))
     u = last("codex_usage")
     if u:
         used, window, resets, plan = u.get("used_percent"), u.get("window_minutes"), u.get("resets_at"), u.get("plan_type")
@@ -422,7 +434,7 @@ def results_panel(arch: ArchiveState, records) -> Panel:
     return Panel(grid, title="results")
 
 
-def health_panel(events: list[dict], now) -> Panel:
+def health_panel(events: list[dict], now, scope: str) -> Panel:
     rows: list[tuple[str, str]] = []
     try:
         vh = verifier_hash.compute_verifier_hash()
@@ -443,13 +455,13 @@ def health_panel(events: list[dict], now) -> Panel:
     except Exception:  # noqa: BLE001 - the live view must never fail on an optional panel row
         pass
     abandoned = [e for e in events if e.get("kind") == "cycle_abandoned"]
-    rows.append(("abandoned cycles", f"{len(abandoned)}" + (f"; last: {str(abandoned[-1].get('error'))[:120]}" if abandoned else "")))
+    rows.append(("abandoned cycles", f"{len(abandoned)} {scope}" + (f"; last: {str(abandoned[-1].get('error'))[:120]}" if abandoned else "")))
     stops = [e for e in events if str(e.get("kind", "")).startswith("stopped_by") or e.get("kind") == "spend_cap_exceeded"]
     if stops:
         rows.append(("last stop", f"{stops[-1].get('kind')} at {fmt_ct(stops[-1].get('ts'))}"))
     sb = [e for e in events if e.get("kind") == "site_build_failed"]
     if sb:
-        rows.append(("site build failures", f"{len(sb)}; last {str(sb[-1].get('error'))[:100]}"))
+        rows.append(("site build failures", f"{len(sb)} {scope}; last {str(sb[-1].get('error'))[:100]}"))
     try:
         du = shutil.disk_usage(str(work_dir()))
         rows.append(("disk (work drive)", f"{du.free / 1e9:.1f} GB free of {du.total / 1e9:.0f} GB"))
@@ -534,10 +546,11 @@ def events_panel(events: list[dict], n: int) -> Panel:
     return Panel(t, title=f"last {n} events")
 
 
-def build_layout() -> Layout:
+def build_layout(cells: bool = False) -> Layout:
     cfg = load_config()
     now = _now()
-    events = load_events()
+    events, truncated = load_events()
+    scope = _scope(truncated, events)
     dk = docker_info()
     try:
         arch, records = archive_view()
@@ -545,6 +558,13 @@ def build_layout() -> Layout:
         arch = ArchiveState(0, 0, {1: {}, 2: {}, 3: {}, 4: {}}, (), ())
         records = []
     st = _load_state(arch)
+    if cells:
+        # display mode: the per-cell table at full width, with the header for context
+        only = Layout(name="root")
+        only.split_column(Layout(name="head", size=4), Layout(name="cells"))
+        only["head"].update(header(st, arch, events, dk, now))
+        only["cells"].update(results_panel(arch, records))
+        return only
     try:
         hyps = ledger.load_hypotheses()
     except Exception:  # noqa: BLE001
@@ -558,39 +578,40 @@ def build_layout() -> Layout:
                               Layout(name="health"), Layout(name="machine", size=12))
     root["head"].update(header(st, arch, events, dk, now))
     root["settings"].update(settings_panel(cfg, dk))
-    root["llm"].update(llm_panel(events, dk))
-    root["progress"].update(progress_panel(st, arch, events, records, now))
+    root["llm"].update(llm_panel(events, dk, scope))
+    root["progress"].update(progress_panel(st, arch, events, records, now, scope))
     root["working"].update(working_panel(events, hyps))
-    root["health"].update(health_panel(events, now))
+    root["health"].update(health_panel(events, now, scope))
     root["machine"].update(machine_panel(dk))
     root["right"].update(results_panel(arch, records))
     root["bottom"].update(events_panel(events, n_tail))
     return root
 
 
-def render_once(width: int = 160, height: int = 80) -> str:
+def render_once(width: int = 160, height: int = 80, cells: bool = False) -> str:
     console = Console(width=width, height=height, record=True, force_terminal=False)
-    console.print(build_layout(), height=height)
+    console.print(build_layout(cells), height=height)
     return console.export_text()
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="rk_harness.watch")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--cells", action="store_true", help="the per-cell table alone")
     args = ap.parse_args(argv)
     if args.once:
         base = Console()
         console = Console(width=max(base.width, 160), force_terminal=base.is_terminal)
-        console.print(build_layout(), height=max(base.height, 80))
+        console.print(build_layout(args.cells), height=max(base.height, 80))
         return 0
     refresh = int(load_config().get("watcher", {}).get("refresh_seconds", 5))
     console = Console()
     try:
-        with Live(build_layout(), console=console, screen=True, refresh_per_second=1) as live:
+        with Live(build_layout(args.cells), console=console, screen=True, refresh_per_second=1) as live:
             while True:
                 time.sleep(max(1, refresh))
                 try:
-                    live.update(build_layout())
+                    live.update(build_layout(args.cells))
                 except Exception as e:  # noqa: BLE001 — never let the view die on a transient read
                     live.update(Panel(f"refresh failed: {e!r}", title="rk run"))
     except KeyboardInterrupt:
