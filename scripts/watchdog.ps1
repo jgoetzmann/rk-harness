@@ -20,9 +20,45 @@ param(
     [switch]$NoSaturation,
     [switch]$AutoFreeze,   # without this, saturation checks are advisory: log only, never freeze
     [switch]$NoBatteryGuard,
-    [switch]$Once
+    [switch]$Once,
+    [string]$LogFile = "",          # append every line this script prints here as well
+    [string]$PeerContainers = "rk", # comma-separated; only these are subtracted from host load
+    [int]$StatsTimeoutMs = 4000,    # hard timeout on the docker stats probe
+    [double]$MinFreeSystemGB = 0,   # system-drive floor; 0 = report only, never stop
+    [string]$CpuSampleFile = ""     # where to publish the per-poll sample (empty = workspace root)
 )
 $ErrorActionPreference = "Continue"
+
+# Why this log exists: the watchdog runs in a minimized window nobody looks at, so an ALERT,
+# a pause or a kill is printed once and lost. status.py reads the tail of this file back into
+# stats.txt, which is the file a human actually opens. Timestamps are UTC with a Z suffix,
+# not Get-Date -Format s: that format is local and carries no offset, and status._parse_ts
+# treats a naive stamp as UTC, which would be seven hours wrong here. Storage is UTC
+# everywhere in this project (house rule 6); the display side converts, not the writer.
+$script:LastRotate = [datetime]::MinValue
+
+function Rotate-Log {
+    # Logging must never be able to stop the kill switch, hence the outer try/catch.
+    try {
+        # Stamped first, so a no-op or a failure does not make every poll retry this.
+        $script:LastRotate = Get-Date
+        if (-not $LogFile) { return }
+        $dir = Split-Path $LogFile -Parent
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        if (Test-Path $LogFile) {
+            $len = (Get-Item $LogFile).Length
+            if ($len -gt 1MB) { Move-Item -LiteralPath $LogFile -Destination "$LogFile.1" -Force -ErrorAction SilentlyContinue }
+        }
+    } catch {}
+}
+
+function Say([string]$msg) {
+    $line = "$([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')) $msg"
+    Write-Host $line
+    if ($LogFile) {
+        try { Add-Content -Path $LogFile -Value $line -Encoding ascii } catch {}
+    }
+}
 
 # Epoch saturation orchestrator (owner-delegated, 2026-09-02; rule in docs/ROADMAP.md).
 # The decision state lives on disk in rk-work (python side), never in this process.
@@ -47,8 +83,8 @@ function Push-Repo([string]$path) {
     $ahead = cmd /c "git -C `"$path`" rev-list --count @{u}..HEAD 2>&1"
     if ($ahead -match '^\d+$' -and [int]$ahead -gt 0) {
         $out = cmd /c "git -C `"$path`" push -q origin HEAD 2>&1"
-        if ($LASTEXITCODE -eq 0) { Write-Host "$(Get-Date -Format s) pushed $ahead commit(s) from $path" }
-        else { Write-Host "$(Get-Date -Format s) push FAILED for ${path}: $out" }
+        if ($LASTEXITCODE -eq 0) { Say "pushed $ahead commit(s) from $path" }
+        else { Say "push FAILED for ${path}: $out" }
     }
 }
 $lastPush = Get-Date
@@ -97,15 +133,104 @@ function Container-UptimeSeconds {
     } catch { return 0 }
 }
 
+function Get-DockerCpuRows([int]$TimeoutMs) {
+    # Every container on the daemon, name -> percent of the whole machine, or $null if the
+    # probe did not answer in time. docker stats has no timeout flag of its own and samples
+    # every container, so it runs as a child process this function can kill.
+    #
+    # Why bound it: this call sits on the path that decides whether the run is paused, and
+    # this daemon has been seen wedged and answering HTTP 500 on every endpoint. Measured
+    # 2026-09-08 on a quiet host over five consecutive calls, the healthy cost is 1.41 s
+    # minimum and 2.01 s median, so a 10 s poll becomes roughly 12 s and the 120 s heartbeat
+    # window holds about ten samples instead of twelve. That is a skew, not a collapse; the
+    # timeout is for the tail, not for the median. (An older note in this project quotes
+    # 47 s. That was a saturated machine, and it is not the typical cost.)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "docker"
+    $psi.Arguments = 'stats --no-stream --format "{{.Name}},{{.CPUPerc}}"'
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $text = $null
+    $p = $null
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        # Start both reads before waiting. ReadToEnd() before WaitForExit() deadlocks the
+        # moment the child fills a pipe buffer.
+        $stdout = $p.StandardOutput.ReadToEndAsync()
+        $stderr = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit($TimeoutMs)) {
+            try { $p.Kill() } catch {}
+            return $null
+        }
+        if ($p.ExitCode -ne 0) { return $null }
+        $null = $stderr
+        $text = $stdout.Result
+    } catch {
+        return $null
+    } finally {
+        if ($p) { try { $p.Dispose() } catch {} }
+    }
+    $rows = @{}
+    foreach ($line in ($text -split "`r?`n")) {
+        $line = $line.Trim()
+        if (-not $line) { continue }
+        # A Docker container name cannot contain a comma, so the last one splits the row.
+        $i = $line.LastIndexOf(',')
+        if ($i -lt 1) { continue }
+        $name = $line.Substring(0, $i).Trim()
+        $s = $line.Substring($i + 1).Trim().TrimEnd('%')
+        $pct = 0.0
+        # docker prints 12.34%; a plain cast under a comma-decimal locale misparses it, and
+        # a container with no reading prints -- which is not a number at all.
+        if (-not [double]::TryParse($s, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$pct)) { $pct = 0.0 }
+        # Same scale as Get-Counter '\Processor(_Total)\% Processor Time', which is what the
+        # thresholds around this were tuned against on 2026-09-03.
+        $rows[$name] = $pct / [Environment]::ProcessorCount
+    }
+    return $rows
+}
+
+function Write-CpuSample($rows) {
+    # One sampler, both readers (harness-platform item 3), writer half only. A second
+    # harness on this machine can read this file instead of making its own docker stats
+    # call. Reader contract: a file older than about 2.5 polls counts as absent and the
+    # reader samples for itself; no decision may ever wait on it. rk does not read it back,
+    # because rk is what wrote it - reading it would only be rk reusing its own last
+    # sample, which is the carried-forward value this project refuses everywhere else.
+    # Failing to write it must never affect the guard, hence the blanket catch.
+    try {
+        if (-not $CpuSampleFile) { return }
+        $doc = @{ ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                  by = $Container
+                  containers = $rows }
+        $tmp = "$CpuSampleFile.tmp"
+        Set-Content -Path $tmp -Value ($doc | ConvertTo-Json -Compress) -Encoding ascii
+        Move-Item -LiteralPath $tmp -Destination $CpuSampleFile -Force
+    } catch {}
+}
+
 $cap = Read-Cap
 $highSince = $null
 $lowSince = $null
 $cpuSamples = New-Object System.Collections.ArrayList
 $alerted = $false
-Write-Host "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s heartbeat-stale=${HeartbeatStaleSeconds}s min-free=${MinFreeGB}GB push=${PushMinutes}min cpu-pause spike ${CpuHigh}/${CpuLow}% for ${CpuSustainSeconds}s, avg ${CpuHighAvg}/${CpuLowAvg}% over ${CpuAvgWindowSeconds}s battery-guard=$(-not $NoBatteryGuard)"
+# A peer list is a name list, and a wrong name silently subtracts nothing. The banner names
+# the requested set and the first successful poll names the resolved one.
+$peerList = @($PeerContainers -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$peersReported = $false
+$statsFailing = $false
+$lastSysWarn = [datetime]::MinValue
+if (-not $CpuSampleFile) { $CpuSampleFile = Join-Path (Split-Path $HarnessRoot -Parent) "docker-cpu.json" }
+$sysPolicy = if ($MinFreeSystemGB -gt 0) { "guard at ${MinFreeSystemGB}GB" } else { "report only" }
+Rotate-Log
+Say "watchdog: container=$Container work=$Work cap=$cap USD poll=${PollSeconds}s heartbeat-stale=${HeartbeatStaleSeconds}s min-free=${MinFreeGB}GB push=${PushMinutes}min cpu-pause spike ${CpuHigh}/${CpuLow}% for ${CpuSustainSeconds}s, avg ${CpuHighAvg}/${CpuLowAvg}% over ${CpuAvgWindowSeconds}s battery-guard=$(-not $NoBatteryGuard)"
+Say "watchdog: peers=[$($peerList -join ', ')] docker-stats-timeout=${StatsTimeoutMs}ms system-drive=$sysPolicy cpu-sample=$CpuSampleFile"
 
 while ($true) {
     if (-not $Once) { Start-Sleep -Seconds $PollSeconds }
+    if (((Get-Date) - $script:LastRotate).TotalMinutes -ge 10) { Rotate-Log }
     # 0. Host-side push of completed commits every $PushMinutes (or on every -Once pass).
     if ($Once -or ((Get-Date) - $lastPush).TotalMinutes -ge $PushMinutes) {
         Push-Repo $Work
@@ -124,13 +249,13 @@ while ($true) {
         $sat = $null
         try { $sat = $satRaw | ConvertFrom-Json } catch {}
         if ($sat -and $sat.action -eq "freeze" -and $AutoFreeze) {
-            Write-Host "$(Get-Date -Format s) SATURATION freeze threshold met ($($sat.consecutive)/$($sat.consecutive_needed) checks, last progress $($sat.hours_since_progress)h ago); dropping STOP for a graceful epoch freeze"
+            Say "SATURATION freeze threshold met ($($sat.consecutive)/$($sat.consecutive_needed) checks, last progress $($sat.hours_since_progress)h ago); dropping STOP for a graceful epoch freeze"
             Set-Content -Path (Join-Path $Work "STOP") -Value "stop" -Encoding ascii
             $freezePending = $true
         } elseif ($sat -and $sat.action -eq "freeze") {
-            Write-Host "$(Get-Date -Format s) saturation ADVISORY: freeze threshold met ($($sat.consecutive) checks) but auto-freeze is off (owner ruling 2026-09-03); run continues"
+            Say "saturation ADVISORY: freeze threshold met ($($sat.consecutive) checks) but auto-freeze is off (owner ruling 2026-09-03); run continues"
         } elseif ($sat -and $sat.verdict -ne "FROZEN") {
-            Write-Host "$(Get-Date -Format s) saturation: $($sat.verdict) (progress $($sat.hours_since_progress)h ago, checks $($sat.consecutive)/$($sat.consecutive_needed))"
+            Say "saturation: $($sat.verdict) (progress $($sat.hours_since_progress)h ago, checks $($sat.consecutive)/$($sat.consecutive_needed))"
         }
     }
     if ($freezePending) {
@@ -141,7 +266,7 @@ while ($true) {
             & $VenvPython -m rk_harness.saturation --mark-frozen "no archive progress past the window and falsification concluded" | Out-Null
             Push-Repo $Work
             Push-Repo $Findings
-            Write-Host "$(Get-Date -Format s) EPOCH 1 FROZEN: run stopped cleanly, EPOCH_STATUS.json written and pushed"
+            Say "EPOCH 1 FROZEN: run stopped cleanly, EPOCH_STATUS.json written and pushed"
             $freezePending = $false
         }
     }
@@ -150,20 +275,20 @@ while ($true) {
     # variables: start.ps1 restarts the watchdog, and a fresh instance must adopt a paused
     # container instead of killing it or leaving it frozen.
     $status = (docker inspect -f "{{.State.Status}}" $Container 2>$null)
-    if ($status -ne "running" -and $status -ne "paused") { Write-Host "$(Get-Date -Format s) container not running ($status); watchdog idle"; if ($Once) { break }; continue }
+    if ($status -ne "running" -and $status -ne "paused") { Say "container not running ($status); watchdog idle"; if ($Once) { break }; continue }
     $isPaused = ($status -eq "paused")
 
     # 0b. Battery: pause while unplugged, resume on AC. Takes precedence over the CPU pause logic.
     if (-not $NoBatteryGuard) {
         if (On-Battery) {
             if (-not $isPaused) {
-                Write-Host "$(Get-Date -Format s) on battery -> docker pause"
+                Say "on battery -> docker pause"
                 docker pause $Container | Out-Null
             }
             $pausedBattery = $true
             if ($Once) { break }; continue
         } elseif ($pausedBattery) {
-            Write-Host "$(Get-Date -Format s) back on AC -> docker unpause"
+            Say "back on AC -> docker unpause"
             if ($isPaused) { docker unpause $Container | Out-Null; $isPaused = $false }
             $pausedBattery = $false
         }
@@ -171,7 +296,7 @@ while ($true) {
 
     # 1. Killfile: graceful stop at the cycle boundary (the runner polls STOP itself).
     if (Test-Path (Join-Path $Work "STOP")) {
-        Write-Host "$(Get-Date -Format s) STOP present; runner will stop at cycle boundary"
+        Say "STOP present; runner will stop at cycle boundary"
     }
 
     # 2. Heartbeat stale > 120 s -> docker kill.
@@ -183,23 +308,23 @@ while ($true) {
             # Startup grace: never kill a container younger than the staleness threshold - the
             # entrypoint gate runs before the runner's heartbeat thread exists.
             if ($age -gt $HeartbeatStaleSeconds -and -not $isPaused -and (Container-UptimeSeconds) -gt $HeartbeatStaleSeconds) {
-                Write-Host "$(Get-Date -Format s) heartbeat stale ${age}s -> docker kill"
+                Say "heartbeat stale ${age}s -> docker kill"
                 docker kill $Container | Out-Null
                 if ($Once) { break }; continue
             }
-        } catch { Write-Host "heartbeat unreadable" }
+        } catch { Say "heartbeat unreadable" }
     }
 
     # 3. No verified candidate in 30 min -> log alert (escalation is the encourager's job).
     $ageMin = Get-LastVerifiedAge
     if ($null -ne $ageMin -and $ageMin -gt $NoCandidateMinutes) {
-        if (-not $alerted) { Write-Host "$(Get-Date -Format s) ALERT: no verified candidate for $([int]$ageMin) min"; $alerted = $true }
+        if (-not $alerted) { Say "ALERT: no verified candidate for $([int]$ageMin) min"; $alerted = $true }
     } else { $alerted = $false }
 
     # 4. Spend over cap -> hard stop.
     $spend = Get-Spend
     if ($spend -gt $cap) {
-        Write-Host "$(Get-Date -Format s) spend $spend USD > cap $cap -> docker stop"
+        Say "spend $spend USD > cap $cap -> docker stop"
         docker stop $Container | Out-Null
         if ($Once) { break }; continue
     }
@@ -208,9 +333,27 @@ while ($true) {
     $drive = (Get-Item $Work).PSDrive
     $freeGB = [double]$drive.Free / 1GB
     if ($freeGB -lt $MinFreeGB) {
-        Write-Host "$(Get-Date -Format s) disk free ${freeGB} GB < $MinFreeGB -> docker stop"
+        Say "disk free ${freeGB} GB < $MinFreeGB -> docker stop"
         docker stop $Container | Out-Null
         if ($Once) { break }; continue
+    }
+
+    # 5b. The system drive, which block 5 does not watch. Docker's VHDX lives there, so it
+    # fills for reasons that have nothing to do with the run and takes the daemon with it.
+    # Default 0 is report only: whether a low system drive should stop the research run is
+    # the owner's call, and watchdog.min_free_system_gb makes it a value rather than an edit.
+    $sysFree = $null
+    try { $sysFree = [double]((Get-PSDrive -Name $env:SystemDrive.TrimEnd(':') -ErrorAction Stop).Free) / 1GB } catch { $sysFree = $null }
+    if ($null -ne $sysFree) {
+        $sysTxt = [math]::Round($sysFree, 1)
+        if ($MinFreeSystemGB -gt 0 -and $sysFree -lt $MinFreeSystemGB) {
+            Say "system drive $env:SystemDrive free ${sysTxt} GB < $MinFreeSystemGB -> docker stop"
+            docker stop $Container | Out-Null
+            if ($Once) { break }; continue
+        } elseif ($MinFreeSystemGB -le 0 -and $sysFree -lt 5.0 -and ((Get-Date) - $lastSysWarn).TotalMinutes -ge 30) {
+            Say "system drive $env:SystemDrive free ${sysTxt} GB and unguarded; set watchdog.min_free_system_gb to stop the run on it"
+            $lastSysWarn = Get-Date
+        }
     }
 
     # Pause watchdog (section 13.5, owner-tuned 2026-09-03). Two triggers each way:
@@ -219,12 +362,48 @@ while ($true) {
     # OR a quiet average (< $CpuLowAvg over the window). The sample buffer clears after any
     # action so the spike and average rules cannot flap against each other.
     $total = [double](Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
-    $ctr = 0.0
-    try {
-        $stats = docker stats --no-stream --format "{{.CPUPerc}}" $Container 2>$null
-        if ($stats) { $ctr = [double]($stats.Trim('%')) / [Environment]::ProcessorCount }
-    } catch {}
-    $host_cpu = [math]::Max(0.0, $total - $ctr)
+    if ($isPaused) {
+        # A paused container's cgroup is frozen, so its CPU share is zero and there is
+        # nothing to subtract. Skipping the probe here is not only cheaper: it is what keeps
+        # a wedged daemon from stranding a paused run, because the rule below decides
+        # nothing when the probe fails and the resume would otherwise never be computed.
+        $host_cpu = $total
+    } else {
+        $rows = Get-DockerCpuRows $StatsTimeoutMs
+        if ($null -eq $rows) {
+            # One line per outage, not one per poll: killing docker.exe leaves its request
+            # in flight, so the next poll may well find the daemon busy again.
+            if (-not $statsFailing) {
+                Say "docker stats did not answer within ${StatsTimeoutMs}ms; pause guard idle until it does"
+                $statsFailing = $true
+            }
+            # Decide nothing on a failed probe. Clearing the buffer is the same reset the
+            # loop already does after a pause or an unpause, so the spike rule and the
+            # average rule cannot flap against each other across the outage.
+            $cpuSamples.Clear(); $highSince = $null; $lowSince = $null
+            if ($Once) { break }
+            continue
+        }
+        if ($statsFailing) { Say "docker stats is answering again; pause guard active"; $statsFailing = $false }
+        if (-not $peersReported) {
+            $seen = @(); $missing = @()
+            foreach ($n in $peerList) {
+                if ($rows.ContainsKey($n)) { $seen += "${n} $([math]::Round($rows[$n], 1))%" } else { $missing += $n }
+            }
+            $peerMsg = "peers subtracted from host load: " + $(if ($seen.Count) { $seen -join ", " } else { "none" })
+            if ($missing.Count) { $peerMsg += "; requested but not running: " + ($missing -join ", ") }
+            Say $peerMsg
+            $peersReported = $true
+        }
+        # Only the named peers are subtracted. Every other container counts as foreground
+        # load the run should yield to, which is why the default is rk alone: a crash-looping
+        # third-party stack must not be able to run this machine hot while the guard reports
+        # it quiet.
+        $peerSum = 0.0
+        foreach ($n in $peerList) { if ($rows.ContainsKey($n)) { $peerSum += [double]$rows[$n] } }
+        $host_cpu = [math]::Max(0.0, $total - $peerSum)
+        Write-CpuSample $rows
+    }
     $now = Get-Date
     [void]$cpuSamples.Add(@{ t = $now; v = $host_cpu })
     while ($cpuSamples.Count -gt 0 -and ($now - $cpuSamples[0].t).TotalSeconds -gt $CpuAvgWindowSeconds) { $cpuSamples.RemoveAt(0) }
@@ -244,12 +423,12 @@ while ($true) {
 
     if (-not $isPaused -and ($spikePause -or $avgPause)) {
         $why = if ($spikePause) { "host CPU ${host_cpu}% > ${CpuHigh}% for ${CpuSustainSeconds}s" } else { "host CPU avg ${avgTxt}% > ${CpuHighAvg}% over ${winMin} min" }
-        Write-Host "$(Get-Date -Format s) $why -> docker pause"
+        Say "$why -> docker pause"
         docker pause $Container | Out-Null
         $highSince = $null; $lowSince = $null; $cpuSamples.Clear()
     } elseif ($isPaused -and ($spikeResume -or $avgResume)) {
         $why = if ($spikeResume) { "host CPU ${host_cpu}% < ${CpuLow}% for ${CpuSustainSeconds}s" } else { "host CPU avg ${avgTxt}% < ${CpuLowAvg}% over ${winMin} min" }
-        Write-Host "$(Get-Date -Format s) $why -> docker unpause"
+        Say "$why -> docker unpause"
         docker unpause $Container | Out-Null
         $highSince = $null; $lowSince = $null; $cpuSamples.Clear()
     }

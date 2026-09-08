@@ -54,14 +54,38 @@ def _all_elites(arch: ArchiveState):
             yield arch.grids[order][key]
 
 
-def emptiest_cell(arch: ArchiveState, order: int) -> tuple[int, int]:
-    grid = arch.grids.get(order, {})
+POLICIES: tuple[str, ...] = ("empty", "revisit")
+
+
+def cell_policy(policy: str) -> str:
+    """The cell-targeting half of a run policy name.
+
+    The runner's policy names carry two independent choices: which cell to aim at
+    ("empty" or "revisit") and whether CMA-ES warm starts from that cell's incumbent
+    ("warm"). Only the first half concerns this module, so "revisit+warm" targets like
+    "revisit" and anything unrecognised targets like "empty" (the shipped default).
+    """
+    return "revisit" if "revisit" in str(policy or "").lower() else "empty"
+
+
+def _heldout_of(rec) -> float:
+    try:
+        return float(rec.score.heldout_error)
+    except (AttributeError, TypeError, ValueError):
+        return math.nan
+
+
+def revisit_cell(arch: ArchiveState, order: int) -> tuple[int, int] | None:
+    """The occupied cell worth returning to: highest finite held-out error, earliest on ties.
+
+    None when nothing in stage_domain(order) is occupied, which is the caller's signal that
+    there is nothing to revisit and an empty cell has to be chosen instead. A cell whose
+    elite carries a non-finite held-out error cannot be ranked, so it is passed over unless
+    it is the only kind of cell there is.
+    """
+    grid = arch.grids.get(order, {}) if arch is not None and arch.grids else {}
     domain = stage_domain(order)
-    for s in domain:
-        for b in _BUCKETS:
-            if (s, b) not in grid:
-                return (s, b)
-    # Grid full: the cell whose elite has the highest heldout_error (earliest on ties).
+    first_occupied: tuple[int, int] | None = None
     worst_key: tuple[int, int] | None = None
     worst_val = -math.inf
     for s in domain:
@@ -69,11 +93,36 @@ def emptiest_cell(arch: ArchiveState, order: int) -> tuple[int, int]:
             rec = grid.get((s, b))
             if rec is None:
                 continue
-            v = rec.score.heldout_error
-            if worst_key is None or v > worst_val:
+            if first_occupied is None:
+                first_occupied = (s, b)
+            v = _heldout_of(rec)
+            if _finite(v) and v > worst_val:
                 worst_key = (s, b)
                 worst_val = v
-    return worst_key if worst_key is not None else (domain[0], 0)
+    return worst_key if worst_key is not None else first_occupied
+
+
+def emptiest_cell(arch: ArchiveState, order: int) -> tuple[int, int]:
+    grid = arch.grids.get(order, {})
+    domain = stage_domain(order)
+    for s in domain:
+        for b in _BUCKETS:
+            if (s, b) not in grid:
+                return (s, b)
+    # Grid full: there is no empty cell left, so the worst occupied one is the target.
+    return revisit_cell(arch, order) or (domain[0], 0)
+
+
+def target_cell(arch: ArchiveState, order: int, policy: str = "empty") -> tuple[int, int]:
+    """The cell a search should aim at under `policy`.
+
+    Pure: the policy is an argument, never an environment read, so a caller that wants the
+    shipped behaviour asks for it by name. "revisit" falls back to the emptiest cell while
+    the grid still holds nothing, because there is no incumbent to return to.
+    """
+    if cell_policy(policy) == "revisit":
+        return revisit_cell(arch, order) or emptiest_cell(arch, order)
+    return emptiest_cell(arch, order)
 
 
 def heldout_gap(arch: ArchiveState) -> float:

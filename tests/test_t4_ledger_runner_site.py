@@ -32,6 +32,10 @@ from rk_harness.runner import (
     now, iso_now, heartbeat, load_state, save_state, log_event, seed_baselines, run_cycle,
 )
 from rk_harness.archive import read_all, replay, append, record_to_json
+from rk_harness import policyab
+from rk_harness import runner as runner_mod
+from rk_harness import search as search_mod
+from rk_harness.directive import fallback_directive
 from rk_harness.verifier_hash import compute_verifier_hash
 from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
@@ -2255,6 +2259,216 @@ def test_R6_the_cycle_writes_a_checkpoint_once_a_day_has_closed(monkeypatch, tmp
     assert len([e for e in events if e.get("kind") == "archive_checkpoint_written"]) == 1
     assert [e for e in events if e.get("kind") == "archive_checkpoint_rejected"] == []
     assert ckpt.stat().st_mtime_ns == stamp
+
+
+# ======================================================================================
+# Exploration policy: rotation, warm starts, and the policy reader (P05, B84, B85)
+# ======================================================================================
+
+def _policy_env(monkeypatch, policy=None, block=None) -> None:
+    for name, value in (("RK_SEARCH_POLICY", policy), ("RK_POLICY_BLOCK_CYCLES", block)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, str(value))
+
+
+def _p05_arch() -> ArchiveState:
+    """An order-4 grid holding rk4 as the elite of one four-stage cell."""
+    rec = _rec(_classical_8()["rk4"], _sv(33, 85, 0.001, 0.002, 4.0), "heldout_verified", 1, "D-E000001")
+    return ArchiveState(n_records=1, last_cycle_id=1,
+                        grids={1: {}, 2: {}, 3: {}, 4: {(4, 2): rec}},
+                        open_hypotheses=(), refuted_hypotheses=())
+
+
+def _stub_island(monkeypatch, yields):
+    """Replace the CMA-ES island with a generator that records how it was called."""
+    calls: list[dict] = []
+
+    def fake(order, stages, seed, constraints, budget, sigma=None):
+        calls.append({"order": order, "stages": stages, "seed": seed, "budget": budget,
+                      "constraints": dict(constraints), "sigma": sigma})
+        for t in yields:
+            yield t
+
+    monkeypatch.setattr("rk_harness.search.cmaes_island", fake)
+    return calls
+
+
+def test_B84_search_policy_rotation_is_a_pure_function_of_cycle_id(monkeypatch):
+    _policy_env(monkeypatch)
+    for cycle in (0, 1, 7, 99, 100, 12345):
+        assert runner_mod._search_policy(cycle) == "empty", cycle
+    _policy_env(monkeypatch, "off")
+    assert runner_mod._search_policy(3) == "empty"
+    _policy_env(monkeypatch, "revisit")
+    assert [runner_mod._search_policy(c) for c in (0, 10, 999)] == ["revisit"] * 3
+    rot = runner_mod._POLICY_ROTATION
+    assert len(rot) >= 2 and set(rot) <= set(runner_mod.POLICIES)
+    _policy_env(monkeypatch, "rotate", 10)
+    for i in range(len(rot) + 1):
+        for cycle in range(i * 10, i * 10 + 10):
+            assert runner_mod._search_policy(cycle) == rot[i % len(rot)], (i, cycle)
+    # a garbage block length clamps rather than raising; an unknown policy name stays disarmed
+    _policy_env(monkeypatch, "rotate", "junk")
+    assert runner_mod._policy_block() == 100
+    for bad in (0, -5, ""):
+        _policy_env(monkeypatch, "rotate", bad)
+        assert runner_mod._policy_block() >= 1
+        assert runner_mod._search_policy(1) in runner_mod.POLICIES
+    _policy_env(monkeypatch, "REVISIT+WARM ")
+    assert runner_mod._search_policy(1) == "revisit+warm"
+    _policy_env(monkeypatch, "not-a-policy")
+    assert runner_mod._search_policy(1) == "empty"
+    assert runner_mod._warm_start_enabled("warm")
+    assert runner_mod._warm_start_enabled("revisit+warm")
+    assert not runner_mod._warm_start_enabled("empty")
+    assert not runner_mod._warm_start_enabled("revisit")
+
+
+def test_B84_island_events_carry_the_policy_and_warm_start_flag(monkeypatch, tmp_path):
+    work = _setup_env(monkeypatch, tmp_path, phase="2")
+    arch = _p05_arch()
+    calls = _stub_island(monkeypatch, [_classical_8()["kutta3"]])
+    d = fallback_directive(arch, 2, 4, "revisit+warm")
+    assert d["directive_id"] == "D-FR00004" and d["stages"] == [4]
+    cands = runner_mod._cmaes_candidates(d, 4, arch, "revisit+warm")
+    assert cands and all(c.directive_id == "D-FR00004" for c in cands)
+    x0 = search_mod.x0_from_tableau(_classical_8()["rk4"])
+    assert calls and [c["constraints"].get("x0") for c in calls] == [x0] * len(calls)
+    events = _read_jsonl(work / "events.jsonl")
+    starts = [e for e in events if e["kind"] == "island_start"]
+    dones = [e for e in events if e["kind"] == "island_done"]
+    assert len(starts) == len(dones) == d["islands"]
+    for e in starts:
+        assert e["policy"] == "revisit+warm"
+        assert e["warm_start"] is True
+        # the start point is recorded, because a warm start makes the candidate stream
+        # depend on the archive as well as on the seed
+        assert e["warm_start_hash"] == content_hash(_classical_8()["rk4"])
+    assert all(e["policy"] == "revisit+warm" for e in dones)
+
+
+def test_B84_warm_start_disarmed_never_sets_x0(monkeypatch, tmp_path):
+    work = _setup_env(monkeypatch, tmp_path, phase="2")
+    arch = _p05_arch()
+    calls = _stub_island(monkeypatch, [_classical_8()["kutta3"]])
+    d = fallback_directive(arch, 2, 4)
+    assert d["directive_id"] == "D-FE00004"
+    runner_mod._cmaes_candidates(d, 4, arch, "empty")
+    assert calls
+    for c in calls:
+        assert c["constraints"] == search_mod.default_constraints()
+        assert set(c["constraints"]) == {"force_zero", "dyadic_denominator_max", "c_fixed", "b_nonneg"}
+        assert c["sigma"] is None       # the step size stays where it was until it is moved
+    starts = [e for e in _read_jsonl(work / "events.jsonl") if e["kind"] == "island_start"]
+    assert starts
+    for e in starts:
+        assert e["policy"] == "empty"
+        assert e["warm_start"] is False
+        assert e["warm_start_hash"] is None
+
+
+@pytest.mark.slow
+def test_B84_cycle_events_carry_the_policy_under_the_shipped_default(monkeypatch, tmp_path):
+    """RK_SEARCH_POLICY unset is the shipped configuration: every cycle reads "empty" and
+    the fallback keeps aiming at the emptiest cell, exactly as before P05."""
+    work = _setup_env(monkeypatch, tmp_path, phase="2")
+    _policy_env(monkeypatch)
+    monkeypatch.setattr(runner_mod, "seed_baselines", lambda *a, **k: 0)
+    _stub_island(monkeypatch, [_classical_8()["kutta3"]])
+    out = run_cycle(_runstate(cycle_id=6, phase=2))
+    assert out.cycle_id == 7
+    events = _read_jsonl(work / "events.jsonl")
+    assert "cycle_abandoned" not in {e["kind"] for e in events}
+    fb = [e for e in events if e["kind"] == "directive_fallback"]
+    assert len(fb) == 1
+    assert fb[0]["directive_id"] == "D-FE00007" and fb[0]["policy"] == "empty"
+    assert fb[0]["rationale"] == "fallback: empty cell"
+    cp = [e for e in events if e["kind"] == "candidates_processed"]
+    done = [e for e in events if e["kind"] == "cycle_done"]
+    assert cp and cp[-1]["policy"] == "empty"
+    assert done and done[-1]["policy"] == "empty"
+    assert all(e["warm_start"] is False for e in events if e["kind"] == "island_start")
+    assert [r.directive_id for r in read_all()] == ["D-FE00007"]
+
+
+def _p05_event_rows() -> list[dict]:
+    """Three cycles: one written before the policy field existed, then one block each of
+    two policies, then an accepted record from a cycle that has not closed yet."""
+    return [
+        {"kind": "accepted", "directive_id": "D-F00001", "order": 4, "stages": 4, "bucket": 3, "new_elite": True},
+        {"kind": "accepted", "directive_id": "D-T1", "order": 4, "stages": 4, "bucket": 3, "new_elite": False},
+        {"kind": "candidates_processed", "accepted": 2, "rejected": 1, "skipped": 0, "total": 3},
+        {"kind": "cycle_done", "cycle_id": 1, "improved": True},
+        {"kind": "accepted", "directive_id": "D-FE00002", "order": 4, "stages": 5, "bucket": 2, "new_elite": True},
+        {"kind": "accepted", "directive_id": "D-FE00002", "order": 4, "stages": 5, "bucket": 2, "new_elite": False},
+        {"kind": "candidates_processed", "accepted": 2, "rejected": 0, "skipped": 3, "total": 5},
+        {"kind": "cycle_done", "cycle_id": 2, "policy": "empty"},
+        {"kind": "accepted", "directive_id": "D-FR00003", "order": 4, "stages": 6, "bucket": 1, "new_elite": False},
+        {"kind": "accepted", "directive_id": "D-T9", "order": 4, "stages": 6, "bucket": 2, "new_elite": True},
+        {"kind": "candidates_processed", "accepted": 2, "rejected": 1, "skipped": 5, "total": 8},
+        {"kind": "cycle_done", "cycle_id": 3, "policy": "revisit+warm"},
+        {"kind": "accepted", "directive_id": "D-FE00004", "order": 3, "stages": 3, "bucket": 0, "new_elite": True},
+    ]
+
+
+def _write_p05_events(path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for i, row in enumerate(_p05_event_rows()):
+            fh.write(json.dumps(row) + "\n")
+            if i == 3:
+                fh.write("{not json at all\n")   # a torn line must not stop the pass
+
+
+def test_B85_policyab_attributes_events_to_the_closing_cycle_policy(tmp_path):
+    path = tmp_path / "events.jsonl"
+    _write_p05_events(path)
+    out = policyab.scan_policies(path)
+    pol = out["policies"]
+    assert list(pol) == ["empty", "revisit+warm", "unlabelled"]
+
+    # Written before the policy field existed: attributed to nothing, not to the default.
+    assert pol["unlabelled"] == {
+        "cycles": 1, "accepted": 2, "rejected": 1, "skipped": 0, "new_elites": 1,
+        "new_cells": 1, "cells": ((4, 4, 3),), "median_accepted": 2.0, "skipped_fraction": 0.0,
+    }
+    # The block of "empty" cycles, plus the trailing record whose D-FE id names its own
+    # policy even though its cycle never closed.
+    assert pol["empty"]["cycles"] == 1
+    assert pol["empty"]["accepted"] == 3
+    assert pol["empty"]["new_elites"] == 2
+    assert pol["empty"]["cells"] == ((3, 3, 0), (4, 5, 2))
+    assert pol["empty"]["skipped"] == 3 and pol["empty"]["rejected"] == 0
+    assert pol["empty"]["skipped_fraction"] == 0.5
+    assert pol["empty"]["median_accepted"] == 2.0
+    # A D-FR record inside a revisit+warm cycle keeps the cycle's fuller name: the id letter
+    # and the cycle policy agree about the cell scan, and the cycle policy says more.
+    assert pol["revisit+warm"]["accepted"] == 2
+    assert pol["revisit+warm"]["new_elites"] == 1
+    assert pol["revisit+warm"]["new_cells"] == 2
+    assert pol["revisit+warm"]["skipped"] == 5
+    assert abs(pol["revisit+warm"]["skipped_fraction"] - 5 / 8) < 1e-12
+    # a cell counts once, for the policy that reached it earliest
+    seen = [c for row in pol.values() for c in row["cells"]]
+    assert len(seen) == len(set(seen)) == 5
+    assert out["events"] == len(_p05_event_rows())
+
+
+def test_B85_policyab_reads_the_work_dir_and_prints_one_row_per_policy(monkeypatch, tmp_path, capsys):
+    work = _setup_env(monkeypatch, tmp_path)
+    _write_p05_events(work / "events.jsonl")
+    assert policyab.main([]) == 0
+    text = capsys.readouterr().out
+    for needle in ("empty", "revisit+warm", "unlabelled", "cycles", "new cells", "events.jsonl"):
+        assert needle in text, needle
+    assert policyab.scan_policies()["policies"] == policyab.scan_policies(work / "events.jsonl")["policies"]
+    # an absent log is an empty report, not a crash
+    (work / "events.jsonl").unlink()
+    assert policyab.scan_policies()["policies"] == {}
+    assert policyab.main([]) == 0
+    assert "(no events)" in capsys.readouterr().out
 
 
 # ======================================================================================

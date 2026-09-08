@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from rk_harness import archive as archive_mod
+from rk_harness import directive as directive_mod
 from rk_harness.archive import (
     RecordSchemaError,
     RECORD_KEYS,
@@ -46,7 +47,18 @@ from rk_harness.archive import (
     update_cell_stat,
 )
 from rk_harness.surrogate import should_train, features, train, predict, calibration_error
-from rk_harness.encourager import next_action, emptiest_cell, heldout_gap, PACKAGE_DATE, FREEZE_DATE
+from rk_harness.encourager import (
+    next_action,
+    emptiest_cell,
+    revisit_cell,
+    target_cell,
+    cell_policy,
+    stage_domain,
+    heldout_gap,
+    POLICIES,
+    PACKAGE_DATE,
+    FREEZE_DATE,
+)
 from rk_harness.search import (
     free_parameters,
     snap,
@@ -55,6 +67,7 @@ from rk_harness.search import (
     cmaes_island,
     migrate,
     default_constraints,
+    x0_from_tableau,
 )
 from rk_harness.enumeration import (
     lattice,
@@ -1568,11 +1581,11 @@ def test_B51_fallback_directive_phase_2_cycle_7():
     # order 4 needs at least four stages; asking for two was a cell that cannot exist
     assert d["stages"] == [4]
     assert d["target_order"] == 4
-    assert d["directive_id"] == "D-F00007"
+    assert d["directive_id"] == "D-FE00007"      # E: the emptiest-cell policy chose the cell
     assert d["hypothesis_id"] is None
     assert d["islands"] == 4
     assert d["budget_minutes"] == 5
-    assert d["rationale"] == "fallback: emptiest cell"
+    assert d["rationale"] == "fallback: empty cell"
     assert d["constraints"] == default_constraints()
 
 
@@ -1584,8 +1597,8 @@ def test_B51_fallback_directive_target_order_by_phase():
 
 
 def test_B51_fallback_directive_id_is_zero_padded_and_deterministic():
-    assert fallback_directive(_empty_arch(), 0, 0)["directive_id"] == "D-F00000"
-    assert fallback_directive(_empty_arch(), 0, 12345)["directive_id"] == "D-F12345"
+    assert fallback_directive(_empty_arch(), 0, 0)["directive_id"] == "D-FE00000"
+    assert fallback_directive(_empty_arch(), 0, 12345)["directive_id"] == "D-FE12345"
     assert fallback_directive(_empty_arch(), 3, 42) == fallback_directive(_empty_arch(), 3, 42)
 
 
@@ -1595,6 +1608,175 @@ def test_B51_fallback_directive_uses_emptiest_cell_stages():
     d = fallback_directive(arch, 0, 3)
     assert d["stages"] == [3]
     assert validate_directive(d) == d
+
+
+# ===========================================================================
+# Exploration policy: revisit, warm starts, policy-lettered fallback ids
+# (P05, B81-B83)
+# ===========================================================================
+
+def _order4_grid(worst_at: tuple[int, int] = (6, 2)) -> ArchiveState:
+    """An order-4 grid with three occupied reachable cells and one occupied cell at two
+    stages, which stage_domain(4) excludes because no two-stage method reaches order 4."""
+    grid = {
+        (2, 0): _record(_rk4(), _sv_for(_rk4(), 0.005, 9.0)),   # outside stage_domain(4)
+        (4, 2): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.02)),
+        (6, 3): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.05)),
+    }
+    grid[worst_at] = _record(_rk4(), _sv_for(_rk4(), 0.005, 0.31))
+    return _arch_with({4: grid})
+
+
+def test_B81_revisit_cell_picks_the_worst_occupied_reachable_cell():
+    arch = _order4_grid()
+    assert 2 not in stage_domain(4)
+    assert tuple(revisit_cell(arch, 4)) == (6, 2)
+
+
+def test_B81_revisit_cell_keeps_the_earliest_cell_on_a_tie():
+    grid = {
+        (4, 2): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.31)),
+        (5, 1): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.31)),
+        (6, 3): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.05)),
+    }
+    assert tuple(revisit_cell(_arch_with({4: grid}), 4)) == (4, 2)
+
+
+def test_B81_revisit_cell_passes_over_a_non_finite_elite_but_still_answers():
+    """A cell whose elite has no finite held-out error cannot be ranked against one that
+    has; it is only returned when there is nothing else to return."""
+    inf_rec = _record(_rk4(), _sv_for(_rk4(), 0.005, float("inf")))
+    grid = {(4, 0): inf_rec, (5, 1): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.02))}
+    assert tuple(revisit_cell(_arch_with({4: grid}), 4)) == (5, 1)
+    assert tuple(revisit_cell(_arch_with({4: {(4, 0): inf_rec}}), 4)) == (4, 0)
+
+
+def test_B81_revisit_cell_is_None_on_an_empty_grid():
+    assert revisit_cell(_empty_arch(), 4) is None
+    assert revisit_cell(_empty_arch(), 2) is None
+    # occupied only outside the domain is still nothing to revisit
+    outside = _arch_with({4: {(2, 0): _record(_rk4(), _sv_for(_rk4(), 0.005, 9.0))}})
+    assert revisit_cell(outside, 4) is None
+
+
+def test_B81_target_cell_revisit_falls_back_to_emptiest_when_nothing_is_occupied():
+    arch = _empty_arch()
+    assert tuple(target_cell(arch, 4, "revisit")) == tuple(emptiest_cell(arch, 4)) == (4, 0)
+
+
+def test_B81_target_cell_routes_each_policy_name_to_one_of_two_scans():
+    arch = _order4_grid()
+    assert POLICIES == ("empty", "revisit")
+    assert tuple(target_cell(arch, 4, "empty")) == tuple(emptiest_cell(arch, 4))
+    assert tuple(target_cell(arch, 4, "revisit")) == tuple(revisit_cell(arch, 4))
+    # the warm variants differ only in where CMA-ES starts, not in which cell is aimed at
+    assert tuple(target_cell(arch, 4, "warm")) == tuple(emptiest_cell(arch, 4))
+    assert tuple(target_cell(arch, 4, "revisit+warm")) == tuple(revisit_cell(arch, 4))
+    assert cell_policy("revisit+warm") == "revisit" and cell_policy("") == "empty"
+    assert tuple(target_cell(arch, 4)) == tuple(emptiest_cell(arch, 4))
+
+
+def test_B81_directive_and_encourager_agree_on_every_order():
+    """One definition of the scan (D19), asserted rather than assumed: the directive module
+    delegates instead of keeping its own copy of the ranking loop."""
+    r = _record(_heun2(), _sv_for(_heun2(), 0.01, 0.4))
+    arch = _arch_with({
+        2: {(2, b): r for b in range(8)},
+        3: {(3, 0): r, (3, 1): r},
+        4: {(4, b): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.01 * (b + 1))) for b in range(8)},
+    })
+    for order in (1, 2, 3, 4):
+        want = tuple(target_cell(arch, order, "empty"))
+        assert tuple(directive_mod._emptiest_cell(arch, order)) == want, order
+        assert tuple(emptiest_cell(arch, order)) == want, order
+    # and with no archive at all the directive still answers, without reaching into it
+    for order in (1, 2, 3, 4):
+        assert tuple(directive_mod._emptiest_cell(None, order)) == (stage_domain(order)[0], 0)
+
+
+def test_B82_fallback_directive_id_carries_the_policy_letter():
+    empty = fallback_directive(_empty_arch(), 2, 7, "empty")
+    revisit = fallback_directive(_empty_arch(), 2, 7, "revisit")
+    assert empty["directive_id"] == "D-FE00007"
+    assert revisit["directive_id"] == "D-FR00007"
+    assert fallback_directive(_empty_arch(), 2, 7, "revisit+warm")["directive_id"] == "D-FR00007"
+    assert fallback_directive(_empty_arch(), 2, 7, "warm")["directive_id"] == "D-FE00007"
+    for d in (empty, revisit):
+        assert validate_directive(d) == d
+        # sitegen._phase_label reads the "D-F" prefix to label the record as search work
+        assert d["directive_id"].startswith("D-F")
+    assert empty["rationale"] == "fallback: empty cell"
+    assert revisit["rationale"] == "fallback: revisit cell"
+    # the default is the shipped policy, so an unchanged caller gets an unchanged directive
+    assert fallback_directive(_empty_arch(), 2, 7) == empty
+
+
+def test_B82_fallback_directive_revisit_targets_the_worst_cell_stage_count():
+    grid = {(4, b): _record(_rk4(), _sv_for(_rk4(), 0.005, 0.01)) for b in range(8)}
+    grid[(6, 2)] = _record(_rk4(), _sv_for(_rk4(), 0.005, 0.9))
+    arch = _arch_with({4: grid})
+    assert fallback_directive(arch, 2, 3, "revisit")["stages"] == [6]
+    assert fallback_directive(arch, 2, 3, "empty")["stages"] == [5]
+    for policy in ("empty", "revisit"):
+        d = fallback_directive(arch, 2, 3, policy)
+        assert validate_directive(d) == d
+        assert d["constraints"] == default_constraints()
+
+
+def test_B83_x0_from_tableau_length_is_free_parameters():
+    for stages in range(2, 7):
+        A = [[Fraction(0)] * stages for _ in range(stages)]
+        for i in range(stages):
+            for j in range(i):
+                A[i][j] = Fraction(1, i + j + 2)
+        t = make_tableau(A, [Fraction(1, stages)] * stages)
+        assert len(x0_from_tableau(t)) == free_parameters(stages), stages
+
+
+def test_B83_x0_from_tableau_round_trips_through_project():
+    """Pins the layout inverse: what x0_from_tableau writes is what _fitness reads back."""
+    rk4 = _rk4()
+    x0 = x0_from_tableau(rk4)
+    n_a = 4 * 3 // 2
+    t = project(x0[:n_a], x0[n_a:], 4, 4, default_constraints())
+    assert t is not None
+    assert content_hash(t) == content_hash(rk4)
+    assert x0[:n_a] == [0.5, 0.0, 0.5, 0.0, 0.0, 1.0]
+
+
+@pytest.mark.slow
+def test_B83_cmaes_island_sigma_default_is_unchanged():
+    """The sigma parameter must be behaviour-neutral when unset: adding warm starts and
+    moving the step size in one change would make the A/B uninterpretable."""
+    base = [content_hash(t) for t in cmaes_island(2, 2, seed=1, constraints=default_constraints(), budget=40)]
+    assert len(base) >= 1
+    unset = [content_hash(t) for t in cmaes_island(2, 2, seed=1, constraints=default_constraints(),
+                                                   budget=40, sigma=None)]
+    explicit = [content_hash(t) for t in cmaes_island(2, 2, seed=1, constraints=default_constraints(),
+                                                      budget=40, sigma=0.3)]
+    assert unset == base
+    assert explicit == base
+    narrow = [content_hash(t) for t in cmaes_island(2, 2, seed=1, constraints=_constraints(sigma=0.02),
+                                                    budget=40)]
+    assert narrow != base
+
+
+@pytest.mark.slow
+def test_B83_cmaes_island_honours_an_x0_in_constraints():
+    target = _kutta3()
+    x0 = x0_from_tableau(target)
+    lower = [(i, j) for i in range(3) for j in range(i)]
+
+    def a_distance(t) -> float:
+        return sum((float(t.A[i][j]) - x0[k]) ** 2 for k, (i, j) in enumerate(lower))
+
+    cold = list(cmaes_island(2, 3, seed=5, constraints=default_constraints(), budget=40))
+    warm = list(cmaes_island(2, 3, seed=5, constraints=_constraints(x0=x0), budget=40))
+    assert cold and warm
+    assert a_distance(warm[0]) < a_distance(cold[0])
+    # a start point of the wrong length is ignored, not raised on
+    wrong = list(cmaes_island(2, 3, seed=5, constraints=_constraints(x0=[0.1, 0.2]), budget=40))
+    assert [content_hash(t) for t in wrong] == [content_hash(t) for t in cold]
 
 
 # ===========================================================================

@@ -48,7 +48,12 @@ SCHEMA: dict[str, tuple] = {
     "run.auto_stop_cycles":       (0, int, (0, 1000000), "container", "stop the runner after this many cycles in this process (0 = never)"),
     "run.site":                   (True, bool, None, "container", "regenerate the findings site every cycle"),
     "run.git_commit":             (True, bool, None, "container", "commit rk-work / rk-findings inside the container (the host watchdog pushes)"),
+    "run.search_policy":          ("empty", str, ("empty", "revisit", "warm", "revisit+warm", "rotate"), "container", "which cell the search asks for next: empty = the emptiest reachable cell (the shipped behaviour), revisit = the occupied cell with the worst held-out error, warm = start CMA-ES from the incumbent, rotate = alternate in blocks so the two can be compared"),
+    "run.policy_block_cycles":    (100, int, (1, 100000), "container", "cycles per block when run.search_policy is rotate; a block is the unit the A/B compares"),
     "run.initial_phase":          (None, "int_or_null", (0, 3), "container", "phase to start from when RUNSTATE.json is absent (null = 0); does not override an existing state"),
+    "watchdog.peer_containers":   ("rk", str, None, "watchdog", "comma-separated container names whose CPU is subtracted from host load before the pause decision; every other container counts as foreground load the run should yield to"),
+    "watchdog.docker_stats_timeout_ms": (4000, int, (250, 30000), "watchdog", "hard timeout on the docker stats probe; on timeout the pause decision is skipped for that pass rather than made on a stale number"),
+    "watchdog.min_free_system_gb": (0.0, float, (0, 1000), "watchdog", "docker stop when the system drive, where the Docker VHDX lives, drops below this; 0 means report only"),
     "watchdog.poll_seconds":      (10, int, (2, 600), "watchdog", "how often the host watchdog checks everything"),
     "watchdog.heartbeat_stale_seconds": (120, int, (30, 3600), "watchdog", "docker kill when HEARTBEAT is older than this"),
     "watchdog.min_free_gb":       (5.0, float, (0.5, 1000), "watchdog", "docker stop when free disk on the work drive drops below this"),
@@ -65,11 +70,14 @@ SCHEMA: dict[str, tuple] = {
     "watchdog.auto_freeze": (False, bool, None, "watchdog", "let the orchestrator freeze a saturated epoch on its own; off = advisory logging only (owner ruling 2026-09-03)"),
     "watcher.refresh_seconds":    (5, int, (1, 300), "watcher", "watcher window refresh interval"),
     "watcher.events_tail":        (25, int, (5, 200), "watcher", "how many recent events the watcher shows"),
+    "stats.interval_seconds":     (60, int, (10, 3600), "stats", "how often the background stats writer rewrites stats.txt; start.ps1 launches it"),
+    "stats.gpu":                  (False, bool, None, "stats", "let the stats writer run the nvidia-smi probe; off by default because polling wakes the discrete GPU"),
 }
 RESTART_HINT = {
     "container": "takes effect on the next start: python configure.py ... --apply  (or .\\stop.ps1 then .\\start.ps1)",
     "watchdog": "takes effect when the watchdog restarts (.\\start.ps1 restarts it)",
     "watcher": "takes effect when the watcher window restarts (.\\watcher.ps1)",
+    "stats": "takes effect when the stats writer restarts (.\\start.ps1 restarts it)",
 }
 
 

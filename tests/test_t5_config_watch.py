@@ -440,3 +440,105 @@ def test_C24_progress_panel_shows_the_heldout_gap_and_surrogate_state(tmp_path, 
     assert "heldout gap" in text
     assert "mean heldout - search over elites" in text
     assert "need 5000, have 0" in _line_with(text, "surrogate")
+
+
+# ---------------------------------------------------------------- the host scripts themselves
+#
+# This tier already reads workspace files, so these live here rather than in a new test file
+# (a new tests/test_tN_*.py would fail the overview build until _SUITE_DESC describes it).
+
+START_PS1 = WORKSPACE / "start.ps1"
+WATCHDOG_PS1 = HARNESS / "scripts" / "watchdog.ps1"
+
+
+def _schema() -> dict:
+    """The workspace configure.py SCHEMA, loaded by path. Importing it has no side effects:
+    everything below the dict is a function, and main() is behind __main__."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_rk_configure", CONFIGURE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.SCHEMA
+
+
+def _watchdog_function(name: str) -> str:
+    """One PowerShell function body: from its 'function <name>' line to the next line that is
+    a closing brace in the first column."""
+    text = WATCHDOG_PS1.read_text(encoding="ascii")
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("function " + name))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start:end + 1])
+
+
+@pytest.mark.skipif(not (CONFIGURE.exists() and START_PS1.exists()),
+                    reason="workspace configure.py / start.ps1 not present")
+def test_C25_start_ps1_passes_every_watchdog_config_key():
+    """A key added to configure.py that start.ps1 never passes is a setting that appears in
+    `configure.py show`, accepts a value, writes it to config.json, and changes nothing."""
+    import re
+    text = START_PS1.read_text(encoding="ascii")
+    # keys the watchdog deliberately does not take from config.json; each needs a reason
+    allowed_missing: dict[str, str] = {}
+    missing = []
+    for key in _schema():
+        sec, name = key.split(".", 1)
+        if sec != "watchdog" or name in allowed_missing:
+            continue
+        if not re.search(r"""Cfg\s+['"]watchdog['"]\s+['"]{}['"]""".format(re.escape(name)), text):
+            missing.append(key)
+    assert not missing, "configured but never passed to the watchdog: {}".format(missing)
+
+
+def test_C26_every_powershell_script_is_pure_ascii():
+    """PowerShell 5.1 will not parse a smart quote or an em dash, and the parse error it
+    gives points somewhere unhelpful. A parse error in watchdog.ps1 is a disabled kill
+    switch, so this is checked on every script rather than on that one."""
+    scripts = sorted((HARNESS / "scripts").glob("*.ps1"))
+    if WORKSPACE.exists():
+        scripts += sorted(WORKSPACE.glob("*.ps1"))
+    assert scripts, "no PowerShell scripts found to check"
+    for p in scripts:
+        try:
+            p.read_bytes().decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise AssertionError("{} is not ASCII at byte {}".format(p, exc.start))
+
+
+def test_C27_docker_stats_is_only_called_through_the_bounded_helper():
+    """docker stats has no timeout of its own and samples every container on the daemon, and
+    this call sits on the path that decides whether the run is paused. Exactly one place may
+    make it, and that place must be able to give up."""
+    text = WATCHDOG_PS1.read_text(encoding="ascii")
+    block = _watchdog_function("Get-DockerCpuRows")
+    assert text.count("--no-stream") == 1
+    assert "--no-stream" in block
+    assert "WaitForExit(" in block
+    assert "Kill()" in block
+    # the old unbounded form, and any other direct invocation, is gone
+    assert "= docker stats" not in text
+    # everywhere else the phrase may only appear in a comment or in a line the script prints
+    inside = set(block.splitlines())
+    for ln in text.splitlines():
+        if ln in inside:
+            continue
+        code = ln.split("#", 1)[0]
+        if "docker stats" not in code:
+            continue
+        assert "Say " in code, ln
+
+
+@pytest.mark.skipif(not CONFIGURE.exists(), reason="workspace configure.py not present")
+def test_C28_the_peer_default_matches_the_config_default():
+    """The script's own default and the configured one cannot drift: the watchdog is started
+    by hand as often as by start.ps1, and a different default in each place is a guard that
+    behaves differently depending on who launched it."""
+    import re
+    schema = _schema()
+    key = "watchdog.peer_containers"
+    if key not in schema:
+        pytest.skip("watchdog.peer_containers is not in SCHEMA yet")
+    text = WATCHDOG_PS1.read_text(encoding="ascii")
+    m = re.search(r"""\[string\]\$PeerContainers\s*=\s*["']([^"']*)["']""", text)
+    assert m, "watchdog.ps1 has no $PeerContainers parameter"
+    assert m.group(1) == schema[key][0]

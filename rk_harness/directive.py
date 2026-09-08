@@ -11,7 +11,7 @@ from fractions import Fraction
 
 import jsonschema
 
-from rk_harness.encourager import stage_domain
+from rk_harness.encourager import cell_policy, stage_domain, target_cell
 from rk_harness.types import ArchiveState
 
 
@@ -183,40 +183,32 @@ def parse_directive(text: str) -> dict:
     return validate_directive(obj)
 
 
-def _heldout_of(rec) -> float:
-    try:
-        v = float(rec.score.heldout_error)
-    except Exception:
-        return float("inf")
-    return v if v == v else float("inf")
+# One letter per cell-targeting policy, carried in the fallback directive_id so a record
+# in the archive says which policy chose its cell without the event log. It stays a single
+# alphanumeric character: the id must keep matching ^D-[A-Za-z0-9]+$ and must keep starting
+# with "D-F", which is what sitegen._phase_label reads to label the record as search work.
+_POLICY_LETTER = {"empty": "E", "revisit": "R"}
+
+
+def _cell(arch: ArchiveState, order: int, policy: str = "empty") -> tuple[int, int]:
+    """The cell this directive aims at. One definition of the scan lives in encourager;
+    this is the guard for a missing archive plus a delegation to it (D19)."""
+    if arch is None or not arch.grids:
+        return (stage_domain(order)[0], 0)
+    return target_cell(arch, order, policy)
 
 
 def _emptiest_cell(arch: ArchiveState, order: int) -> tuple[int, int]:
-    grid = arch.grids.get(order, {}) if arch is not None and arch.grids else {}
-    domain = stage_domain(order)
-    for stages in domain:
-        for bucket in range(8):
-            if (stages, bucket) not in grid:
-                return (stages, bucket)
-    best_key = (domain[0], 0)
-    best_val = float("-inf")
-    for stages in domain:
-        for bucket in range(8):
-            rec = grid.get((stages, bucket))
-            if rec is None:
-                continue
-            v = _heldout_of(rec)
-            if v > best_val:
-                best_val = v
-                best_key = (stages, bucket)
-    return best_key
+    return _cell(arch, order, "empty")
 
 
-def fallback_directive(arch: ArchiveState, phase: int, cycle_id: int) -> dict:
+def fallback_directive(arch: ArchiveState, phase: int, cycle_id: int,
+                       policy: str = "empty") -> dict:
     order = _TARGET_ORDER_BY_PHASE.get(int(phase), 4)
-    stages, _bucket = _emptiest_cell(arch, order)
+    stages, _bucket = _cell(arch, order, policy)
+    letter = _POLICY_LETTER[cell_policy(policy)]
     d = {
-        "directive_id": f"D-F{int(cycle_id):05d}",
+        "directive_id": f"D-F{letter}{int(cycle_id):05d}",
         "hypothesis_id": None,
         "target_order": order,
         "stages": [stages],
@@ -228,6 +220,6 @@ def fallback_directive(arch: ArchiveState, phase: int, cycle_id: int) -> dict:
         },
         "islands": 4,
         "budget_minutes": 5,
-        "rationale": "fallback: emptiest cell",
+        "rationale": f"fallback: {policy} cell",
     }
     return validate_directive(d)

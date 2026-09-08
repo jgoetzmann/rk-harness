@@ -30,6 +30,7 @@ import datetime
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import textwrap
@@ -44,9 +45,22 @@ from rk_harness.timefmt import fmt_ct
 # "unknown" long before it delays the file.
 DOCKER_TIMEOUT_S = 6.0
 GPU_TIMEOUT_S = 5.0
+# A restart count at or above this is flagged in the census. It is a single-sample fact, not
+# a trend: see probe_containers for why "climbing" cannot be computed here.
+RESTART_FLAG = 20
 # events.jsonl grows ~5 MB/day with no rotation and is already 35 MB. Only the tail is
 # ever read, so cadence stays cheap as the file grows without bound.
 EVENTS_TAIL_BYTES = 512 * 1024
+# Cadence needs a handful of cycle_done events; a two-window comparison needs at least
+# ACCEPT_MIN_SAMPLES in each window. Measured 2026-09-08: 200 KB of the live stream carried
+# five cycle_done, so the 512 KB cadence tail holds about a dozen - not enough to compare two
+# windows. The productivity read therefore takes a wider tail and json-parses only the kinds
+# it asked for; watch.py has read 4 MB every few seconds for months for the same reason.
+PRODUCTIVITY_TAIL_BYTES = 4 * 1024 * 1024
+ACCEPT_MIN_SAMPLES = 10
+ACCEPT_COLLAPSE_RATIO = 0.5
+WATCHDOG_LOG_TAIL_BYTES = 64 * 1024
+WATCHDOG_LOG_LINES = 5
 
 WINDOWS = platform.system() == "Windows"
 _ZERO_TIMES = ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00")
@@ -97,6 +111,26 @@ def _dur(seconds: float | None) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def _ascii(s) -> str:
+    """Anything from outside this project, made safe for a file test S11 asserts is ASCII.
+
+    write() already falls back to errors='replace', but render_text is asserted ASCII
+    directly, and a third-party container name is not under this project's control.
+    """
+    return str(s).encode("ascii", "replace").decode("ascii")
+
+
+def _num(v) -> str:
+    """A count read by a human: '3', not '3.0'. Halves survive as halves."""
+    if v is None:
+        return "unknown"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if f.is_integer() else "{:.1f}".format(f)
 
 
 def _ct(ts) -> str:
@@ -278,6 +312,78 @@ def probe_docker(name: str = "rk") -> dict:
     return out
 
 
+def _flagged(row: dict) -> bool:
+    return (row.get("status") == "restarting"
+            or row.get("health") == "unhealthy"
+            or (row.get("restart_count") or 0) >= RESTART_FLAG)
+
+
+def probe_containers(timeout: float = DOCKER_TIMEOUT_S) -> dict:
+    """Every container on this daemon, not just rk's own.
+
+    The machine is shared. A third-party stack restarting in a loop takes CPU the pause
+    guard then charges to "foreground load", and an unhealthy container next to the run is
+    the kind of fact neither harness's status file states today.
+
+    Two docker calls, both with a hard timeout, and never docker stats: this file is written
+    on a timer and nothing on that path may block on a probe that samples every container.
+
+    Restart counts are reported as of this pass and never as a trend. Rule 1 forbids
+    carrying a value forward and this module keeps no cache, so "climbing" is not something
+    it can honestly say. What it flags instead are single-sample facts: a restarting status,
+    an unhealthy health check, or a count already past RESTART_FLAG. Do not add a history
+    file to make "climbing" work; the absence of a cache is the property, not an oversight.
+    """
+    out: dict = {"probe": "docker ps + docker inspect", "ok": False, "containers": []}
+    if not shutil.which("docker"):
+        out["error"] = "the docker command is not on PATH"
+        return out
+
+    def _last_error(rc, se, what):
+        line = [x for x in (se or "").strip().splitlines() if x.strip()]
+        if line:
+            return line[-1][:160]
+        return "docker did not respond" if rc is None else "{} exited {}".format(what, rc)
+
+    rc, so, se = _run(["docker", "ps", "--format", "{{.Names}}"], timeout)
+    if rc is None or rc != 0:
+        # A silent daemon is its own verdict. It must never render as "no containers".
+        out["error"] = _last_error(rc, se, "docker ps")
+        return out
+    names = [n.strip() for n in (so or "").splitlines() if n.strip()]
+    if not names:
+        out["ok"] = True
+        out["flagged"] = []
+        return out
+
+    rc, so, se = _run(["docker", "inspect", *names], timeout)
+    if rc is None or rc != 0:
+        out["error"] = _last_error(rc, se, "docker inspect")
+        return out
+    try:
+        data = json.loads(so)
+    except Exception as exc:                                 # noqa: BLE001
+        out["error"] = "could not parse docker inspect output: {}".format(type(exc).__name__)
+        return out
+    rows = []
+    for d in (data if isinstance(data, list) else []):
+        if not isinstance(d, dict):
+            continue
+        st = d.get("State") or {}
+        rows.append({"name": str(d.get("Name") or "?").lstrip("/"),
+                     "status": st.get("Status"),
+                     "health": (st.get("Health") or {}).get("Status"),
+                     "restart_count": d.get("RestartCount"),
+                     "image": (d.get("Config") or {}).get("Image"),
+                     "started_at": None if str(st.get("StartedAt", "")) in _ZERO_TIMES
+                                   else st.get("StartedAt")})
+    rows.sort(key=lambda r: r["name"])
+    out["ok"] = True
+    out["containers"] = rows
+    out["flagged"] = [r["name"] for r in rows if _flagged(r)]
+    return out
+
+
 def probe_gpu(skip: bool = False) -> dict:
     """Whole-machine GPU via nvidia-smi.
 
@@ -355,11 +461,16 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
         return None, f"{path.name}: {type(exc).__name__}"
 
 
-def tail_events(path: Path, max_bytes: int = EVENTS_TAIL_BYTES) -> tuple[list[dict], str | None]:
+def tail_events(path: Path, max_bytes: int = EVENTS_TAIL_BYTES,
+                kinds: tuple[str, ...] | None = None) -> tuple[list[dict], str | None]:
     """Parse only the last max_bytes of events.jsonl.
 
     The file has no rotation and grows about 5 MB/day; a full scan already costs ~1.5 s and
     gets worse forever, which is not a price a status refresh should pay.
+
+    kinds is a cheap substring gate applied before json.loads, so a wide tail can be read
+    without parsing every dict in it; the kind is confirmed after parsing by the callers
+    that care. kinds=None keeps the original behaviour.
     """
     try:
         size = path.stat().st_size
@@ -376,6 +487,8 @@ def tail_events(path: Path, max_bytes: int = EVENTS_TAIL_BYTES) -> tuple[list[di
     for line in raw.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if kinds and not any(k in line for k in kinds):
             continue
         try:
             ev = json.loads(line)
@@ -401,6 +514,137 @@ def cycle_cadence(events: list[dict], n: int = 20) -> dict:
     return out
 
 
+def _median(values: list[float]) -> float | None:
+    vals = sorted(values)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def accept_rate(events: list[dict], min_samples: int = ACCEPT_MIN_SAMPLES) -> dict:
+    """The median of the newest third of the cycle_done events in the tail against the
+    median of the oldest third, with both sample counts.
+
+    Both counts are reported because a byte window is not a cycle window: phase 0 and 1
+    cycles enumerate in bulk and occupy more bytes each, so the two thirds can straddle a
+    phase change. A verdict is only offered once each window holds min_samples cycles, and
+    the row prints the two medians whether or not a verdict came with them - a phase change
+    has to be able to read as a phase change rather than as a collapse.
+    """
+    vals: list[float] = []
+    for e in events:
+        if e.get("kind") != "cycle_done":
+            continue
+        v = e.get("accepted")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        vals.append(float(v))
+    out = {"cycles": len(vals), "older_n": 0, "recent_n": 0, "older_median": None,
+           "recent_median": None, "enough": False, "collapsed": False}
+    third = len(vals) // 3
+    if third == 0:
+        return out
+    older, recent = vals[:third], vals[-third:]
+    out["older_n"], out["recent_n"] = len(older), len(recent)
+    out["older_median"], out["recent_median"] = _median(older), _median(recent)
+    out["enough"] = len(recent) >= min_samples and len(older) >= min_samples
+    # Never a ratio: a zero baseline is not an infinite collapse, and a rise is not one at all.
+    out["collapsed"] = bool(out["enough"] and out["older_median"] > 0
+                            and out["recent_median"] < out["older_median"] * ACCEPT_COLLAPSE_RATIO)
+    return out
+
+
+def directive_gap(events: list[dict]) -> dict:
+    """How many cycles since the model itself last wrote a directive, plus the plan snapshot.
+
+    Only directive_accepted with source='llm' counts. The fallback path logs
+    directive_fallback and never writes LAST_DIRECTIVE.json, so it is the one event that
+    means the model actually spoke. With no such event in the tail the count degrades to
+    'at least N' rather than to a number that would be wrong.
+    """
+    last_i, last_at = None, None
+    for i, e in enumerate(events):
+        if e.get("kind") == "directive_accepted" and e.get("source") == "llm":
+            last_i, last_at = i, e.get("ts")
+    total = sum(1 for e in events if e.get("kind") == "cycle_done")
+    if last_i is None:
+        cycles, at_least = total, True
+    else:
+        cycles = sum(1 for e in events[last_i + 1:] if e.get("kind") == "cycle_done")
+        at_least = False
+
+    snapshot: dict = {}
+    for e in events:
+        if e.get("kind") in ("codex_usage", "llm_skipped") and e.get("used_percent") is not None:
+            snapshot = {"used_percent": e.get("used_percent"),
+                        "window_minutes": e.get("window_minutes"),
+                        "resets_at": e.get("resets_at"),
+                        "plan_type": e.get("plan_type"),
+                        "snapshot_age_s": e.get("snapshot_age_s")}
+    age_s, window_m = snapshot.get("snapshot_age_s"), snapshot.get("window_minutes")
+    stale = bool(isinstance(age_s, (int, float)) and not isinstance(age_s, bool)
+                 and isinstance(window_m, (int, float)) and not isinstance(window_m, bool)
+                 and age_s > float(window_m) * 60.0)
+
+    last_skip: dict = {}
+    for e in events:
+        if e.get("kind") == "llm_skipped":
+            last_skip = {"gate": e.get("gate"), "reason": e.get("reason"), "ts": e.get("ts")}
+    return {"cycles": cycles, "at_least": at_least, "last_at": last_at,
+            "snapshot": snapshot, "stale_snapshot": stale, "last_skip": last_skip}
+
+
+def read_watchdog_log(path: Path, now: datetime.datetime,
+                      max_bytes: int = WATCHDOG_LOG_TAIL_BYTES,
+                      max_lines: int = WATCHDOG_LOG_LINES) -> dict:
+    """The last few lines the host watchdog printed, with each line's own age.
+
+    The watchdog runs in a minimized window nobody looks at, so an ALERT or a pause decision
+    is invisible unless something reads it back. These are lines it printed when it acted:
+    a record of what it did, never a reading of the container's state now. An absent log is
+    not a failure - it only means the watchdog was started without -LogFile.
+    """
+    out: dict = {"path": str(path), "present": False, "error": None,
+                 "written_age_s": None, "lines": []}
+    try:
+        info = path.stat()
+        with open(path, "rb") as fh:
+            if info.st_size > max_bytes:
+                fh.seek(info.st_size - max_bytes)
+                fh.readline()                                # discard the partial line
+            raw = fh.read().decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return out
+    except Exception as exc:                                 # noqa: BLE001
+        out["error"] = type(exc).__name__
+        return out
+    out["present"] = True
+    out["written_age_s"] = _age(datetime.datetime.fromtimestamp(
+        info.st_mtime, datetime.timezone.utc), now)
+
+    entries: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        when = _parse_ts(parts[0]) if parts else None
+        text = parts[1] if len(parts) > 1 else ("" if when else line)
+        text = "".join(c for c in text if 32 <= ord(c) < 127)
+        if len(text) > 58:
+            text = text[:55] + "..."
+        if entries and entries[-1]["text"] == text:
+            entries[-1]["repeat"] += 1
+            entries[-1]["at"] = when or entries[-1]["at"]
+        else:
+            entries.append({"text": text, "at": when, "repeat": 1})
+    for ent in entries[-max_lines:]:
+        out["lines"].append({"text": ent["text"], "repeat": ent["repeat"],
+                             "age_s": _age(ent["at"], now)})
+    return out
+
+
 # ----------------------------------------------------------------------------- verdict
 
 _VERDICT_TEXT = {
@@ -423,6 +667,10 @@ _VERDICT_TEXT = {
 
 # Heartbeat older than this, with the container up and not paused, reads as no heartbeat.
 HEARTBEAT_STALE_S = 300
+# How long a file written once stays worth reading. Fifteen minutes is longer than any cycle
+# at the current cadence, so a one-shot file written between cycles is still describing the
+# present, and short enough that nobody builds a habit of trusting a stale one.
+ONE_SHOT_SHELF_LIFE_S = 900
 # A cycle taking longer than this multiple of the recent median is not slow, it is stuck.
 STUCK_CYCLE_FACTOR = 3.0
 # ...unless there is no cadence to compare against, in which case fall back to this.
@@ -471,12 +719,17 @@ def decide(docker: dict, heartbeat_age: float | None, stop_file: bool, frozen: b
 
 def collect(work: Path | None = None, findings: Path | None = None,
             with_host: bool = True, with_gpu: bool = True,
-            with_docker: bool = True, container: str = "rk") -> dict:
+            with_docker: bool = True, container: str = "rk",
+            with_census: bool | None = None) -> dict:
     """One status document. Never raises: every probe failure lands in doc['problems'].
 
     The probe switches exist so unit tests and the watcher can build a document without
-    touching Docker, nvidia-smi or the host counters.
+    touching Docker, nvidia-smi or the host counters. with_census defaults to following
+    with_docker, because the census is two more docker calls and --no-docker already means
+    "do not touch Docker"; pass it explicitly to run one probe without the other.
     """
+    if with_census is None:
+        with_census = with_docker
     now = _utcnow()
     work = Path(work) if work else work_dir()
     try:
@@ -490,6 +743,10 @@ def collect(work: Path | None = None, findings: Path | None = None,
     doc["docker"] = probe_docker(container) if with_docker else {"state": "UNKNOWN", "skipped": True}
     if with_docker and doc["docker"].get("error"):
         bad("docker: " + str(doc["docker"]["error"]))
+
+    doc["containers"] = probe_containers() if with_census else {"ok": False, "skipped": True}
+    if with_census and doc["containers"].get("error"):
+        bad("containers: " + str(doc["containers"]["error"]))
 
     runstate, err = _read_json(work / "RUNSTATE.json")
     if err:
@@ -517,11 +774,23 @@ def collect(work: Path | None = None, findings: Path | None = None,
     doc["stop_file"] = (work / "STOP").exists()
     doc["frozen"] = (work / "EPOCH_STATUS.json").exists()
 
-    events, err = tail_events(work / "events.jsonl")
+    # One read, wide enough for a two-window acceptance comparison, parsed down to the four
+    # kinds these three readers need.
+    events, err = tail_events(work / "events.jsonl", PRODUCTIVITY_TAIL_BYTES,
+                              kinds=("cycle_done", "directive_accepted",
+                                     "codex_usage", "llm_skipped"))
     if err:
         bad("events: " + err)
     doc["cadence"] = cycle_cadence(events)
     doc["events_seen"] = len(events)
+    doc["accept"] = accept_rate(events)
+    doc["gate"] = directive_gap(events)
+
+    # The workspace root, the same convention main() uses for stats.txt. An absent log is
+    # not a problem; only one that exists and cannot be read is.
+    doc["watchdog_log"] = read_watchdog_log(work.parent / "watchdog.log", now)
+    if doc["watchdog_log"].get("error"):
+        bad("watchdog log: " + str(doc["watchdog_log"]["error"]))
 
     doc["verdict"] = decide(doc["docker"], hb_age, doc["stop_file"], doc["frozen"])
 
@@ -601,7 +870,16 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
         L.append(_row("", "If your clock is past that, nothing is updating this file"))
         L.append(_row("", "and every number below it is old."))
     else:
-        L.append(_row("refreshed", "written once by hand. stats.ps1 -Loop keeps it current."))
+        # A one-shot file gets the same deadline pair a looping one gets. The deadline is a
+        # pure function of written_at, so render_text reads no clock and --age agrees with
+        # the header it is reading.
+        dead = (now + datetime.timedelta(seconds=ONE_SHOT_SHELF_LIFE_S)).astimezone()
+        L.append(_row("refreshed", "written once. Nothing is keeping this file current."))
+        L.append(_row("stale after", "{} {}".format(dead.strftime("%H:%M:%S"), tz)))
+        L.append(_row("", "If your clock is past that, nothing is updating this file"))
+        L.append(_row("", "and every number below it is old."))
+        L.append(_row("", "stats.ps1 -Loop -Background keeps it current, and start.ps1"))
+        L.append(_row("", "launches that writer for you."))
 
     code, text = _VERDICT_TEXT.get(doc.get("verdict", "UNKNOWN"), _VERDICT_TEXT["UNKNOWN"])
     L += _sec("IS IT RUNNING?")
@@ -687,6 +965,55 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
         L.append(_row("STUCK", parts[0]))
         L += [_row("", w) for w in parts[1:]]
     L.append(_row("stall", "{} cycles with no new elite".format(rs.get("stall_counter", "unknown"))))
+
+    # Rate of work, not signs of life. A run can be fast, green and heartbeating while
+    # accepting nothing and never hearing from the model; nothing above this point says so.
+    def _wrapped(label: str, sentence: str) -> None:
+        parts = textwrap.wrap(sentence, _W - 16) or [sentence]
+        L.append(_row(label, parts[0]))
+        L.extend(_row("", w) for w in parts[1:])
+
+    acc = doc.get("accept") or {}
+    if not acc.get("cycles"):
+        L.append(_row("accepted", "unknown (no cycle_done in the tail)"))
+    elif acc.get("enough"):
+        _wrapped("accepted", "median {} per cycle over the newest {} cycles, against {} over "
+                             "the oldest {} in this tail".format(
+                                 _num(acc.get("recent_median")), acc.get("recent_n"),
+                                 _num(acc.get("older_median")), acc.get("older_n")))
+    else:
+        _wrapped("accepted", "median {} per cycle over the newest {} of {} cycles in this "
+                             "tail; {} per window needed before two windows can be "
+                             "compared".format(
+                                 _num(acc.get("recent_median")), acc.get("recent_n"),
+                                 acc.get("cycles"), ACCEPT_MIN_SAMPLES))
+    if acc.get("collapsed"):
+        _wrapped("COLLAPSE", "acceptance is under half what it was earlier in this same "
+                             "tail. The two medians it is comparing are on the line above.")
+
+    gate = doc.get("gate") or {}
+    if gate.get("at_least") and not gate.get("cycles"):
+        _wrapped("model gate", "no directive from the model in this tail, and no completed "
+                               "cycles in it either")
+    elif not gate.get("cycles"):
+        _wrapped("model gate", "the model wrote a directive since the last completed cycle")
+    else:
+        _wrapped("model gate", "the model has not written a directive in {}{} cycles".format(
+            "at least " if gate.get("at_least") else "", gate.get("cycles", 0)))
+    snap = gate.get("snapshot") or {}
+    if snap:
+        L.append(_row("codex plan", "{}% of the {} minute window used, resets {}".format(
+            _num(snap.get("used_percent")), _num(snap.get("window_minutes")),
+            _ct(snap.get("resets_at")))))
+        L.append(_row("", "reading {} old{}".format(
+            _dur(snap.get("snapshot_age_s")),
+            ", older than its own window" if gate.get("stale_snapshot") else "")))
+    skip = gate.get("last_skip") or {}
+    if skip:
+        L.append(_row("last skip", "{} gate: {} at {}".format(
+            skip.get("gate") or "unnamed", skip.get("reason") or "unstated",
+            _ct(skip.get("ts")))))
+
     if arc.get("files"):
         L.append(_row("archive", "{} daily files, {:.1f} MB, newest touched {} ago".format(
             arc.get("files", 0), (arc.get("bytes") or 0) / 2 ** 20,
@@ -699,6 +1026,25 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
     if site.get("pages"):
         L.append(_row("findings site", "{} pages, built {} ago".format(
             site["pages"], _dur(site.get("built_age_s")))))
+
+    L += _sec("WHAT THE WATCHDOG SAID")
+    wl = doc.get("watchdog_log") or {}
+    if wl.get("error"):
+        L.append(_row("log", "unreadable ({})".format(wl["error"])))
+    elif not wl.get("present"):
+        L.append(_row("log", "absent - no watchdog.log next to this file"))
+        L.append(_row("", "start.ps1 passes -LogFile; a watchdog started another way"))
+        L.append(_row("", "keeps its output in its own minimized window only."))
+    else:
+        L.append(_row("log", "watchdog.log, last written {} ago".format(
+            _dur(wl.get("written_age_s")))))
+        for ent in wl.get("lines") or []:
+            text = str(ent.get("text") or "")
+            if (ent.get("repeat") or 1) > 1:
+                text += "  (x{})".format(ent["repeat"])
+            L.append(_row(_dur(ent.get("age_s")) + " ago", text))
+        L.append(_row("", "These are lines the watchdog printed when it acted. They are"))
+        L.append(_row("", "its record, not a reading of the container's state now."))
 
     L += _sec("THIS MACHINE")
     h = doc.get("host", {}) or {}
@@ -735,16 +1081,43 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
     else:
         L.append(_row("GPU", "unknown ({})".format(g.get("error", "not probed"))))
 
+    L += _sec("OTHER CONTAINERS ON THIS DAEMON")
+    cs = doc.get("containers") or {}
+    if cs.get("skipped"):
+        L.append(_row("census", "not sampled (--no-census, or Docker was not probed)"))
+    elif not cs.get("ok"):
+        L.append(_row("census", "unknown ({})".format(_ascii(cs.get("error", "not probed")))))
+    else:
+        rows = cs.get("containers") or []
+        flags = set(cs.get("flagged") or [])
+        L.append(_row("census", "{} running, {} flagged".format(len(rows), len(flags))))
+        for r in rows:
+            bits = _ascii(r.get("status") or "unknown")
+            if r.get("health"):
+                bits += ", " + _ascii(r["health"])
+            if r.get("restart_count") is not None:
+                bits += ", {} restarts".format(r["restart_count"])
+            if r.get("name") in flags:
+                bits += "   FLAG"
+            L.append(_row(_ascii(r.get("name") or "?")[:20], bits))
+        L.append(_row("", "Restart counts are this pass only. Nothing here is a trend:"))
+        L.append(_row("", "no value is carried forward, so there is nothing to compare to."))
+
     L += _sec("PROBLEMS READING STATE")
     probs = doc.get("problems") or []
     L += ["  - " + str(p) for p in probs] if probs else ["  none"]
 
     L += _sec("WHERE THESE NUMBERS COME FROM")
     L.append("  container         docker inspect, with a hard timeout. Never docker")
-    L.append("                    stats, which has been measured at 47 s here.")
+    L.append("                    stats: it samples every container and has no timeout")
+    L.append("                    of its own (1.4 to 2.0 s here when quiet, 47 s once")
+    L.append("                    when not), so it stays off the path of a timed write.")
+    L.append("  other containers  docker ps then one docker inspect, same timeout")
     L.append("  cycle, stall      rk-work/RUNSTATE.json")
     L.append("  heartbeat         rk-work/HEARTBEAT")
     L.append("  cadence           the tail of rk-work/events.jsonl")
+    L.append("  accepted, gate    the tail of rk-work/events.jsonl")
+    L.append("  watchdog          watchdog.log next to this file, written by watchdog.ps1")
     L.append("  saturation        rk-work/saturation_state.json")
     L.append("  host, GPU         Windows kernel32 and nvidia-smi, sampled just now")
     L.append("")
@@ -773,6 +1146,64 @@ def write(path: Path, doc: dict, refresh_s: int | None = None) -> Path:
     return path
 
 
+# The two header rows render_text writes, read back. Anchored on the row labels rather than
+# on line numbers so a reordered header does not silently stop being readable.
+_WRITTEN_RE = re.compile(r"^\s*written\s+.*\((\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\)\s*$")
+_REFRESH_RE = re.compile(r"every ~(\d+)s")
+
+
+def read_written_at(path) -> tuple[datetime.datetime | None, int | None, str | None]:
+    """(written_at, declared refresh interval, error) read out of an existing stats.txt.
+
+    Runs no probe by construction: it opens one file and reads its first 4 KB. That is what
+    makes --age answerable while Docker is wedged, which is exactly when someone wants to
+    know whether the file in front of them is still describing the present.
+    """
+    try:
+        with open(path, "r", encoding="ascii", errors="replace") as fh:
+            head = fh.read(4096)
+    except FileNotFoundError:
+        return None, None, "stats.txt is absent"
+    except Exception as exc:                                 # noqa: BLE001
+        return None, None, type(exc).__name__
+    when, refresh = None, None
+    for line in head.splitlines():
+        if when is None:
+            m = _WRITTEN_RE.match(line)
+            if m:
+                when = _parse_ts(m.group(1))
+        if refresh is None:
+            m = _REFRESH_RE.search(line)
+            if m:
+                try:
+                    refresh = int(m.group(1)) or None
+                except ValueError:
+                    refresh = None
+    if when is None:
+        return None, refresh, "no written timestamp in the first 4096 bytes"
+    return when, refresh, None
+
+
+def age_report(path, now: datetime.datetime | None = None,
+               max_age_s: int | None = None) -> dict:
+    """How old an existing stats.txt is, and whether that is past its own shelf life.
+
+    The shelf life is the one the file itself declares: six refresh intervals for a looping
+    writer, the one-shot shelf life otherwise, so this answer and the 'stale after' row in
+    the header cannot disagree.
+    """
+    now = now or _utcnow()
+    when, refresh_s, err = read_written_at(path)
+    if err or when is None:
+        return {"ok": False, "path": str(path), "error": err or "no written timestamp"}
+    age_s = (now - when).total_seconds()
+    shelf = max_age_s if max_age_s else (refresh_s * 6 if refresh_s else ONE_SHOT_SHELF_LIFE_S)
+    return {"ok": True, "path": str(path),
+            "written_at": when.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "age_s": age_s, "shelf_life_s": shelf, "refresh_s": refresh_s,
+            "stale": age_s > shelf}
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="Write a status snapshot for the rk run.")
@@ -781,12 +1212,36 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--refresh", type=int, default=None, help="declared refresh interval, seconds")
     ap.add_argument("--no-gpu", action="store_true")
     ap.add_argument("--no-docker", action="store_true")
+    ap.add_argument("--no-census", action="store_true",
+                    help="skip the other-containers census (two extra docker calls)")
+    ap.add_argument("--age", action="store_true",
+                    help="report the age of an existing stats.txt and exit; runs no probe")
+    ap.add_argument("--max-age-s", type=int, default=None,
+                    help="with --age: override the shelf life the file declares, in seconds")
     a = ap.parse_args(argv)
-    doc = collect(with_gpu=not a.no_gpu, with_docker=not a.no_docker)
+    out = Path(a.out) if a.out else work_dir().parent / "stats.txt"
+
+    # --age answers the freshness question by reading the file, so it returns before any
+    # probe runs: a wedged daemon must not delay the one question that is about the file.
+    if a.age:
+        rep = age_report(out, max_age_s=a.max_age_s)
+        if a.json:
+            print(json.dumps(rep, indent=1, default=str))
+        elif not rep["ok"]:
+            print("{}  unreadable ({})".format(rep["path"], rep["error"]))
+        else:
+            print("{}  written {}, {} old, shelf life {}  [{}]".format(
+                rep["path"], rep["written_at"], _dur(rep["age_s"]),
+                _dur(rep["shelf_life_s"]), "STALE" if rep["stale"] else "current"))
+        if not rep["ok"]:
+            return 2
+        return 1 if rep["stale"] else 0
+
+    doc = collect(with_gpu=not a.no_gpu, with_docker=not a.no_docker,
+                  with_census=False if a.no_census else None)
     if a.json:
         print(json.dumps(doc, indent=1, default=str))
         return 0
-    out = Path(a.out) if a.out else work_dir().parent / "stats.txt"
     write(out, doc, a.refresh)
     print("{}  [{}]".format(out, doc["verdict"]))
     return 0

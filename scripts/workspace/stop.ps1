@@ -30,6 +30,21 @@ if ($running -eq "running") {
 $wd = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*watchdog.ps1*" -and $_.CommandLine -notlike "*-Once*" }
 foreach ($p in $wd) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host "watchdog stopped (pid $($p.ProcessId))" }
 
+# Stop the background stats writer start.ps1 launched. Matched by this script's own full
+# path, escaped for -like, and never by a *stats.ps1* wildcard: a second harness sharing
+# this workspace may ship its own stats.ps1, and rk's *watchdog.ps1* matcher above is
+# already why that harness has to name its watchdog scripts/watchdog-jobs.ps1.
+$statsPath = Join-Path $root "stats.ps1"
+$statsPattern = [System.Management.Automation.WildcardPattern]::Escape($statsPath)
+$sw = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$statsPattern*" -and $_.CommandLine -like "*-Loop*" }
+foreach ($p in $sw) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host "stats writer stopped (pid $($p.ProcessId))" }
+
+# One final one-shot write, so stats.txt's last state is the stopped container and its own
+# fifteen-minute shelf life starts running from here. stats.ps1 sets $ErrorActionPreference
+# to Stop internally, so a failure there would otherwise take this script down with it.
+try { & $statsPath -NoGpu | Out-Null; Write-Host "stats.txt written (one-shot; it declares its own shelf life)" }
+catch { Write-Host "final stats write failed: $_" }
+
 # Push anything the container committed but the watchdog had not pushed yet.
 foreach ($r in @("rk-work", "rk-findings")) {
     $path = Join-Path $root $r

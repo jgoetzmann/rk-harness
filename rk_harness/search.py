@@ -216,8 +216,25 @@ def _default_x0(stages: int) -> list[float]:
     return x0
 
 
-def cmaes_island(order: int, stages: int, seed: int, constraints: dict, budget: int) -> Iterator[Tableau]:
+def x0_from_tableau(t: Tableau) -> list[float]:
+    """The parameter vector that decodes back into `t`.
+
+    Exact inverse of the layout ``_fitness`` reads: the strictly lower triangle of A in
+    row-major order, then b. Length is ``free_parameters(len(t.b))``, so the result can be
+    handed straight to ``cmaes_island`` as ``constraints["x0"]`` to start a search from an
+    archived method instead of from ``_default_x0``.
+    """
+    stages = len(t.b)
+    return [float(t.A[i][j]) for i, j in _lower_indices(stages)] + [float(v) for v in t.b]
+
+
+def cmaes_island(order: int, stages: int, seed: int, constraints: dict, budget: int,
+                 sigma: float | None = None) -> Iterator[Tableau]:
+    """CMA-ES with exact projection. `sigma` overrides the initial step size; unset it falls
+    back to constraints["sigma"] and then to 0.3, which is what every caller used before the
+    parameter existed, so an unchanged call yields a bit-identical candidate stream."""
     n = free_parameters(stages)
+    sigma0 = float(sigma) if sigma else float(constraints.get("sigma", 0.3) or 0.3)
     x0_raw = constraints.get("x0")
     if x0_raw is not None and len(x0_raw) == n:
         x0 = [float(v) for v in x0_raw]
@@ -233,7 +250,7 @@ def cmaes_island(order: int, stages: int, seed: int, constraints: dict, budget: 
         if cma_seed == 0:
             cma_seed = 2**31 - 1
         es = cma.CMAEvolutionStrategy(
-            list(x0), 0.3,
+            list(x0), sigma0,
             {"seed": cma_seed, "verbose": -9, "verb_log": 0, "verb_disp": 0},
         )
         k += 1

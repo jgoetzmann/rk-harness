@@ -54,6 +54,47 @@ def _enum_per_cycle() -> int:
         n = _ENUM_PER_CYCLE_DEFAULT
     return max(1, n)
 
+
+# Exploration policy (P05). "empty" is the behaviour every cycle up to now had: aim the
+# deterministic fallback at the emptiest reachable cell and start CMA-ES from the default
+# point in search.py. "revisit" aims at the occupied cell whose elite has the worst held-out
+# error; "warm" starts CMA-ES from the incumbent of the cell being aimed at; "revisit+warm"
+# does both. "rotate" runs blocks of cycles under each policy in turn, which is the only way
+# this run can compare them on its own archive instead of arguing about them. Shipped
+# disarmed: RK_SEARCH_POLICY unset means "empty", so nothing changes until someone arms it.
+POLICIES: tuple[str, ...] = ("empty", "revisit", "warm", "revisit+warm")
+_POLICY_ROTATION: tuple[str, ...] = ("empty", "revisit", "revisit+warm")
+_POLICY_BLOCK_DEFAULT = 100
+
+
+def _policy_block() -> int:
+    """RK_POLICY_BLOCK_CYCLES (config.json run.policy_block_cycles) or the default."""
+    try:
+        n = int(os.environ.get("RK_POLICY_BLOCK_CYCLES", _POLICY_BLOCK_DEFAULT)
+                or _POLICY_BLOCK_DEFAULT)
+    except ValueError:
+        n = _POLICY_BLOCK_DEFAULT
+    return max(1, n)
+
+
+def _search_policy(cycle_id: int) -> str:
+    """The policy for one cycle: a pure function of RK_SEARCH_POLICY and the cycle id.
+
+    Unset, "off", and any name this build does not know all mean "empty". An unknown name
+    must not invent behaviour: a typo in the container environment would otherwise arm an
+    experiment nobody asked for, and the whole point of the rotation is that arming it is a
+    deliberate act.
+    """
+    raw = (os.environ.get("RK_SEARCH_POLICY") or "").strip().lower()
+    if raw == "rotate":
+        block = _policy_block()
+        return _POLICY_ROTATION[(int(cycle_id) // block) % len(_POLICY_ROTATION)]
+    return raw if raw in POLICIES else "empty"
+
+
+def _warm_start_enabled(policy: str) -> bool:
+    return str(policy) in ("warm", "revisit+warm")
+
 _heartbeat_thread: threading.Thread | None = None
 
 
@@ -435,21 +476,66 @@ def _eval_budget() -> int:
         return 200
 
 
-def _cmaes_candidates(d: dict, base_cycle_id: int) -> list[_Candidate]:
+def _warm_start_record(arch, order: int, stages: int, policy: str):
+    """The archived method a warm-started island starts from, or None.
+
+    The targeted cell's elite when that cell has the stage count this island is searching;
+    otherwise the lowest held-out error elite at that stage count in the same order's grid.
+    Deterministic: the grid is walked in sorted key order and a tie keeps the earlier cell.
+    """
+    grid = (arch.grids.get(int(order), {}) if arch is not None and arch.grids else {}) or {}
+    if not grid:
+        return None
+    cell = encourager.target_cell(arch, int(order), policy)
+    rec = grid.get((int(cell[0]), int(cell[1])))
+    if rec is not None and int(cell[0]) == int(stages):
+        return rec
+    best = None
+    best_val = float("inf")
+    for key in sorted(grid):
+        if int(key[0]) != int(stages):
+            continue
+        try:
+            v = float(grid[key].score.heldout_error)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if v == v and v < best_val:      # NaN loses every comparison, so it never wins
+            best_val = v
+            best = grid[key]
+    return best
+
+
+def _cmaes_candidates(d: dict, base_cycle_id: int, arch=None, policy: str = "empty") -> list[_Candidate]:
     order = int(d["target_order"])
     constraints = dict(search.default_constraints())
     constraints.update(d.get("constraints") or {})
     islands = int(d.get("islands", 4))
     budget = _eval_budget()
+    warm = _warm_start_enabled(policy)
     out: list[_Candidate] = []
     for stg in d["stages"]:
+        # x0 is added per stage count and never to the directive: the constraints dict built
+        # here is a plain dict that validate_directive never sees, and a start point is only
+        # meaningful for a vector of the right length, so an incumbent of another size is
+        # dropped rather than padded. A warm start makes the candidate stream depend on the
+        # archive as well as on the seed, so the start point is logged with the island.
+        stage_constraints = dict(constraints)
+        incumbent = _warm_start_record(arch, order, int(stg), policy) if warm else None
+        if incumbent is not None:
+            x0 = search.x0_from_tableau(incumbent.tableau)
+            if len(x0) == search.free_parameters(int(stg)):
+                stage_constraints["x0"] = x0
+            else:
+                incumbent = None
+        warm_start = "x0" in stage_constraints
         for k in range(islands):
             seed = base_cycle_id * 100 + k
             log_event("island_start", order=order, stages=int(stg), seed=seed, budget=budget,
-                      directive_id=d.get("directive_id"))
+                      directive_id=d.get("directive_id"), policy=policy, warm_start=warm_start,
+                      warm_start_hash=(incumbent.tableau_hash if incumbent is not None else None))
             n_yield = 0
             achieved: dict[int, int] = {}
-            for t in search.cmaes_island(order, int(stg), seed, constraints, budget):
+            for t in search.cmaes_island(order, int(stg), seed, stage_constraints, budget):
                 # search.project may fall back to a lower order when the requested one is not
                 # exactly solvable; verify each candidate at the order it actually achieves.
                 p = min(orderconditions.achieved_order_symbolic(t, max_order=4), 4)
@@ -459,7 +545,7 @@ def _cmaes_candidates(d: dict, base_cycle_id: int) -> list[_Candidate]:
                 out.append(_Candidate(t, p, seed, d.get("directive_id"), d.get("hypothesis_id")))
                 n_yield += 1
             log_event("island_done", order=order, stages=int(stg), seed=seed, yielded=n_yield,
-                      achieved_orders=achieved)
+                      achieved_orders=achieved, policy=policy)
     return out
 
 
@@ -488,7 +574,8 @@ def llm_due(new_cycle_id: int, action_kind: str, every: int) -> bool:
     return every <= 1 or new_cycle_id % every == 0 or action_kind in ("HYPOTHESIZE", "WIDEN", "ADVANCE_PHASE", "ROTATE_PROBLEMS")
 
 
-def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_kind: str = "") -> tuple[dict, float]:
+def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_kind: str = "",
+                   policy: str = "empty") -> tuple[dict, float]:
     """Directive for phases 2/3: LLM when enabled (throttled), else the last directive or the
     deterministic fallback."""
     spent = 0.0
@@ -520,7 +607,7 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_
             content, cost = call_llm(prompts.SYSTEM_PROMPT, user)
         except Exception as e:  # noqa: BLE001 - a directive call must never fail the cycle
             log_event("llm_call_failed", error=repr(e)[:300], gate="directive")
-            return directive_mod.fallback_directive(arch, phase, new_cycle_id), spent
+            return directive_mod.fallback_directive(arch, phase, new_cycle_id, policy), spent
         spent = cost
         log_event("llm_call", cost_usd=cost, model=os.environ.get("RK_LLM_MODEL", "gpt-4.1-mini"),
                   chars=len(content))
@@ -536,9 +623,9 @@ def _llm_directive(state: RunState, arch, phase: int, new_cycle_id: int, action_
             log_event("directive_rejected", error=str(e), text=content[:500])
     elif mode in ("on", "codex") and state.spend_usd >= credentials.monthly_cap_usd():
         log_event("llm_skipped", reason="spend cap reached", spend_usd=state.spend_usd)
-    d = directive_mod.fallback_directive(arch, phase, new_cycle_id)
+    d = directive_mod.fallback_directive(arch, phase, new_cycle_id, policy)
     log_event("directive_fallback", directive_id=d.get("directive_id"), target_order=d.get("target_order"),
-              stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
+              stages=d.get("stages"), rationale=d.get("rationale"), source="fallback", policy=policy)
     return d, spent
 
 
@@ -883,6 +970,9 @@ def _fallback_like(directive_id: str, order: int, stages: list[int], rationale: 
 def _run_cycle(state: RunState) -> RunState:
     new_cycle_id = state.cycle_id + 1
     phase = state.phase
+    # One policy for the whole cycle, decided before anything is chosen, so every event this
+    # cycle writes can be attributed to it afterwards (rk_harness.policyab).
+    policy = _search_policy(new_cycle_id)
 
     # 1. replay, verifier hash, baselines
     # This is the only full pass over the archive in a cycle. It used to be five (a replay
@@ -953,8 +1043,8 @@ def _run_cycle(state: RunState) -> RunState:
             log_event("phase1_cap_exceeded", cap=enumeration.PHASE1_CAP)
             d = _fallback_like(f"D-F{new_cycle_id:05d}", 3, [3, 4], "phase 1 cap exceeded; CMA-ES fallback")
             log_event("directive_fallback", directive_id=d["directive_id"], target_order=d.get("target_order"),
-                      stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
-            cands = _cmaes_candidates(d, state.cycle_id)
+                      stages=d.get("stages"), rationale=d.get("rationale"), source="fallback", policy=policy)
+            cands = _cmaes_candidates(d, state.cycle_id, arch, policy)
         else:
             enumeration_phase = True
             fresh = [t for t in all_pts if tableau_mod.content_hash(t) not in seen]
@@ -967,11 +1057,11 @@ def _run_cycle(state: RunState) -> RunState:
                 log_event("phase1_cap_exceeded", cap=enumeration.PHASE1_CAP, part="4-stage")
                 d = _fallback_like(f"D-F{new_cycle_id:05d}", 3, [4], "phase 1 4-stage part: CMA-ES fallback")
                 log_event("directive_fallback", directive_id=d["directive_id"], target_order=d.get("target_order"),
-                      stages=d.get("stages"), rationale=d.get("rationale"), source="fallback")
-                cands = _cmaes_candidates(d, state.cycle_id)
+                      stages=d.get("stages"), rationale=d.get("rationale"), source="fallback", policy=policy)
+                cands = _cmaes_candidates(d, state.cycle_id, arch, policy)
     else:
-        d, spent = _llm_directive(state, arch, phase, new_cycle_id, action.kind)
-        cands = _cmaes_candidates(d, state.cycle_id)
+        d, spent = _llm_directive(state, arch, phase, new_cycle_id, action.kind, policy)
+        cands = _cmaes_candidates(d, state.cycle_id, arch, policy)
 
     # 4. verify / tier / append, with an in-memory elite map kept current
     elite_map: dict[tuple[int, int, int], Record] = {}
@@ -1032,7 +1122,7 @@ def _run_cycle(state: RunState) -> RunState:
                   cycles_fast=int(sv.cycles["m0plus_fast"]), new_elite=new_elite,
                   directive_id=cand.directive_id)
     log_event("candidates_processed", accepted=n_accepted, rejected=n_rejected,
-              skipped=n_skipped, total=len(cands))
+              skipped=n_skipped, total=len(cands), policy=policy)
 
     # 5. hypotheses
     # The post-append state, derived from the delta instead of a second full read.
@@ -1085,7 +1175,7 @@ def _run_cycle(state: RunState) -> RunState:
     save_state(new_state)
     log_event("cycle_done", cycle_id=new_cycle_id, phase=new_phase, improved=improved,
               stall_counter=new_state.stall_counter, accepted=n_accepted, rejected=n_rejected,
-              spend_usd=new_state.spend_usd, cap_usd=credentials.monthly_cap_usd())
+              spend_usd=new_state.spend_usd, cap_usd=credentials.monthly_cap_usd(), policy=policy)
     return new_state
 
 

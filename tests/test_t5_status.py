@@ -190,14 +190,21 @@ def test_S11_the_rendered_file_is_ascii_and_fits_a_notepad_window(tmp_path):
 
 
 def test_S12_a_stale_file_declares_its_own_deadline(tmp_path):
-    """The whole staleness contract: a reader must be able to tell without arithmetic."""
+    """The whole staleness contract: a reader must be able to tell without arithmetic.
+
+    It now holds on both paths. A file written once used to say only that a loop would keep
+    it current, which left the reader to work out for themselves whether the numbers under
+    that sentence were minutes or days old.
+    """
     doc = _collect(_work(tmp_path))
     looped = status.render_text(doc, refresh_s=20)
     assert "stale after" in looped
     assert "nothing is updating this file" in looped
     once = status.render_text(doc, refresh_s=None)
-    assert "stale after" not in once
-    assert "written once by hand" in once
+    assert "stale after" in once
+    assert "nothing is updating this file" in once
+    assert "written once" in once
+    assert "every ~" not in once           # only the loop branch may claim an interval
 
 
 def test_S13_the_deadline_is_in_this_machines_timezone_not_the_harnesss(tmp_path):
@@ -367,3 +374,449 @@ def test_S23_a_live_heartbeat_is_not_proof_of_progress(tmp_path):
     assert "It is Docker that is broken, not the run." in ok
     assert "running without getting anywhere" not in ok
     assert "STUCK" not in ok
+
+
+# ---------------------------------------------------------------- P08: a file that ages out
+
+
+def test_S24_a_one_shot_file_declares_its_own_shelf_life(tmp_path):
+    """A file written once carries the same deadline pair a looping one carries.
+
+    Without it the header said only that stats.ps1 -Loop would keep the file current, which
+    is a fact about a writer that is not running and tells the reader nothing about the age
+    of the numbers underneath it.
+    """
+    doc = _collect(_work(tmp_path))
+    body = status.render_text(doc, refresh_s=None)
+    assert "stale after" in body
+    assert "and every number below it is old." in body
+    assert "every ~" not in body
+
+    when = status._parse_ts(doc["written_at"])
+    dead = (when + datetime.timedelta(seconds=status.ONE_SHOT_SHELF_LIFE_S)).astimezone()
+    _wall, tz = status._local(when)
+    assert dead.strftime("%H:%M:%S") in body
+    assert tz in body
+
+
+def test_S25_the_deadline_is_a_pure_function_of_written_at(tmp_path):
+    """render_text reads no clock. That is what lets --age and the header agree: both are
+    reading the same written_at, not two samples of now."""
+    doc = _collect(_work(tmp_path))
+    assert status.render_text(doc, refresh_s=None) == status.render_text(doc, refresh_s=None)
+
+    old = dict(doc)
+    old["written_at"] = "2026-01-02T03:04:05Z"
+    body = status.render_text(old, refresh_s=None)
+    when = status._parse_ts(old["written_at"])
+    dead = (when + datetime.timedelta(seconds=status.ONE_SHOT_SHELF_LIFE_S)).astimezone()
+    # the header and its deadline both follow the document, not the wall clock: a two-day-old
+    # file renders a two-day-old deadline, which is the whole point of printing one
+    assert status._local(when)[0] in body
+    assert dead.strftime("%H:%M:%S") in body
+
+
+def test_S26_age_reads_the_header_and_runs_no_probe(tmp_path, monkeypatch):
+    """--age is the question you ask when Docker is wedged, so it must not touch Docker."""
+    doc = _collect(_work(tmp_path))
+    doc["written_at"] = "2026-09-08T12:00:00Z"
+    p = tmp_path / "stats.txt"
+    status.write(p, doc)
+
+    def never(*a, **k):
+        raise AssertionError("--age must run no probe")
+    monkeypatch.setattr(status, "probe_docker", never)
+    monkeypatch.setattr(status, "probe_gpu", never)
+    monkeypatch.setattr(status, "host_cpu_percent", never)
+    monkeypatch.setattr(status, "_run", never)
+
+    now = status._parse_ts("2026-09-08T12:05:00Z")
+    rep = status.age_report(p, now=now)
+    assert rep["ok"] and rep["age_s"] == 300.0
+    assert rep["written_at"] == "2026-09-08T12:00:00Z"
+    assert status.main(["--age", "--out", str(p)]) in (0, 1)
+
+
+def test_S27_age_exit_codes_say_fresh_stale_and_unreadable(tmp_path, capsys):
+    doc = _collect(_work(tmp_path))
+    fresh = tmp_path / "fresh.txt"
+    status.write(fresh, doc)
+    assert status.main(["--age", "--out", str(fresh)]) == 0
+    assert "current" in capsys.readouterr().out
+
+    doc["written_at"] = _iso(60)                              # an hour ago
+    stale = tmp_path / "stale.txt"
+    status.write(stale, doc)
+    assert status.main(["--age", "--out", str(stale)]) == 1
+    assert "STALE" in capsys.readouterr().out
+
+    assert status.main(["--age", "--out", str(tmp_path / "nope.txt")]) == 2
+    assert "absent" in capsys.readouterr().out
+
+
+def test_S28_the_declared_loop_interval_drives_the_shelf_life(tmp_path):
+    """Six refresh intervals, the same multiple the header renders, so the two agree."""
+    doc = _collect(_work(tmp_path))
+    doc["written_at"] = "2026-09-08T12:00:00Z"
+    now = status._parse_ts("2026-09-08T12:02:30Z")            # 150 s later
+
+    looped = tmp_path / "loop.txt"
+    status.write(looped, doc, refresh_s=20)
+    rep = status.age_report(looped, now=now)
+    assert rep["refresh_s"] == 20 and rep["shelf_life_s"] == 120 and rep["stale"] is True
+
+    once = tmp_path / "once.txt"
+    status.write(once, doc)
+    rep = status.age_report(once, now=now)
+    assert rep["refresh_s"] is None
+    assert rep["shelf_life_s"] == status.ONE_SHOT_SHELF_LIFE_S and rep["stale"] is False
+
+    assert status.age_report(looped, now=now, max_age_s=3600)["stale"] is False
+    assert status.age_report(once, now=now, max_age_s=60)["stale"] is True
+
+
+def test_S29_read_written_at_survives_a_truncated_or_foreign_file(tmp_path):
+    """Anything can be sitting at that path: a half-written file, someone else's file, or
+    bytes. None of them may raise, and none of them may read as fresh."""
+    cases = {
+        "empty.txt": b"",
+        "foreign.txt": b"hello, this is not a status file\r\n",
+        "bytes.txt": bytes(range(256)) * 4,
+    }
+    for name, raw in cases.items():
+        p = tmp_path / name
+        p.write_bytes(raw)
+        when, _refresh, err = status.read_written_at(p)
+        assert when is None and err, name
+        rep = status.age_report(p)
+        assert rep["ok"] is False and rep["error"], name
+
+    when, _refresh, err = status.read_written_at(tmp_path / "missing.txt")
+    assert when is None and "absent" in err
+
+
+# ------------------------------------------------- P07: the rate of work, not signs of life
+
+
+def _cycles(n: int, accepted, start_min: int = 0) -> list[dict]:
+    return [{"ts": _iso(start_min + n - i), "kind": "cycle_done", "cycle_id": i,
+             "accepted": accepted(i) if callable(accepted) else accepted}
+            for i in range(n)]
+
+
+def _flat(body: str) -> str:
+    """The body with its wrapping undone, so an assertion can name a whole sentence."""
+    return " ".join(body.split())
+
+
+def test_S30_accept_rate_quotes_both_medians_and_both_counts(tmp_path):
+    """A verdict without its evidence is a number nobody can check. The row prints both
+    medians and both sample counts whether or not the verdict comes with them."""
+    events = _cycles(60, lambda i: 100 if i < 20 else (5 if i >= 40 else 40))
+    acc = status.accept_rate(events)
+    assert acc["cycles"] == 60
+    assert acc["older_n"] == 20 and acc["recent_n"] == 20
+    assert acc["older_median"] == 100 and acc["recent_median"] == 5
+    assert acc["enough"] is True and acc["collapsed"] is True
+
+    doc = _collect(_work(tmp_path))
+    doc["accept"] = acc
+    flat = _flat(status.render_text(doc))
+    assert ("median 5 per cycle over the newest 20 cycles, against 100 over the oldest 20 "
+            "in this tail") in flat
+    assert "COLLAPSE" in flat
+    assert "under half what it was earlier in this same tail" in flat
+
+
+def test_S31_accept_rate_says_it_cannot_compare_rather_than_computing_a_ratio(tmp_path):
+    """A byte window is not a cycle window. With four cycles per third, a drop from 100 to 1
+    is still not enough to call a phase change, and the row says so instead of ruling."""
+    events = _cycles(12, lambda i: 100 if i < 4 else (1 if i >= 8 else 50))
+    acc = status.accept_rate(events)
+    assert acc["older_n"] == 4 and acc["recent_n"] == 4
+    assert acc["enough"] is False and acc["collapsed"] is False
+
+    doc = _collect(_work(tmp_path))
+    doc["accept"] = acc
+    flat = _flat(status.render_text(doc))
+    assert "COLLAPSE" not in flat
+    assert "12 cycles in this tail" in flat
+    assert "{} per window needed".format(status.ACCEPT_MIN_SAMPLES) in flat
+
+
+def test_S32_accept_rate_never_divides_by_a_zero_baseline():
+    """No ratio anywhere: a zero baseline is not an infinite collapse, and a rise is not a
+    collapse at all."""
+    zeros = status.accept_rate(_cycles(60, 0))
+    assert zeros["older_median"] == 0 and zeros["recent_median"] == 0
+    assert zeros["enough"] is True and zeros["collapsed"] is False
+
+    rising = status.accept_rate(_cycles(60, lambda i: 0 if i < 20 else 50))
+    assert rising["collapsed"] is False
+
+    # booleans are not counts, however int-like python thinks they are
+    assert status.accept_rate([{"kind": "cycle_done", "accepted": True}] * 30)["cycles"] == 0
+    assert status.accept_rate([])["cycles"] == 0
+    assert status.accept_rate([])["collapsed"] is False
+
+
+def test_S33_the_model_gate_counts_cycles_since_the_model_last_spoke(tmp_path):
+    """directive_fallback is not the model speaking. Only directive_accepted with
+    source='llm' writes LAST_DIRECTIVE.json, and only it may reset this counter."""
+    spoke = [{"ts": _iso(100), "kind": "directive_accepted", "directive_id": "D-1",
+              "source": "llm"}] + _cycles(7, 1, start_min=10)
+    g = status.directive_gap(spoke)
+    assert g["cycles"] == 7 and g["at_least"] is False
+
+    fell_back = [dict(spoke[0], kind="directive_fallback", source="fallback")] + spoke[1:]
+    g = status.directive_gap(fell_back)
+    assert g["cycles"] == 7 and g["at_least"] is True
+
+    g = status.directive_gap(spoke[1:])
+    assert g["cycles"] == 7 and g["at_least"] is True
+
+    doc = _collect(_work(tmp_path))
+    doc["gate"] = g
+    flat = _flat(status.render_text(doc))
+    assert "the model has not written a directive in at least 7 cycles" in flat
+
+
+def test_S34_the_codex_snapshot_is_printed_and_a_reading_past_its_own_window_says_so(tmp_path):
+    """The latch the run actually hit: a reading that closed the gate was the last reading
+    that would ever be taken, so the gate stayed shut for a thousand cycles."""
+    base = {"ts": _iso(5), "kind": "codex_usage", "used_percent": 95.0,
+            "resets_at": 1788671031, "plan_type": "plus"}
+    fresh = status.directive_gap([dict(base, window_minutes=10080, snapshot_age_s=60)])
+    assert fresh["snapshot"]["used_percent"] == 95.0
+    assert fresh["stale_snapshot"] is False
+
+    doc = _collect(_work(tmp_path))
+    doc["gate"] = fresh
+    flat = _flat(status.render_text(doc))
+    assert "95% of the 10080 minute window used, resets" in flat
+    assert "older than its own window" not in flat
+
+    old = status.directive_gap([dict(base, window_minutes=60, snapshot_age_s=7200)])
+    assert old["stale_snapshot"] is True
+    doc["gate"] = old
+    assert "older than its own window" in _flat(status.render_text(doc))
+
+    skipped = status.directive_gap([{"ts": _iso(1), "kind": "llm_skipped", "gate": "directive",
+                                     "reason": "plan usage cap", "used_percent": 95.0}])
+    assert skipped["last_skip"]["gate"] == "directive"
+    doc["gate"] = skipped
+    assert "directive gate: plan usage cap at" in _flat(status.render_text(doc))
+
+
+def test_S35_watchdog_lines_are_dated_and_framed_as_a_record_not_as_state(tmp_path):
+    """Property 2: nothing is claimed about the container unless Docker answered. These are
+    lines the watchdog printed when it acted, and the section says exactly that."""
+    now = status._utcnow()
+    log = tmp_path / "watchdog.log"
+    log.write_text(
+        "\n".join([
+            "{} watchdog: container=rk work=D:/x".format(
+                (now - datetime.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            "{} ALERT: no verified candidate for 91 min".format(
+                (now - datetime.timedelta(minutes=12)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            "{} host CPU avg 63.4% > 60% over 5 min -> docker pause".format(
+                (now - datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        ]) + "\n", encoding="ascii")
+
+    wl = status.read_watchdog_log(log, now)
+    assert wl["present"] is True and wl["error"] is None
+    assert len(wl["lines"]) == 3
+    assert all(e["age_s"] is not None for e in wl["lines"])
+    assert "docker pause" in wl["lines"][-1]["text"]
+
+    doc = _collect(_work(tmp_path))
+    doc["watchdog_log"] = wl
+    body = status.render_text(doc)
+    assert "WHAT THE WATCHDOG SAID" in body
+    assert "not a reading of the container's state now." in body
+    assert "12m" in body and "2m" in body
+    assert "docker pause" in body
+    # the verdict block is untouched by anything the log says
+    assert "CANNOT TELL" not in body
+
+    # a run of identical lines collapses into one entry carrying its own count
+    stamp = (now - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repeated = ["{} container not running (exited); watchdog idle".format(stamp)] * 6
+    log.write_text("\n".join(repeated + ["{} back on AC -> docker unpause".format(stamp)])
+                   + "\n", encoding="ascii")
+    wl = status.read_watchdog_log(log, now)
+    assert len(wl["lines"]) == 2 and wl["lines"][0]["repeat"] == 6
+    doc["watchdog_log"] = wl
+    assert "(x6)" in status.render_text(doc)
+
+
+def test_S36_an_absent_watchdog_log_is_not_a_problem_but_an_unreadable_one_is(tmp_path):
+    """Property 1 cuts both ways: a probe that failed lands in PROBLEMS, and a file that was
+    never written is not a failed probe."""
+    doc = _collect(_work(tmp_path))
+    assert doc["watchdog_log"]["present"] is False
+    assert doc["watchdog_log"]["error"] is None
+    assert not [p for p in doc["problems"] if "watchdog" in p]
+    body = status.render_text(doc)
+    assert "absent - no watchdog.log next to this file" in body
+    assert "start.ps1 passes -LogFile" in body
+
+    # a directory at that path is a real read failure, and reads as one
+    (tmp_path / "watchdog.log").mkdir()
+    doc = _collect(_work(tmp_path))
+    assert doc["watchdog_log"]["error"]
+    assert any("watchdog log" in p for p in doc["problems"])
+    assert "unreadable" in status.render_text(doc)
+
+
+def test_S37_the_new_sections_stay_ascii_and_inside_the_column_budget(tmp_path):
+    """The same budget S11 enforces, applied to fields nobody in this project controls: a
+    watchdog line can be any length and can carry any byte."""
+    now = status._utcnow()
+    log = tmp_path / "watchdog.log"
+    log.write_bytes(("{} ".format(now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+                     + "x" * 300).encode("ascii") + b" \xc3\xa9\xe2\x80\x94\n")
+    doc = _collect(_work(tmp_path, **{"HEARTBEAT": _iso(1)}))
+    doc["accept"] = status.accept_rate(_cycles(60, lambda i: 100 if i < 20 else 5))
+    doc["gate"] = status.directive_gap(
+        [{"ts": _iso(9), "kind": "codex_usage", "used_percent": 95.0, "window_minutes": 10080,
+          "resets_at": 1788671031, "plan_type": "plus", "snapshot_age_s": 7200},
+         {"ts": _iso(1), "kind": "llm_skipped", "gate": "interpret", "reason": "plan usage cap",
+          "used_percent": 95.0}] + _cycles(4, 1))
+    for refresh in (20, None):
+        body = status.render_text(doc, refresh_s=refresh)
+        body.encode("ascii")
+        overlong = [ln for ln in body.split("\r\n") if len(ln) > 90]
+        assert not overlong, overlong[:3]
+
+
+def test_S38_the_productivity_tail_is_bounded_and_kind_filtered(tmp_path):
+    """One read, wide enough for two acceptance windows, parsed down to the kinds asked for."""
+    assert status.PRODUCTIVITY_TAIL_BYTES > status.EVENTS_TAIL_BYTES
+    ev = tmp_path / "events.jsonl"
+    filler = json.dumps({"ts": "2026-09-05T00:00:00Z", "kind": "noise", "pad": "x" * 900}) + "\n"
+    wanted = json.dumps({"ts": "2026-09-05T12:00:00Z", "kind": "cycle_done", "accepted": 3}) + "\n"
+    with open(ev, "w", encoding="utf-8") as fh:
+        fh.write(filler * 5000)                              # over the productivity cap
+        fh.write(wanted * 5)
+    assert ev.stat().st_size > status.PRODUCTIVITY_TAIL_BYTES
+
+    events, err = status.tail_events(ev, status.PRODUCTIVITY_TAIL_BYTES, kinds=("cycle_done",))
+    assert err is None
+    assert len(events) == 5 and {e["kind"] for e in events} == {"cycle_done"}
+    unfiltered, _ = status.tail_events(ev, status.PRODUCTIVITY_TAIL_BYTES)
+    assert len(unfiltered) > len(events)
+    assert len(unfiltered) < 5005                            # still only the tail
+
+
+def test_S39_the_watchdog_script_stays_ascii_and_carries_the_logfile_contract():
+    """Seventeen call sites in the one hand-written safety-critical component were rewritten.
+    A smart quote or an em dash there is a parse error, and a parse error there is a
+    disabled kill switch."""
+    wd = Path(status.__file__).resolve().parent.parent / "scripts" / "watchdog.ps1"
+    raw = wd.read_bytes()
+    text = raw.decode("ascii")
+    assert "[string]$LogFile" in text
+    assert "function Say" in text
+    assert 'Write-Host "$(Get-Date -Format s)' not in text
+    assert "[datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')" in text
+
+    start = wd.parent.parent.parent / "start.ps1"
+    if not start.exists():
+        pytest.skip("workspace start.ps1 not present (rk-harness is checked out alone in CI)")
+    start.read_bytes().decode("ascii")
+
+
+# ------------------------------------------- P12: the rest of the daemon, on a shared machine
+
+
+def _fake_docker(monkeypatch, ps_rc=0, ps_out="", inspect_rc=0, inspect_out="[]", err=""):
+    """Inject at status._run, which every probe in this module already goes through, so
+    nothing here touches Docker."""
+    calls = []
+
+    def fake(cmd, timeout):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "ps"]:
+            return ps_rc, ps_out, err
+        if cmd[:2] == ["docker", "inspect"]:
+            return inspect_rc, inspect_out, err
+        raise AssertionError("unexpected probe: {}".format(cmd))
+    monkeypatch.setattr(status, "_run", fake)
+    monkeypatch.setattr(status.shutil, "which", lambda name: "docker")
+    return calls
+
+
+def _inspect(name, status_str="running", health=None, restarts=0, image="img"):
+    st = {"Status": status_str, "StartedAt": "2026-09-08T00:00:00Z"}
+    if health:
+        st["Health"] = {"Status": health}
+    return {"Name": "/" + name, "State": st, "RestartCount": restarts,
+            "Config": {"Image": image}}
+
+
+def test_S40_the_census_lists_every_container_with_its_restart_count_and_health(tmp_path, monkeypatch):
+    """The machine is shared. A stack restarting in a loop next to the run is a fact about
+    this run's environment, and no status file on this machine states it today."""
+    payload = json.dumps([
+        _inspect("vector", health="unhealthy"),
+        _inspect("rk", health="healthy"),
+        _inspect("supabase-db", status_str="restarting", restarts=2553),
+    ])
+    calls = _fake_docker(monkeypatch, ps_out="vector\nrk\nsupabase-db\n", inspect_out=payload)
+
+    cs = status.probe_containers()
+    assert cs["ok"] is True
+    assert [c["name"] for c in cs["containers"]] == ["rk", "supabase-db", "vector"]
+    assert set(cs["flagged"]) == {"supabase-db", "vector"}
+    assert cs["containers"][1]["restart_count"] == 2553
+    assert cs["containers"][2]["health"] == "unhealthy"
+    # one ps and one inspect over every name, never docker stats
+    assert len(calls) == 2 and calls[1][:2] == ["docker", "inspect"]
+    assert not any("stats" in c for call in calls for c in call)
+
+    doc = _collect(_work(tmp_path))
+    doc["containers"] = cs
+    body = status.render_text(doc)
+    assert "OTHER CONTAINERS ON THIS DAEMON" in body
+    assert "3 running, 2 flagged" in body
+    for needle in ("supabase-db", "2553 restarts", "unhealthy", "FLAG"):
+        assert needle in body, needle
+    assert "Nothing here is a trend" in body
+
+
+def test_S41_a_silent_daemon_never_becomes_an_empty_container_list(tmp_path, monkeypatch):
+    """S14 for the census. 'Docker did not answer' and 'there is nothing running' are
+    different facts, and only the second one would be worth acting on."""
+    _fake_docker(monkeypatch, ps_rc=None, err="timed out after 6s")
+    cs = status.probe_containers()
+    assert cs["ok"] is False and cs["containers"] == []
+    assert "timed out" in cs["error"]
+
+    doc = status.collect(work=_work(tmp_path), findings=tmp_path / "none",
+                         with_host=False, with_gpu=False, with_docker=False, with_census=True)
+    assert doc["containers"]["ok"] is False
+    assert any("containers:" in p for p in doc["problems"])
+    body = status.render_text(doc)
+    section = body.split("OTHER CONTAINERS ON THIS DAEMON")[1].split("PROBLEMS")[0]
+    assert "unknown" in section
+    assert "0 running" not in section
+
+    # and the switch is honoured: no probe at all, and no claim either
+    doc = _collect(_work(tmp_path))
+    assert doc["containers"] == {"ok": False, "skipped": True}
+    assert "not sampled" in status.render_text(doc)
+
+
+def test_S42_a_non_ascii_container_name_does_not_break_the_ascii_rule(tmp_path, monkeypatch):
+    """Third-party container names are not under this project's control, and S11 asserts the
+    whole file is ASCII. The name is transliterated, never dropped."""
+    payload = json.dumps([_inspect("caf\u00e9-\u00fcber\u2014db", restarts=99)])
+    _fake_docker(monkeypatch, ps_out="whatever\n", inspect_out=payload)
+    doc = status.collect(work=_work(tmp_path), findings=tmp_path / "none",
+                         with_host=False, with_gpu=False, with_docker=False, with_census=True)
+    body = status.render_text(doc, refresh_s=20)
+    body.encode("ascii")
+    assert not [ln for ln in body.split("\r\n") if len(ln) > 90]
+    assert "caf" in body and "db" in body                     # present, not silently dropped
+    assert "99 restarts" in body and "FLAG" in body

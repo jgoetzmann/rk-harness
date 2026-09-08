@@ -23,7 +23,9 @@
     "interpret_every_cycles": 25,
     "sidetrack_every_cycles": 0,
     "sidetrack_max_seconds": 180,
-    "sidetrack_tracks": "both"
+    "sidetrack_tracks": "both",
+    "search_policy": "empty",
+    "policy_block_cycles": 100
   },
   "watchdog": {
     "poll_seconds": 10,
@@ -34,10 +36,22 @@
     "battery_guard": true,
     "cpu_pause_high_percent": 50,
     "cpu_pause_low_percent": 30,
-    "cpu_pause_sustain_seconds": 30
+    "cpu_pause_sustain_seconds": 30,
+    "peer_containers": "rk",
+    "docker_stats_timeout_ms": 4000,
+    "min_free_system_gb": 0,
+    "cpu_pause_high_avg_percent": 60,
+    "cpu_pause_low_avg_percent": 40,
+    "cpu_avg_window_seconds": 300,
+    "saturation_check_seconds": 1800,
+    "auto_freeze": false
   },
   "watcher": {
     "refresh_seconds": 5,
     "events_tail": 25
+  },
+  "stats": {
+    "interval_seconds": 60,
+    "gpu": false
   }
 }

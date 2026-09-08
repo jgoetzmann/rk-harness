@@ -55,8 +55,31 @@ cd D:\Programming-Projects\Integration-Harness\rk-harness
 # then, in its own window (kill switch, pause watchdog, host-side push every 10 min):
 .\scripts\watchdog.ps1 -Work D:/Programming-Projects/Integration-Harness/rk-work `
   -Findings D:/Programming-Projects/Integration-Harness/rk-findings `
-  -EnvFile  D:/Programming-Projects/Integration-Harness/rk-harness/.env
+  -EnvFile  D:/Programming-Projects/Integration-Harness/rk-harness/.env `
+  -LogFile  D:/Programming-Projects/Integration-Harness/watchdog.log
 ```
+
+`-LogFile` is worth passing. The watchdog runs minimized and nobody looks at it, so an ALERT or a
+pause decision is printed once and lost; with a log file, `rk_harness.status` reads the last few
+lines back into `stats.txt`, with each line's own age. The stamps in it are UTC with a `Z`
+(`Get-Date -Format s` is local and unlabelled, and would be read as UTC seven hours out). The
+workspace `start.ps1` passes this and the file rotates itself at 1 MB.
+
+Three more parameters matter on a machine that runs anything else. `-PeerContainers` (default
+`rk`) is the list of containers whose CPU is subtracted from host load before the pause decision;
+everything else on the daemon counts as foreground load the run should yield to, which is
+deliberate. `-StatsTimeoutMs` (default 4000) bounds the `docker stats` probe: on timeout the guard
+decides nothing for that pass rather than deciding on a stale number, and while the container is
+paused the probe is skipped entirely. `-MinFreeSystemGB` (default 0, report only) watches the
+system drive, where Docker's VHDX lives and which the work-drive floor does not cover.
+
+Read its state without a terminal: the workspace `stats.ps1` writes `stats.txt`, and every copy of
+that file states its own staleness deadline in this machine's timezone, whether a loop wrote it or
+a single run did. `python -m rk_harness.status --age` (or `.\stats.ps1 -Age` from the workspace)
+answers how old the file on disk is without running a probe or rewriting it: exit 0 current, 1 past
+the shelf life it declares, 2 unreadable. The file also reports acceptance rate against the older
+part of the same tail, how many cycles it has been since the model itself wrote a directive, and
+every other container on the daemon with its restart count and health.
 
 Watch it: `docker logs -f rk` (entrypoint prints the hash check and the golden gate, then
 the runner is quiet — the event stream is `rk-work\events.jsonl`), or the TUI

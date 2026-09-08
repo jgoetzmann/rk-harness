@@ -6,6 +6,8 @@
 #   .\stats.ps1 -Loop -Background   same, in its own minimized window
 #   .\stats.ps1 -Interval 60        seconds between refreshes (default 20)
 #   .\stats.ps1 -NoGpu       skip the nvidia-smi probe
+#   .\stats.ps1 -Age         how old is the existing file? Runs no probe, writes nothing.
+#                            Exit 0 fresh, 1 past its declared shelf life, 2 unreadable.
 #
 # Read-only with respect to the run: it never writes into rk-work and never touches the
 # container. Safe to run while the run is live, stopped, or missing.
@@ -14,6 +16,7 @@ param(
     [switch]$Background,
     [switch]$NoGpu,
     [switch]$NoDocker,
+    [switch]$Age,
     [int]$Interval = 20
 )
 $ErrorActionPreference = "Stop"
@@ -33,6 +36,14 @@ $out = Join-Path $root "stats.txt"
 $argsList = @("-m", "rk_harness.status", "--out", $out)
 if ($NoGpu) { $argsList += "--no-gpu" }
 if ($NoDocker) { $argsList += "--no-docker" }
+
+if ($Age) {
+    # Reads the file's own header and nothing else: no docker call, no counters, no rewrite.
+    # That is what makes the question answerable while the daemon is wedged, which is the
+    # moment someone wants to know whether the file in front of them is still current.
+    & $py @("-m", "rk_harness.status", "--age", "--out", $out)
+    exit $LASTEXITCODE
+}
 
 if ($Background) {
     # Relaunch this same script in its own window so the caller gets their prompt back.

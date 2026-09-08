@@ -16,7 +16,9 @@ to it; its lead paragraph says nothing in it was written after the fact, and its
 hand-typed in three places.
 
 Rulings D13 to D25 were made 2026-09-07/08 alongside `UNBLOCK-2026-09-07.md`, which carries the
-measurements they rest on.
+measurements they rest on. D26 and D29 onward came out of implementing `docs/proposals/`.
+**D27 and D28 are deliberately unused**, reserved when the proposal batches were sequenced and
+then not needed; a reader looking for them is not missing anything.
 
 ---
 
@@ -642,3 +644,222 @@ stays in the host's own timezone. `RUNSTATE.json` gains one derived key that no 
 no archive record. Copying the harness into the image so the running code is immutable is a
 Dockerfile change and an image rebuild, not an epoch boundary; the Dockerfile is not in
 `VERIFIER_FILES` and does not move the hash.
+
+---
+
+## D26 - The exploration policy ships as machinery, disarmed, and two questions stay with the owner (2026-09-08)
+
+**Decision.** Build the P05 machinery and leave it off. `run.search_policy` defaults to `empty`,
+which is the behaviour every cycle up to now had, and the rotation is not armed. A policy chooses
+two things and nothing else: which cell the deterministic fallback aims at (`empty` or `revisit`),
+and whether CMA-ES starts from that cell's incumbent (`warm`). Both are additions to a directive,
+never contradictions of one. The only levers are `d['stages']` on the fallback directive, which the
+harness writes itself, and an `x0` entry in the constraints dict the runner builds, which
+`validate_directive` never sees.
+
+**Why the proposal is reshaped.** Two live facts, read out of the event log on 2026-09-08.
+(1) The fallback path no longer fires. Over the recent window there were 48 `directive_accepted`
+events, every one with `source: llm`, and zero `directive_fallback`. A policy attached only to the
+fallback directive, which is what P05 specifies, is inert in the live configuration, so shipping the
+rotation armed would produce blocks of identical behaviour and a null result that means nothing.
+(2) The chosen cell never reached the generator. `fallback_directive` discarded the bucket half of
+the cell it picked, and the encourager's SEARCH_CELL payload is logged and read nowhere else, so
+"target a cell" can only be implemented as "target a stage count, and start from that cell's
+incumbent". A bucket cannot be targeted at all: `archive.cycle_bucket` is a function of the finished
+tableau.
+
+**Rejected.** Arming the rotation in the change that builds it, which would spend cycles measuring a
+difference the live configuration cannot express. Rejected: moving sigma and adding warm starts
+together, which would make the A/B uninterpretable; sigma is now a parameter and its default stays
+exactly 0.3. Rejected: re-opening `archive._better` so that revisiting reads as progress, which D23
+settled.
+
+**Two questions that stay with the owner. The rotation must not start before both are answered.**
+(a) May a policy override an accepted LLM directive's `target_order` and `stages`? Today it may not:
+under an LLM directive a policy can only add `x0`. (b) Does the saturation freeze rule follow the
+policy? The rule counts a record in a previously empty cell as progress (DEVELOPMENT.md 246-250), so
+a revisit policy reads as less progress by the run's own definition, and deciding that after the
+rotation runs would be choosing the answer from the result.
+
+**Evidence.** `rk_harness/search.py`: `x0_from_tableau`, the `sigma` parameter on `cmaes_island`;
+`rk_harness/encourager.py`: `revisit_cell`, `target_cell`, `cell_policy`, `POLICIES`;
+`rk_harness/directive.py`: `_cell`, `_POLICY_LETTER`, `fallback_directive`;
+`rk_harness/runner.py`: `_search_policy`, `_policy_block`, `_warm_start_enabled`,
+`_warm_start_record`, `_cmaes_candidates`; `rk_harness/policyab.py`; tests B81-B83 in
+`tests/test_t3_archive_search_directive.py` and B84-B85 in `tests/test_t4_ledger_runner_site.py`.
+
+**Consequence.** The fallback directive id gains a policy letter: `D-F00007` becomes `D-FE00007`,
+and a revisit-targeted fallback is `D-FR00007`. The id still matches `^D-[A-Za-z0-9]+$` and still
+starts with `D-F`, so `sitegen._phase_label` keeps labelling those records as search records. Four
+`log_event` calls gain a `policy` field, and `island_start` also records `warm_start` and the
+incumbent's `warm_start_hash`, because a warm start makes the candidate stream depend on the archive
+as well as on the seed and the start point has to be recoverable.
+
+**A reproducibility limit, to be stated wherever this comparison is published.**
+`rk-work/.gitignore` ignores `events.jsonl`, so the event log is host-local and is never pushed.
+Attribution for records produced under an LLM directive rests entirely on that file. The part that
+survives in the published archive is the `D-FE` / `D-FR` letter on fallback-sourced records.
+
+**Epoch impact.** Unpinned. Nothing edited appears in `verifier_hash.VERIFIER_FILES`, and the pinned
+hash is byte-identical before and after
+(`de5bec229ffa404a85b9172fdc808ef6035716c3df8b308c816e90ffb54fd6e9`). No archived record changes.
+
+---
+
+---
+
+## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
+
+**Decision.** `stats.txt` declares a staleness deadline on both paths, not only when a loop wrote
+it. A file written once carries `ONE_SHOT_SHELF_LIFE_S`, fifteen minutes, computed from its own
+`written_at` rather than from a clock read at render time. `rk_harness.status` gains
+`read_written_at` and `age_report`, and `--age` answers the freshness question from the file's
+header alone, running no probe and rewriting nothing: exit 0 current, 1 past the declared shelf
+life, 2 unreadable. `stop.ps1` stops the background writer by this workspace's own full path and
+then takes one final one-shot reading, so the last state on disk is the stopped container.
+
+**Why.** The header used to tell a reader of a one-shot file that `stats.ps1 -Loop` would keep it
+current. That is a fact about a writer that is not running, and it left the reader to work out for
+themselves whether the numbers below it were two minutes or two days old, which is the arithmetic
+the deadline exists to remove. Rejected: rendering the deadline from `_utcnow()`, which is simpler
+and wrong, because the file would then claim a future for a document written last Tuesday and
+`--age` and the header could disagree. The deadline is a pure function of `written_at`, which is
+also what lets `--age` read it back and reach the same answer.
+
+Fifteen minutes is longer than any cycle at the current cadence, so a one-shot file written between
+cycles is still describing the present, and short enough that nobody builds a habit of trusting a
+stale one. A file written by a loop keeps the six-interval rule it already had, and `age_report`
+reads the interval out of the header so the two cannot drift.
+
+**Evidence.** `rk_harness/status.py`: `ONE_SHOT_SHELF_LIFE_S`, the `refresh_s is None` branch of
+`render_text`, `read_written_at`, `age_report`, and the `--age` branch of `main` which returns
+before `collect` is reached. `stop.ps1`: the escaped-full-path matcher and the final write.
+`stats.ps1 -Age`. Tests S24 to S29 in `tests/test_t5_status.py`; S12 updated in the same change,
+because it asserted the previous behaviour.
+
+**Consequence.** The stats writer is matched by full path and never by `*stats.ps1*`. A second
+harness in this workspace may ship its own `stats.ps1`, exactly as rk's `*watchdog.ps1*` matcher
+already forces that harness to name its watchdog `scripts/watchdog-jobs.ps1`.
+
+**Closes.** A file that could be arbitrarily old while looking exactly like a fresh one.
+
+**Epoch impact.** None. Host-side reporting only: no verifier-pinned file, no `VERIFIER_HASH`, no
+score.
+
+---
+
+## D30 - Alert on the rate of work, not on signs of life (2026-09-08)
+
+**Decision.** `stats.txt` reports acceptance rate and the model-directive gap alongside cadence.
+`accept_rate` compares the median of the newest third of the `cycle_done` events in the tail
+against the median of the oldest third and prints both medians with both sample counts;
+`directive_gap` counts cycles since the last `directive_accepted` carrying `source="llm"` and reads
+back the plan snapshot that gate last saw. `watchdog.ps1` gains `-LogFile`, and `status` reads the
+tail of that log into a new section. The collapse verdict renders as a row inside PROGRESS, not in
+PROBLEMS.
+
+**Why.** The run was fast, green, heartbeating and scientifically dead for thirty-five hours and
+nothing in the system had anything to say about it. D25's `progress_note` catches a run that has
+stopped completing cycles; it cannot catch a run completing cycles that accept nothing, or one that
+has not heard from the model in a thousand cycles because a usage snapshot latched a gate shut.
+Both are rates, and neither is visible in any liveness signal.
+
+The verdict needs both windows because a byte tail is not a cycle tail: phase 0 and 1 cycles
+enumerate in bulk and occupy more bytes each, so the two thirds can straddle a phase change and a
+ratio alone would read that as a collapse. Ten samples per window are required before any verdict
+is offered, and the row prints the two medians either way, so a phase change can read as a phase
+change. No division anywhere: a zero baseline is not an infinite collapse and a rise is not a
+collapse at all.
+
+Rejected: putting the collapse row in PROBLEMS. That section is headed PROBLEMS READING STATE, is
+documented as where a failed probe lands, and its exact title is pinned by S9. `progress_note` is
+the precedent for a derived judgement, and it renders as a STUCK row inside PROGRESS. Widening the
+section is an owner call, not a side effect of this change.
+
+The watchdog log exists because the watchdog runs in a minimized window nobody looks at, so an
+ALERT or a pause is printed once and lost. Its stamps are UTC with a `Z`, not `Get-Date -Format s`,
+which is local and unlabelled: `status._parse_ts` treats a naive stamp as UTC and would be seven
+hours wrong on this machine. The section says in its own closing lines that these are lines the
+watchdog printed when it acted, not a reading of the container's state now, which is what keeps
+property 2 intact.
+
+**Evidence.** `rk_harness/status.py`: `PRODUCTIVITY_TAIL_BYTES`, `ACCEPT_MIN_SAMPLES`,
+`ACCEPT_COLLAPSE_RATIO`, the `kinds` gate in `tail_events`, `accept_rate`, `directive_gap`,
+`read_watchdog_log`, the new PROGRESS rows and the WHAT THE WATCHDOG SAID section.
+`scripts/watchdog.ps1`: `-LogFile`, `Say`, `Rotate-Log`. `runner.py:533` is where `source="llm"`
+is written and `runner.py:715` where a gate names itself; neither file is touched by this change.
+Tests S30 to S39. Measured on this host 2026-09-08: the four-megabyte tail read costs 33 ms and the
+substring gate cuts it from 14,461 parsed dicts to 407.
+
+**Consequence.** The productivity read is four megabytes rather than 512 KB. `watch.py` has read
+four megabytes every few seconds for months, which is the precedent, and the kind filter keeps the
+parse cost at a tenth of the unfiltered read. `PRODUCTIVITY_TAIL_BYTES` is the single knob if it
+ever hurts.
+
+**Closes.** A run that can be green on every existing signal while producing nothing.
+
+**Epoch impact.** None. Host-side reporting and one host script; no verifier-pinned file, no
+`VERIFIER_HASH`, no `entrypoint.sh`, no score.
+
+---
+
+## D31 - The pause guard's docker probe is bounded, its peer list is deliberate, and the rest of the daemon becomes visible (2026-09-08)
+
+**Decision.** `docker stats` runs through one bounded helper, `Get-DockerCpuRows`, as a child
+process the watchdog can kill after `-StatsTimeoutMs` (default 4000). On timeout the guard decides
+nothing for that pass: it clears the sample buffer, says so once per outage, and skips the pause
+decision. While the container is paused no probe is made at all, because a frozen cgroup has no CPU
+share to subtract. `-PeerContainers` (default `rk`) names the containers whose CPU is subtracted
+from host load; every other container counts as foreground load the run should yield to. The
+watchdog publishes each sample to `docker-cpu.json` for a second harness to read, and reads none
+back. The system drive is reported and only guarded when `-MinFreeSystemGB` is non-zero. `status`
+gains a census of every container on the daemon with status, health and restart count.
+
+**Why, and one number corrected.** P12's arithmetic rested on `status.py`'s note that `docker
+stats` was measured at 47 s here, which would turn a 10 s poll into a 50 s one and a twelve-sample
+heartbeat window into a two-sample one. That measurement was taken on a saturated machine. Measured
+2026-09-08 on a quiet one over five consecutive calls, the cost is 1.41 s minimum and 2.01 s median,
+so the real effect today is an effective poll near 12 s and about ten samples inside the 120 s
+window instead of twelve. That is a skew, not a collapse, and the 47 s figure must not be repeated
+as if it were typical. The case for bounding the call stands on the tail rather than the median:
+this daemon has been seen wedged and answering HTTP 500 on every endpoint, and an unbounded call
+there sits on the path that decides whether the run is paused. The `WHERE THESE NUMBERS COME FROM`
+line in `stats.txt` that stated the 47 s figure as fact is rewritten to give the durable reason
+instead, which is that `docker stats` samples every container and has no timeout of its own.
+
+The peer list stays a deliberate name list. Subtracting every container would let a crash-looping
+third-party stack run this machine hot while the guard reported it quiet, which is the opposite of
+why the guard exists. The default of `rk` alone reproduces today's behaviour exactly. A wrong name
+silently subtracts nothing, so the startup line names the requested set and the earliest
+successful poll names the resolved one.
+
+The census reports what it can see this pass and never a trend. Rule 1 forbids carrying a value
+forward and this module keeps no cache, so a restart count that is rising is not something it can
+honestly compute; it flags single-sample facts instead, a restarting status, an unhealthy health
+check, or a count already past `RESTART_FLAG`. Do not add a history file to make "climbing" work.
+
+`docker-cpu.json` is written and never read here. rk is what wrote it, so a reader in rk would only
+be rk reusing its own last sample, which is the carried-forward value this project refuses
+everywhere else. The reader contract is in the comment: a consumer treats a file older than about
+2.5 polls as absent and samples for itself, and no decision may ever wait on it. The second harness
+is the reader, and it does not exist in this workspace yet.
+
+**Evidence.** `scripts/watchdog.ps1`: `Get-DockerCpuRows`, `Write-CpuSample`, the rewritten
+pause-guard preamble and block 5b. `rk_harness/status.py`: `RESTART_FLAG`, `probe_containers`,
+`_ascii`, the `with_census` switch and the OTHER CONTAINERS ON THIS DAEMON section. Tests S40 to
+S42 and C25 to C28. The 1.41/2.01 s figures were measured on this host on 2026-09-08; the parsing
+half of `Get-DockerCpuRows` was exercised against canned output rather than the live daemon.
+
+**Consequence.** Three watchdog parameters need `configure.py` keys and `start.ps1` wiring, and
+C25 fails until every `watchdog.*` key in `SCHEMA` is passed. C28 stays skipped until
+`watchdog.peer_containers` exists. `min_free_system_gb` defaults to 0, so nothing stops the run on
+the system drive without the owner turning it on. The census names third-party containers and
+belongs in `stats.txt`, which is gitignored; it must never reach a findings page, where every
+number has to trace to `key_findings.json`, `validation/results.json`, `benchmark/results.json` or
+the side-track ledger, and a restart count traces to none of them.
+
+**Closes.** An unbounded call on the pause path, a guard that could only ever subtract one
+container, and a shared machine whose other containers no status file mentioned.
+
+**Epoch impact.** None. Host scripts and host-side reporting; no verifier-pinned file, no
+`VERIFIER_HASH`, no `Dockerfile`, no `entrypoint.sh`, no score.
