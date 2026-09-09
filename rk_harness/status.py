@@ -20,6 +20,15 @@ Three rules the file keeps, because a status file that lies is worse than no sta
    exists to be compared against the reader's taskbar clock, and this machine is not on
    Central time.
 
+Those three rules are what the lane rows obey too. A cycle used to be one thing, an explicit
+search, and every counter here still reads that way; under a lane schedule a cycle can be any
+of three, and one that spent its budget on the adaptive or implicit lane appends nothing to
+the scored archive because that is what it was told to do. So the schedule is only claimed
+when Docker actually answered, the split that was MEASURED comes from
+rk-work/schedule/shares.json and from nowhere else, and the split the schedule asks for is
+never printed in its place. All of it tolerates rk-work/schedule/ not existing, which is the
+state while the rotation ships disarmed.
+
 This module must not import runner (viewers read state files; K13), and must import
 cleanly on Linux for CI - every Windows call is looked up lazily and returns None
 elsewhere.
@@ -37,6 +46,7 @@ import textwrap
 import time
 from pathlib import Path
 
+from rk_harness import lanes
 from rk_harness.paths import findings_dir, work_dir
 from rk_harness.timefmt import fmt_ct
 
@@ -61,6 +71,16 @@ ACCEPT_MIN_SAMPLES = 10
 ACCEPT_COLLAPSE_RATIO = 0.5
 WATCHDOG_LOG_TAIL_BYTES = 64 * 1024
 WATCHDOG_LOG_LINES = 5
+# The run refreshes rk-work/schedule/shares.json as a cycle ends. A document further behind
+# RUNSTATE.json than this is not describing the present, and printing its numbers would be
+# carrying a value forward under another name. Twenty cycles is about an hour at the 176 s
+# cadence measured 2026-09-09: wide enough that a cycle boundary landing between two reads
+# is never a fault, tight enough that a writer that has stopped shows up within the hour.
+LANE_SHARES_STALE_CYCLES = 20
+# The value column stats.txt gives a row: 2 spaces + a 14-character label + this is 78, the
+# width the rest of the file is written to. Lane values are wrapped to it here rather than
+# in the renderer, so the watcher gets the same lines the file gets.
+LANE_VALUE_W = 62
 
 WINDOWS = platform.system() == "Windows"
 _ZERO_TIMES = ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00")
@@ -522,7 +542,8 @@ def _median(values: list[float]) -> float | None:
     return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
 
 
-def accept_rate(events: list[dict], min_samples: int = ACCEPT_MIN_SAMPLES) -> dict:
+def accept_rate(events: list[dict], min_samples: int = ACCEPT_MIN_SAMPLES,
+                lane: str = "explicit") -> dict:
     """The median of the newest third of the cycle_done events in the tail against the
     median of the oldest third, with both sample counts.
 
@@ -531,17 +552,30 @@ def accept_rate(events: list[dict], min_samples: int = ACCEPT_MIN_SAMPLES) -> di
     phase change. A verdict is only offered once each window holds min_samples cycles, and
     the row prints the two medians whether or not a verdict came with them - a phase change
     has to be able to read as a phase change rather than as a collapse.
+
+    Counted by lane, but only once the stream says which lane a cycle was. No cycle_done
+    carries a lane today and every one of them is counted, which is the run as it stands.
+    Once they do, a cycle told to spend its budget on the adaptive or implicit lane appends
+    nothing to the scored archive by design; folding those zeros in would put the median on
+    the floor and report a collapse that is the schedule working exactly as instructed. A
+    cycle_done with no lane at all is still counted whatever else is in the tail, because a
+    row written before the rotation existed was an explicit cycle.
     """
+    dones = [e for e in events if e.get("kind") == "cycle_done"]
+    lane_aware = any("lane" in e for e in dones)
+    skipped = 0
     vals: list[float] = []
-    for e in events:
-        if e.get("kind") != "cycle_done":
+    for e in dones:
+        if lane_aware and e.get("lane") not in (None, lane):
+            skipped += 1
             continue
         v = e.get("accepted")
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             continue
         vals.append(float(v))
     out = {"cycles": len(vals), "older_n": 0, "recent_n": 0, "older_median": None,
-           "recent_median": None, "enough": False, "collapsed": False}
+           "recent_median": None, "enough": False, "collapsed": False,
+           "lane_aware": lane_aware, "lane": lane, "other_lane_cycles": skipped}
     third = len(vals) // 3
     if third == 0:
         return out
@@ -593,6 +627,156 @@ def directive_gap(events: list[dict]) -> dict:
             last_skip = {"gate": e.get("gate"), "reason": e.get("reason"), "ts": e.get("ts")}
     return {"cycles": cycles, "at_least": at_least, "last_at": last_at,
             "snapshot": snapshot, "stale_snapshot": stale, "last_skip": last_skip}
+
+
+def _lane_pcts(shares: dict) -> str:
+    """'explicit 70%, adaptive 15%, implicit 15%', always all three lanes in LANES order."""
+    return ", ".join("{} {:.0f}%".format(lane, 100.0 * float(shares.get(lane, 0.0) or 0.0))
+                     for lane in lanes.LANES)
+
+
+# How the schedule was learned. Short tokens so a row can name the source without spending
+# its whole width on it; the sentences live in lane_rows.
+_LANE_SOURCE_TEXT = {
+    "shares": "named in shares.json",
+    "env": "set in the container env",
+    "env-unset": "container sets none",
+    "env-bad": "container value rejected",
+}
+
+
+def read_lanes(work: Path | None = None, docker_env: dict | None = None,
+               current_cycle=None) -> dict:
+    """The lane schedule in force, and the split that was actually measured.
+
+    Two questions, kept apart the way rk_harness.lanes keeps them apart. What the schedule
+    ASKS FOR is arithmetic on a string and is always available. What the machine DID is only
+    ever read from rk-work/schedule/shares.json, which the run writes; with no such file the
+    measured split is unknown and stays unknown. The scheduled split is never printed in its
+    place, because the survey behind the rotation found a run whose intended 70/15/15 had in
+    fact been 0.0005 percent with nothing in a position to notice.
+
+    docker_env is the container's RK_* environment when Docker actually answered, and None
+    when it did not. None is not an empty dict: empty means Docker answered and
+    RK_LANE_SCHEDULE is unset, which is a definite answer and means the default schedule.
+    None means nothing on this machine can say what the container is running, and then the
+    schedule prints unknown - rule 2 of this file, applied to one more field.
+
+    Everything here tolerates rk-work/schedule/ not existing at all, which is the state
+    today: the rotation ships disarmed and the directory arrives with it.
+    """
+    work = Path(work) if work else work_dir()
+    path = work / "schedule" / "shares.json"
+    out: dict = {"path": str(path), "exists": path.exists(), "error": None, "fault": False,
+                 "schedule": None, "schedule_source": None, "armed": None,
+                 "scheduled_share": None, "measured": None, "cycles": None,
+                 "window_cycles": None, "generated_cycle": None, "behind_cycles": None,
+                 "stale": False, "problem": None, "schedule_problem": None}
+
+    doc = None
+    if out["exists"]:
+        doc, err = _read_json(path)
+        if err or not isinstance(doc, dict):
+            doc, out["error"], out["fault"] = None, err or "shares.json is not an object", True
+        elif (doc.get("_meta") or {}).get("schema") != lanes.SHARES_SCHEMA:
+            doc, out["fault"] = None, True
+            out["error"] = "shares.json is not " + lanes.SHARES_SCHEMA
+    else:
+        out["error"] = "shares.json is absent"
+
+    meta = (doc or {}).get("_meta") or {}
+    raw = meta.get("schedule")
+    if isinstance(raw, str) and lanes.schedule_problem(raw) is None:
+        out["schedule"], out["schedule_source"] = lanes.parse_schedule(raw), "shares"
+    elif docker_env is not None:
+        env_raw = docker_env.get("RK_LANE_SCHEDULE")
+        problem = lanes.schedule_problem(env_raw)
+        out["schedule"] = lanes.parse_schedule(env_raw)
+        out["schedule_source"] = ("env" if problem is None
+                                  else ("env-unset" if problem == "unset" else "env-bad"))
+        if out["schedule_source"] == "env-bad":
+            # The runner falls back to the default on a value it cannot parse rather than
+            # failing a cycle, which is right and also silent. A schedule that was set and
+            # is not in force is exactly the gap between what someone configured and what
+            # the machine is doing, so it is said out loud here.
+            out["schedule_problem"] = (
+                "lane schedule: the container's RK_LANE_SCHEDULE {} and is ignored, "
+                "so every cycle is an explicit search".format(problem))
+    if out["schedule"] is not None:
+        out["armed"] = lanes.armed(out["schedule"])
+        out["scheduled_share"] = lanes.scheduled_shares(out["schedule"])
+
+    if doc is not None:
+        gen = meta.get("generated_cycle")
+        out["generated_cycle"] = gen if isinstance(gen, int) and not isinstance(gen, bool) else None
+        win = meta.get("window_cycles")
+        out["window_cycles"] = win if isinstance(win, int) and not isinstance(win, bool) else None
+        cur = current_cycle if isinstance(current_cycle, int) and not isinstance(current_cycle, bool) else None
+        if cur is not None and out["generated_cycle"] is not None:
+            out["behind_cycles"] = cur - out["generated_cycle"]
+            out["stale"] = out["behind_cycles"] > LANE_SHARES_STALE_CYCLES
+        got = doc.get("lanes")
+        counted = 0
+        if isinstance(got, dict):
+            counted = sum(int((got.get(lane) or {}).get("cycles") or 0) for lane in lanes.LANES)
+        if out["stale"]:
+            out["error"] = "shares.json is {} cycles behind the run".format(out["behind_cycles"])
+            out["fault"] = True
+        elif not isinstance(got, dict) or counted <= 0:
+            out["error"] = "no cycle has been recorded yet"
+        else:
+            out["cycles"] = counted
+            out["measured"] = {lane: {
+                "share": float((got.get(lane) or {}).get("share") or 0.0),
+                "cycles": int((got.get(lane) or {}).get("cycles") or 0),
+                "seconds": float((got.get(lane) or {}).get("seconds") or 0.0),
+            } for lane in lanes.LANES}
+
+    # A missing document is only a fault when the schedule asks for a rotation nobody is
+    # recording. Under the default schedule there is no rotation to record, and reporting
+    # that as a problem every pass would train the reader to skip the section that exists
+    # to be read - the same reasoning that keeps an absent saturation_state.json quiet.
+    if out["fault"] or (out["measured"] is None and out["armed"]):
+        out["problem"] = "lane split: " + str(out["error"])
+    return out
+
+
+def lane_rows(ln: dict) -> list[tuple[str, str]]:
+    """The lane lines as (label, value) pairs, wrapped to the file's column budget.
+
+    stats.txt and the watcher both render from this, so the two cannot disagree about what
+    the run is scheduled to do or about what it actually did.
+    """
+    def wrap(label: str, value: str) -> list[tuple[str, str]]:
+        parts = textwrap.wrap(value, LANE_VALUE_W) or [value]
+        return [(label, parts[0])] + [("", p) for p in parts[1:]]
+
+    ln = ln or {}
+    rows: list[tuple[str, str]] = []
+    sched = ln.get("schedule")
+    if sched is None:
+        rows += wrap("lane", "unknown; no shares.json names one and Docker did not say")
+        return rows
+    source = _LANE_SOURCE_TEXT.get(str(ln.get("schedule_source")), "source unnamed")
+    if not ln.get("armed"):
+        rows += wrap("lane", "every cycle explicit (schedule {!r}; {})".format(sched, source))
+    else:
+        rows += wrap("lane", "schedule {!r}, {}".format(sched, source))
+        rows += wrap("", "asks for " + _lane_pcts(ln.get("scheduled_share") or {}))
+
+    measured = ln.get("measured")
+    if measured is None:
+        if ln.get("armed"):
+            rows += wrap("measured", "unknown ({}); nothing has recorded the rotation the "
+                                     "schedule asks for".format(ln.get("error") or "not read"))
+        else:
+            rows += wrap("measured", "unknown; no rotation is scheduled, so none is recorded")
+    else:
+        rows += wrap("measured", _lane_pcts({lane: measured[lane]["share"]
+                                             for lane in lanes.LANES})
+                     + " over {} cycles".format(ln.get("cycles")))
+        rows += wrap("", "from shares.json, at cycle {}".format(ln.get("generated_cycle")))
+    return rows
 
 
 def read_watchdog_log(path: Path, now: datetime.datetime,
@@ -771,6 +955,18 @@ def collect(work: Path | None = None, findings: Path | None = None,
     directive, _ = _read_json(work / "LAST_DIRECTIVE.json")
     doc["directive"] = directive or {}
 
+    # The container's own environment, and only when Docker actually answered with a
+    # container's configuration. probe_docker sets "env" on that path alone, so an absent
+    # container or a silent daemon leaves the schedule unknown rather than assumed.
+    doc["lanes"] = read_lanes(
+        work,
+        docker_env=(doc["docker"].get("env") if isinstance(doc["docker"].get("env"), dict)
+                    else None),
+        current_cycle=doc["runstate"].get("cycle_id"))
+    for note in (doc["lanes"].get("schedule_problem"), doc["lanes"].get("problem")):
+        if note:
+            bad(note)
+
     doc["stop_file"] = (work / "STOP").exists()
     doc["frozen"] = (work / "EPOCH_STATUS.json").exists()
 
@@ -941,6 +1137,12 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
     cad = doc.get("cadence", {}) or {}
     L += _sec("WHAT IT IS DOING")
     L.append(_row("cycle", "{}   phase {}".format(rs.get("cycle_id", "unknown"), rs.get("phase", "?"))))
+    # What KIND of cycle that was. Every counter below this point is read as a count of
+    # explicit searches, so the reader is told first whether the run is still doing one on
+    # every cycle. The measured split is never filled in from the schedule.
+    ln = doc.get("lanes") or {}
+    for label, value in lane_rows(ln):
+        L.append(_row(label, value))
     last = cad.get("last")
     L.append(_row("last cycle", "{}   {} ago".format(_ct(last.isoformat()), _dur(_age(last, now)))
                   if last else "unknown (no cycle_done in the recent events tail)"))
@@ -964,7 +1166,18 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
         parts = textwrap.wrap(head, _W - 16) or [head]
         L.append(_row("STUCK", parts[0]))
         L += [_row("", w) for w in parts[1:]]
-    L.append(_row("stall", "{} cycles with no new elite".format(rs.get("stall_counter", "unknown"))))
+    # The counter counts explicit cycles that produced no elite. Under a lane rotation a
+    # cycle that spent its budget on the adaptive or implicit lane appends nothing to the
+    # scored archive because that is what it was told to do, and calling that a stall is the
+    # false fault this whole reading exists to avoid. Today's schedule makes every cycle an
+    # explicit one, so today's sentence is the one it has always been.
+    if ln.get("armed"):
+        L.append(_row("stall", "{} explicit cycles with no new elite".format(
+            rs.get("stall_counter", "unknown"))))
+        L.append(_row("", "a lane cycle appends nothing to the scored archive by"))
+        L.append(_row("", "design and is not counted here"))
+    else:
+        L.append(_row("stall", "{} cycles with no new elite".format(rs.get("stall_counter", "unknown"))))
 
     # Rate of work, not signs of life. A run can be fast, green and heartbeating while
     # accepting nothing and never hearing from the model; nothing above this point says so.
@@ -974,19 +1187,26 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
         L.extend(_row("", w) for w in parts[1:])
 
     acc = doc.get("accept") or {}
+    # "per cycle" only stays true while every cycle is an explicit search. Once the stream
+    # says which lane a cycle was, accept_rate counts one lane and the row says which.
+    unit = "{} cycle".format(acc.get("lane", "explicit")) if acc.get("lane_aware") else "cycle"
     if not acc.get("cycles"):
         L.append(_row("accepted", "unknown (no cycle_done in the tail)"))
     elif acc.get("enough"):
-        _wrapped("accepted", "median {} per cycle over the newest {} cycles, against {} over "
+        _wrapped("accepted", "median {} per {} over the newest {} cycles, against {} over "
                              "the oldest {} in this tail".format(
-                                 _num(acc.get("recent_median")), acc.get("recent_n"),
+                                 _num(acc.get("recent_median")), unit, acc.get("recent_n"),
                                  _num(acc.get("older_median")), acc.get("older_n")))
     else:
-        _wrapped("accepted", "median {} per cycle over the newest {} of {} cycles in this "
+        _wrapped("accepted", "median {} per {} over the newest {} of {} cycles in this "
                              "tail; {} per window needed before two windows can be "
                              "compared".format(
-                                 _num(acc.get("recent_median")), acc.get("recent_n"),
+                                 _num(acc.get("recent_median")), unit, acc.get("recent_n"),
                                  acc.get("cycles"), ACCEPT_MIN_SAMPLES))
+    if acc.get("other_lane_cycles"):
+        _wrapped("", "{} cycles in this tail were on another lane and are not counted "
+                     "above; a lane cycle appends nothing by design".format(
+                         acc.get("other_lane_cycles")))
     if acc.get("collapsed"):
         _wrapped("COLLAPSE", "acceptance is under half what it was earlier in this same "
                              "tail. The two medians it is comparing are on the line above.")
@@ -1114,6 +1334,10 @@ def render_text(doc: dict, refresh_s: int | None = None) -> str:
     L.append("                    when not), so it stays off the path of a timed write.")
     L.append("  other containers  docker ps then one docker inspect, same timeout")
     L.append("  cycle, stall      rk-work/RUNSTATE.json")
+    L.append("  lane schedule     rk-work/schedule/shares.json, else the container's")
+    L.append("                    own RK_LANE_SCHEDULE as docker inspect reported it")
+    L.append("  measured split    rk-work/schedule/shares.json only. The schedule is")
+    L.append("                    never printed in its place.")
     L.append("  heartbeat         rk-work/HEARTBEAT")
     L.append("  cadence           the tail of rk-work/events.jsonl")
     L.append("  accepted, gate    the tail of rk-work/events.jsonl")

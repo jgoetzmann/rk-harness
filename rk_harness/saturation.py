@@ -29,6 +29,13 @@ from rk_harness.paths import work_dir
 WINDOW_HOURS_DEFAULT = 48.0
 CONSECUTIVE_DEFAULT = 6
 
+# A tail long enough to span the window even when the explicit lane gets a third of
+# the cycles: 48 hours of explicit search is about 144 hours of wall clock there, and
+# at the 176 s cadence measured 2026-09-09 that is roughly 2,950 cycles. 6,000 leaves
+# room for a slower cadence and still reads one bounded tail of one small file.
+LANE_WINDOW_CYCLES = 6000
+SEARCH_LANE = "explicit"
+
 STATE_FILE = "saturation_state.json"
 EPOCH_FILE = "EPOCH_STATUS.json"
 
@@ -135,6 +142,69 @@ def _save_state(d: dict) -> None:
         json.dump(d, fh, indent=1)
 
 
+def search_hours_since(ts_str, now: datetime.datetime | None = None):
+    """Hours the EXPLICIT lane actually ran since a timestamp. (hours, basis, complete).
+
+    WHY THIS IS NOT WALL CLOCK. The 48-hour rule was written when every cycle was an
+    explicit search, so wall clock and search time were the same quantity and nobody
+    had to say which one the window meant. Under a lane rotation they part company: at
+    a third of the cycles the explicit lane accumulates 48 hours of searching in about
+    144 hours of wall clock, so a window still counted in wall clock would call the
+    epoch saturated on a third of the evidence the rule was designed to require, and
+    it would do it while the machine was working exactly as instructed. The fix is to
+    measure the window in the lane the rule is about.
+
+    Returns (None, reason, True) when there is no lane log, which is the state the run
+    ships in and the state it is in today: with no rotation every cycle IS an explicit
+    search, so wall clock is the right measure and the caller falls back to it. The
+    reason says so out loud rather than leaving a reader to infer which measure ran.
+
+    `complete` is False when the bounded tail does not reach back as far as ts_str. The
+    sum is then a floor, which is the safe direction: an undercount can only delay a
+    freeze, never trigger one early.
+    """
+    now = now or _now()
+    start = _parse_ts(ts_str)
+    if start is None:
+        return None, "no progress event to measure from", True
+    try:
+        from rk_harness import lanes
+    except Exception:  # noqa: BLE001 - saturation must run even if the module is absent
+        return None, "wall clock; the lane module is not importable", True
+    try:
+        log = lanes.load_cycles(window_cycles=LANE_WINDOW_CYCLES)
+    except Exception:  # noqa: BLE001
+        return None, "wall clock; the lane log could not be read", True
+    if not log.exists:
+        return None, ("wall clock; no lane log, so every cycle is an explicit search"), True
+    seconds = 0.0
+    counted = 0
+    oldest = None
+    for row in log.rows:
+        ts = _parse_ts(row.get("ts"))
+        if ts is None:
+            continue
+        oldest = ts if oldest is None else min(oldest, ts)
+        if ts <= start:
+            continue
+        if str(row.get("lane", "")) != SEARCH_LANE:
+            continue
+        val = row.get("seconds")
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or val != val:
+            continue
+        seconds += float(val)
+        counted += 1
+    if oldest is None:
+        return None, "wall clock; the lane log records no usable cycle", True
+    complete = oldest <= start
+    basis = (f"explicit-lane seconds from {lanes.cycles_path().name} over {counted} "
+             f"cycles since the last progress event")
+    if not complete:
+        basis += ("; the tail does not reach back that far, so this is a floor and the "
+                  "window can only be reached later than it should be, never sooner")
+    return seconds / 3600.0, basis, complete
+
+
 def assess(now: datetime.datetime | None = None) -> dict:
     """Read-only assessment: CONTINUE / SATURATING / FROZEN, no state change."""
     now = now or _now()
@@ -147,16 +217,21 @@ def assess(now: datetime.datetime | None = None) -> dict:
     falsified = (work_dir() / "falsification.json").exists()
     last = _parse_ts(prog.get("last_progress_ts"))
     hours = None if last is None else (now - last).total_seconds() / 3600.0
-    saturating = falsified and hours is not None and hours > window
+    searched, basis, complete = search_hours_since(prog.get("last_progress_ts"), now)
+    measured = hours if searched is None else searched
+    saturating = falsified and measured is not None and measured > window
     out = dict(prog)
     out.update({
         "window_hours": window,
         "hours_since_progress": None if hours is None else round(hours, 2),
+        "search_hours_since_progress": None if searched is None else round(searched, 2),
+        "window_basis": basis,
+        "window_basis_complete": complete,
         "falsification_present": falsified,
         "verdict": "SATURATING" if saturating else "CONTINUE",
         "action": "none",
     })
-    if not saturating and hours is None:
+    if not saturating and measured is None:
         out["reason"] = "no progress events yet; too early to judge"
     return out
 

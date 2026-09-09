@@ -43,6 +43,7 @@ from rk_harness.paths import HARNESS_DIR, work_dir
 BANNED = ("novel", "first", "beats", "outperforms", "breakthrough", "proves",
           "state-of-the-art", "best-ever")
 EM_DASH = chr(0x2014)
+Q = chr(34)
 
 # One problem, two targets, a three-rung ladder, a small attempt cap and a short
 # step ladder: a whole record in a fraction of a second.
@@ -579,15 +580,67 @@ def _no_constant(name):
 
 # --------------------------------------------------------------------------- inertness
 
-def test_nothing_in_the_package_calls_lanesearch():
-    """This batch ships inert: the module exists, nothing runs it. When batch 9
-    wires the lanes into the cycle loop this test is the one to change, deliberately.
+# The read-only surface: functions that answer a question about a lane archive and
+# cannot bring one into being. A viewer may call these. Everything else in the module
+# either enumerates a candidate, measures one, or writes.
+_LANE_READERS = frozenset({"lane_dir", "ledger_path", "elites_path", "load_ledger",
+                           "load_records", "load_elites", "status", "code_hash"})
+
+# Viewers, by file name. watch.py renders one row per lane archive that exists, which
+# is the whole point of making the viewers lane-aware before the rotation is armed: a
+# cycle that spent its budget on a lane must not read as a stalled explicit cycle.
+_LANE_VIEWERS = frozenset({"watch.py"})
+
+
+def test_nothing_in_the_package_runs_the_lane_search():
+    """The lanes ship inert: the module exists, no cycle runs it. When batch 9 wires
+    them into the cycle loop this test is the one to change, deliberately.
+
+    Viewers are exempt by name and by function. A row that reports an archive cannot
+    create one, so a read-only caller does not arm anything, and holding the viewers
+    out until the loop is wired would mean shipping one cycle where a lane firing
+    looks like a fault. What the gate actually protects is that no module decides to
+    RUN a lane: the enumerate, measure and write entry points have no caller here.
     """
     pkg = HARNESS_DIR / "rk_harness"
-    callers = sorted(p.name for p in pkg.rglob("*.py")
-                     if p.name != "lanesearch.py"
-                     and "lanesearch" in p.read_text(encoding="utf-8"))
-    assert callers == [], f"lanesearch is referenced by {callers}"
+    used: dict[str, set[str]] = {}
+    for path in sorted(pkg.rglob("*.py")):
+        if path.name == "lanesearch.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "lanesearch" not in text:
+            continue
+        used[path.name] = set(re.findall(r"lanesearch\.(\w+)", text))
+
+    unexpected = sorted(set(used) - _LANE_VIEWERS)
+    assert unexpected == [], f"lanesearch is referenced by {unexpected}"
+
+    for name in sorted(used):
+        beyond = sorted(used[name] - _LANE_READERS)
+        assert beyond == [], f"{name} calls {beyond}, which is past the read-only surface"
+
+
+def test_the_read_only_surface_names_functions_that_exist_and_never_write():
+    """Otherwise the exemption above widens by typo: a name that is not a real function
+    admits nothing, and a name that has become a writer admits a writer.
+    """
+    for name in sorted(_LANE_READERS):
+        fn = getattr(LS, name, None)
+        assert callable(fn), f"{name} is not a function in lanesearch"
+    src = (HARNESS_DIR / "rk_harness" / "lanesearch.py").read_text(encoding="utf-8")
+    bodies = src.split(chr(10) + "def ")
+    for body in bodies:
+        head = body.split("(", 1)[0].strip()
+        if head not in _LANE_READERS:
+            continue
+        # Reading a file is what several of these do for a living; opening one for
+        # WRITING is the line. Hence the modes rather than the bare call.
+        writers = ("_append_jsonl(", "append_record(", "write_elites(",
+                   "update_elites(", ".write_text(", ".write_bytes(", ".mkdir(",
+                   ", " + Q + "w", ", " + Q + "a", ", " + Q + "x",
+                   "mode=" + Q + "w", "mode=" + Q + "a")
+        for writer in writers:
+            assert writer not in body, f"{head} calls {writer}, so it is not a reader"
 
 
 def test_lanesearch_is_not_in_the_sidetrack_digest():

@@ -452,7 +452,63 @@ def _sidetrack_budget() -> float:
         return _SIDETRACK_BUDGET_DEFAULT
 
 
-def health_panel(events: list[dict], now, scope: str) -> Panel:
+def lane_panel_rows(dk: dict | None, cycle_id=None) -> list[tuple[str, str]]:
+    """The lane rows: what the schedule asks for, what was measured, what each lane has to do.
+
+    The first two come from rk_harness.status, which is also what writes stats.txt, so the
+    live view and the file cannot disagree about the split. The plan status is read per lane
+    rather than for the pair, because the pair sharing one slot and one budget is exactly the
+    arrangement the rotation replaces.
+
+    Tolerates rk-work/schedule/ not existing, the two lane archives not existing, and Docker
+    not answering. Under the schedule the run ships with, the only rows this adds say that
+    every cycle is an explicit search.
+    """
+    rows: list[tuple[str, str]] = []
+    dk = dk or {}
+    try:
+        from rk_harness import status as st_mod
+        env = dk.get("env") if isinstance(dk.get("env"), dict) else None
+        rows += st_mod.lane_rows(st_mod.read_lanes(docker_env=env, current_cycle=cycle_id))
+    except Exception:  # noqa: BLE001 - the live view must never fail on an optional row
+        rows.append(("lane", "unavailable"))
+    return rows
+
+
+def _lanesearch_rows() -> list[tuple[str, str]]:
+    """One row per open-ended lane archive that exists. Silent until a lane has one.
+
+    Cached for 30 s: each call reads a lane's ledger, and the view refreshes every few
+    seconds for months at a time.
+    """
+    rows: list[tuple[str, str]] = []
+    try:
+        from rk_harness import lanesearch
+    except Exception:  # noqa: BLE001
+        return rows
+    for lane in ("adaptive", "implicit"):
+        try:
+            if not lanesearch.lane_dir(lane).exists():
+                continue
+            key = ("lanesearch", lane)
+            hit = _cache.get(key)
+            if hit and time.monotonic() - hit[0] < 30:
+                ls = hit[1]
+            else:
+                ls = lanesearch.status(lane)
+                _cache[key] = (time.monotonic(), ls)
+            rows.append((f"{lane} archive",
+                         f"{ls['measured_under_current_code']} candidates measured under code "
+                         f"{str(ls['lanesearch_code_hash'])[:8]}, "
+                         f"{ls['measured_under_other_code']} under earlier code; "
+                         f"next index {ls['next_index']}"))
+        except Exception:  # noqa: BLE001
+            continue
+    return rows
+
+
+def health_panel(events: list[dict], now, scope: str, dk: dict | None = None,
+                 cycle_id=None) -> Panel:
     rows: list[tuple[str, str]] = []
     try:
         vh = verifier_hash.compute_verifier_hash()
@@ -460,6 +516,7 @@ def health_panel(events: list[dict], now, scope: str) -> Panel:
         rows.append(("verifier hash", f"{vh[:16]} " + ("matches pin" if pin == vh else ("NO PIN" if pin is None else "PIN MISMATCH"))))
     except Exception as e:  # noqa: BLE001
         rows.append(("verifier hash", f"unavailable ({e!r})"))
+    rows += lane_panel_rows(dk, cycle_id)
     try:
         from rk_harness import sidetrack
         st = sidetrack.status()
@@ -476,12 +533,22 @@ def health_panel(events: list[dict], now, scope: str) -> Panel:
                 refill = f"; {left} remaining, not yet estimable"
             else:
                 refill = "; plan exhausted, extend the catalogue"
-            rows.append(("side tracks", f"{st['done_total']} of {st['planned_total']} points measured "
-                                        f"(code {st['code_hash']}){refill}{last}"))
+            # Per lane rather than for the pair: the two side tracks share one slot and one
+            # budget today, and "103 of 103" hides which of them the catalogue was for.
+            per: dict[str, list[int]] = {}
+            for job in st.get("jobs") or []:
+                got = per.setdefault(str(job.get("track")), [0, 0])
+                got[0] += int(job.get("done") or 0)
+                got[1] += int(job.get("planned") or 0)
+            by_lane = ", ".join(f"{track} {per[track][0]}/{per[track][1]}"
+                                for track in sorted(per)) or f"{st['done_total']}/{st['planned_total']}"
+            rows.append(("side track plan", f"{by_lane} points measured "
+                                            f"(code {st['code_hash']}){refill}{last}"))
         elif os.environ.get("RK_SIDETRACK_EVERY", "0") not in ("0", ""):
-            rows.append(("side tracks", f"enabled, nothing measured yet ({st['planned_total']} points planned)"))
+            rows.append(("side track plan", f"enabled, nothing measured yet ({st['planned_total']} points planned)"))
     except Exception:  # noqa: BLE001 - the live view must never fail on an optional panel row
         pass
+    rows += _lanesearch_rows()
     abandoned = [e for e in events if e.get("kind") == "cycle_abandoned"]
     rows.append(("abandoned cycles", f"{len(abandoned)} {scope}" + (f"; last: {str(abandoned[-1].get('error'))[:120]}" if abandoned else "")))
     stops = [e for e in events if str(e.get("kind", "")).startswith("stopped_by") or e.get("kind") == "spend_cap_exceeded"]
@@ -609,7 +676,7 @@ def build_layout(cells: bool = False) -> Layout:
     root["llm"].update(llm_panel(events, dk, scope))
     root["progress"].update(progress_panel(st, arch, events, records, now, scope))
     root["working"].update(working_panel(events, hyps))
-    root["health"].update(health_panel(events, now, scope))
+    root["health"].update(health_panel(events, now, scope, dk, st.cycle_id))
     root["machine"].update(machine_panel(dk))
     root["right"].update(results_panel(arch, records))
     root["bottom"].update(events_panel(events, n_tail))

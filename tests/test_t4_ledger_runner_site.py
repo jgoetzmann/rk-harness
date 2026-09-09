@@ -41,6 +41,7 @@ from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
     render_hypotheses, render_costmodel, render_falsification, render_glossary,
     render_literature, render_interpretation, render_validation, render_benchmark,
+    render_explicit, render_implicit, render_adaptive,
     check_banned, epoch_status_data,
 )
 from rk_harness.tableau import make_tableau, content_hash
@@ -1017,12 +1018,16 @@ def test_E2_two_fresh_runs_produce_byte_identical_archives(monkeypatch, tmp_path
 # ======================================================================================
 
 def test_E3_index_parses_and_shows_every_elite_tier_next_to_its_hash(monkeypatch, tmp_path):
+    """The elite table moved from index.html to explicit.html; both must still parse."""
     _work, arch = _site_archive(monkeypatch, tmp_path)
     out = tmp_path / "docs"
     build(arch, out)
     index = out / "index.html"
     assert index.is_file()
-    html = index.read_text(encoding="utf-8")
+    idx_html = index.read_text(encoding="utf-8")
+    assert idx_html.lower().lstrip().startswith("<!doctype html>")
+    assert 'href="explicit.html"' in idx_html     # the hub links on to the archive
+    html = (out / "explicit.html").read_text(encoding="utf-8")
     col = _Collector()
     col.feed(html)
     col.close()
@@ -1273,21 +1278,23 @@ def test_B61_build_writes_glossary_and_index_deep_links_it(monkeypatch, tmp_path
 
 
 def _nav_hrefs(html: str) -> list[str]:
-    """Every nav link across both tiers, in reading order.
+    """Every nav link across all three tiers, in reading order.
 
-    The nav is two rows: results-bearing pages first, then the record and the reference.
-    Tests assert the whole ordered list so a page can neither vanish nor change tier
-    unnoticed."""
+    The nav is three rows: the overview and the three method classes, then the evidence
+    that spans classes, then the record and the reference. Tests assert the whole
+    ordered list so a page can neither vanish nor change tier unnoticed."""
     rows = re.findall(r'<nav class="tabs[^"]*">(.*?)</nav>', html, re.S)
     assert rows, "no nav found"
     return [h for row in rows for h in re.findall(r'href="([^"]+)"', row)]
 
 
 def test_B61_nav_lists_every_page_in_order():
-    # Without a validation results file, the validation tab is absent everywhere.
+    # Without a validation results file, the validation tab is absent everywhere. The
+    # three class entries are unconditional and lead the nav in a fixed order.
     html = render_costmodel()
     assert _nav_hrefs(html) == [
-        "index.html", "hypotheses.html", "falsification.html",
+        "index.html", "explicit.html", "implicit.html", "adaptive.html",
+        "hypotheses.html", "falsification.html",
         "methodology.html", "costmodel.html", "literature.html",
         "interpretation.html", "glossary.html"]
 
@@ -1296,32 +1303,60 @@ def test_B61_folds_kept_only_where_depth_remains(monkeypatch, tmp_path):
     """Less-is-more: captions + glossary links replaced most "How to read this" folds.
 
     A fold survives only where it carries multi-paragraph interpretive depth: the
-    archive-grid structure (index), the score-metric definitions (cell pages), the
-    hypothesis grammar, and the falsification protocol.
+    archive-grid structure (the explicit class page), the score-metric definitions (cell
+    pages), the hypothesis grammar, and the falsification protocol.
     """
     _work, arch = _site_archive(monkeypatch, tmp_path)
     append_hypothesis(_hyp())
     arch = replay()
     out = tmp_path / "docs"
     build(arch, out)
-    keeps = {"index.html": 1, "cell-p4-s4-b2.html": 1, "hypotheses.html": 1,
+    keeps = {"explicit.html": 1, "cell-p4-s4-b2.html": 1, "hypotheses.html": 1,
              "falsification.html": 1}
     for name, n in keeps.items():
         html = (out / name).read_text(encoding="utf-8")
         assert html.count('<details class="explain">') == n, name
         assert "How to read this" in html, name
-    for name in ("costmodel.html", "literature.html", "interpretation.html",
-                 "glossary.html"):
+    for name in ("index.html", "costmodel.html", "literature.html",
+                 "interpretation.html", "glossary.html"):
         html = (out / name).read_text(encoding="utf-8")
         assert '<details class="explain">' not in html, name
     # the load-bearing sentences moved into always-visible captions and notes
-    index = (out / "index.html").read_text(encoding="utf-8")
-    assert "down-left is better" in index          # scatter fold merged into its caption
-    assert "overfitting to the visible search set" in index   # table fold became a note
+    expl = (out / "explicit.html").read_text(encoding="utf-8")
+    assert "down-left is better" in expl           # scatter fold merged into its caption
+    assert "overfitting to the visible search set" in expl    # table fold became a note
     cm = (out / "costmodel.html").read_text(encoding="utf-8")
     assert "swaps between the multiplier models" in cm        # anchor fold merged
     cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
     assert "held-out set" in cell                  # per-problem fold merged into caption
+
+
+def test_rule10_no_findings_page_states_an_attention_split(monkeypatch, tmp_path):
+    """Rule 10: the internal attention split is internal.
+
+    It lives in rk-harness/docs/ROADMAP.md and must not reach a published page, in
+    words or as a percentage triple. This turns the convention into a gate that runs on
+    every build rather than a thing someone has to remember."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _stiff_validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    _write_sidetrack(work, _sidetrack_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    triple = re.compile(r"\b\d{1,3}\s*/\s*\d{1,3}\s*/\s*\d{1,3}\b")
+    # URLs are not prose. A journal citation whose href ends /3/2/127 has the same
+    # shape as a percentage triple, and letting one block the whole site build would
+    # be this gate failing at its own job. Attribute values come out before the match;
+    # what is left is what a reader actually sees.
+    attrs = re.compile(r'\s(?:href|src|content)="[^"]*"')
+    seen = 0
+    for page in sorted(out.rglob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        seen += 1
+        m = triple.search(attrs.sub(" ", html))
+        assert m is None, f"{page.name} carries the percentage-triple shape {m.group(0)!r}"
+        assert "attention split" not in html.lower(), page.name
+    assert seen >= 14
 
 
 def test_B61_every_chart_opens_with_a_visible_caption(monkeypatch, tmp_path):
@@ -1406,7 +1441,7 @@ def test_B61_heatmap_rows_extend_to_occupied_stage_counts_outside_the_default_ra
     arch = ArchiveState(n_records=1, last_cycle_id=1,
                         grids={1: {(1, 0): rec}, 2: {}, 3: {}, 4: {}},
                         open_hypotheses=(), refuted_hypotheses=())
-    html = render_index(arch)
+    html = render_explicit(arch)
     i = html.index('aria-label="Order 1 elite grid heatmap"')
     svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i)]
     assert ">s=1<" in svg                          # the occupied row is rendered
@@ -1682,7 +1717,8 @@ def test_B64_validation_nav_entry_present_only_with_results(monkeypatch, tmp_pat
     for name in ("index.html", "costmodel.html", "methodology.html", "validation.html"):
         html = (out2 / name).read_text(encoding="utf-8")
         assert _nav_hrefs(html) == [
-            "index.html", "validation.html", "hypotheses.html", "falsification.html",
+            "index.html", "explicit.html", "implicit.html", "adaptive.html",
+            "validation.html", "hypotheses.html", "falsification.html",
             "methodology.html", "costmodel.html", "literature.html",
             "interpretation.html", "glossary.html"], name
     # the active tab lands on the validation page itself
@@ -2033,7 +2069,8 @@ def test_B67_benchmark_nav_entry_present_only_with_results(monkeypatch, tmp_path
     for name in ("index.html", "validation.html", "benchmark.html"):
         html = (out2 / name).read_text(encoding="utf-8")
         assert _nav_hrefs(html) == [
-            "index.html", "validation.html", "benchmark.html", "hypotheses.html",
+            "index.html", "explicit.html", "implicit.html", "adaptive.html",
+            "validation.html", "benchmark.html", "hypotheses.html",
             "falsification.html", "methodology.html", "costmodel.html",
             "literature.html", "interpretation.html", "glossary.html"], name
     val = (out2 / "benchmark.html").read_text(encoding="utf-8")
@@ -2093,11 +2130,12 @@ def test_B68_sidetrack_nav_entry_present_only_with_a_ledger(monkeypatch, tmp_pat
     for name in ("index.html", "costmodel.html", "sidetrack.html"):
         html = (out2 / name).read_text(encoding="utf-8")
         assert _nav_hrefs(html) == [
-            "index.html", "sidetrack.html", "hypotheses.html", "falsification.html",
-            "methodology.html", "costmodel.html", "literature.html",
+            "index.html", "explicit.html", "implicit.html", "adaptive.html",
+            "hypotheses.html", "falsification.html",
+            "methodology.html", "costmodel.html", "sidetrack.html", "literature.html",
             "interpretation.html", "glossary.html"], name
     page = (out2 / "sidetrack.html").read_text(encoding="utf-8")
-    assert '<a href="sidetrack.html" class="on">side tracks</a>' in page
+    assert '<a href="sidetrack.html" class="on">measurement ledger</a>' in page
 
 
 def test_B68_sidetrack_build_is_deterministic_and_flag_resets(monkeypatch, tmp_path):
@@ -2121,9 +2159,14 @@ def test_B68_sidetrack_page_reports_every_point_and_stays_static(monkeypatch, tm
         assert p["job"] in page and p["key"] in page
     # the counts come from the ledger, not from a hardcoded number
     assert ">2<" in page                      # points measured card
-    # both tracks are named, and the page stays script-free like every other page
+    # both classes are named, and the page stays script-free like every other page
     assert "adaptive" in page and "implicit" in page
     assert "<script" not in page
+    # each job's own reading is on its class page, filtered by track
+    imp = (out / "implicit.html").read_text(encoding="utf-8")
+    adp = (out / "adaptive.html").read_text(encoding="utf-8")
+    assert "sdirk.stiff_suite" in imp and "sdirk.stiff_suite" not in adp
+    assert "adaptive.suite_sweep" in adp and "adaptive.suite_sweep" not in imp
 
 
 def test_B69_a_failed_point_message_cannot_block_the_site_build(monkeypatch, tmp_path):

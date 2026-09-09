@@ -820,3 +820,212 @@ def test_S42_a_non_ascii_container_name_does_not_break_the_ascii_rule(tmp_path, 
     assert not [ln for ln in body.split("\r\n") if len(ln) > 90]
     assert "caf" in body and "db" in body                     # present, not silently dropped
     assert "99 restarts" in body and "FLAG" in body
+
+
+# ------------------------------- the lane schedule: a cycle is not always an explicit search
+#
+# Every counter this file prints - the stall count, the accepted median, the archive age -
+# was written when a cycle could only be one thing. Under a lane rotation two cycles in three
+# legitimately append nothing to the scored archive, and a viewer that does not know which
+# lane a cycle was on reports that as a stall, a collapse and a saturation. These tests pin
+# the reading BEFORE the rotation is armed, and pin that today's reading did not move.
+
+def _shares(work: Path, schedule: str, n: int, first_cycle: int = 100) -> Path:
+    """A real schedule-shares/1 document, built by the module that will write it."""
+    from rk_harness import lanes
+    rows = [lanes.cycle_row(first_cycle + i, lanes.lane_for(first_cycle + i, schedule),
+                            "2026-09-09T06:{:02d}:00Z".format(i % 60), 176.0, 100.0,
+                            schedule=schedule)
+            for i in range(n)]
+    doc = lanes.build_shares(rows, schedule=schedule, window_cycles=200)
+    lanes.validate_shares(doc)
+    return lanes.write_shares(doc, work / "schedule" / "shares.json")
+
+
+def _lane_text(rows) -> str:
+    return " ".join(" ".join(str(v) for v in row) for row in rows)
+
+
+def test_S43_with_no_schedule_directory_the_split_is_unknown_and_stays_unknown(tmp_path):
+    """rk-work/schedule/ does not exist until the rotation ships. Every lane reader has to
+    cope with that, and none of them may fill the gap in with the schedule's own intention."""
+    w = _work(tmp_path)
+    assert not (w / "schedule").exists()
+    ln = status.read_lanes(w, docker_env={"RK_LLM": "codex"}, current_cycle=2726)
+
+    assert ln["exists"] is False and ln["error"] == "shares.json is absent"
+    assert ln["measured"] is None, "no measurement exists, so none may be reported"
+    assert ln["schedule"] == "E" and ln["armed"] is False
+    assert ln["scheduled_share"] == {"explicit": 1.0, "adaptive": 0.0, "implicit": 0.0}
+    # The default schedule asks for no rotation, so nothing missing is a fault.
+    assert ln["problem"] is None
+
+    text = _lane_text(status.lane_rows(ln))
+    assert "every cycle explicit" in text
+    assert "unknown" in text
+    assert "33" not in text, "a scheduled percentage must never stand in for a measured one"
+
+    # Nothing is cached between passes: a second read of the same absent file is the same
+    # answer, and a read after the file appears is the new one.
+    assert status.read_lanes(w, docker_env={}, current_cycle=2726)["measured"] is None
+    _shares(w, "E", 4, first_cycle=2723)
+    assert status.read_lanes(w, docker_env={}, current_cycle=2726)["measured"] is not None
+
+
+def test_S44_an_armed_schedule_nobody_is_recording_is_a_problem_not_a_number(tmp_path):
+    """The survey behind the rotation found a run whose intended 70/15/15 had in fact been
+    0.0005 percent, with nothing in a position to notice. A schedule asking for a rotation
+    that no document records is exactly that state, and it lands in PROBLEMS."""
+    w = _work(tmp_path)
+    ln = status.read_lanes(w, docker_env={"RK_LANE_SCHEDULE": "EAI"}, current_cycle=2726)
+    assert ln["armed"] is True
+    assert ln["measured"] is None
+    assert ln["problem"] == "lane split: shares.json is absent"
+
+    doc = _collect(w)
+    doc["lanes"] = ln
+    body = status.render_text(doc)
+    flat = " ".join(body.split())
+    assert "schedule 'EAI'" in flat
+    assert "asks for explicit 33%, adaptive 33%, implicit 33%" in flat
+    assert "unknown (shares.json is absent)" in flat
+    # the asked-for split appears once, on the line that says it is only asked for
+    assert flat.count("explicit 33%") == 1
+
+
+def test_S45_the_schedule_is_claimed_only_when_docker_answered(tmp_path):
+    """Rule 2 of this file, applied to one more field. An empty env dict is Docker answering
+    that the variable is unset, which is a definite answer; None is nobody being able to say."""
+    w = _work(tmp_path)
+    silent = status.read_lanes(w, docker_env=None, current_cycle=1)
+    assert silent["schedule"] is None and silent["armed"] is None
+    assert "unknown" in _lane_text(status.lane_rows(silent))
+    assert silent["problem"] is None, "the silent daemon is already reported once, by docker"
+
+    answered = status.read_lanes(w, docker_env={}, current_cycle=1)
+    assert answered["schedule"] == "E" and answered["schedule_source"] == "env-unset"
+
+    # ...and the run's own document outranks the container environment, because it is what
+    # the runner actually resolved.
+    _shares(w, "EAI", 6, first_cycle=1)
+    both = status.read_lanes(w, docker_env={"RK_LANE_SCHEDULE": "E"}, current_cycle=6)
+    assert both["schedule"] == "EAI" and both["schedule_source"] == "shares"
+
+
+def test_S46_a_shares_document_behind_the_run_prints_unknown_not_its_own_numbers(tmp_path):
+    """Printing a stale document's numbers is carrying a value forward under another name."""
+    w = _work(tmp_path)
+    _shares(w, "EAI", 9, first_cycle=100)
+    fresh = status.read_lanes(w, docker_env={},
+                              current_cycle=108 + status.LANE_SHARES_STALE_CYCLES)
+    assert fresh["stale"] is False and fresh["measured"] is not None
+
+    stale = status.read_lanes(w, docker_env={},
+                              current_cycle=109 + status.LANE_SHARES_STALE_CYCLES)
+    assert stale["stale"] is True
+    assert stale["measured"] is None
+    assert "behind the run" in str(stale["error"])
+    assert stale["problem"] and "behind the run" in stale["problem"]
+    assert "unknown" in _lane_text(status.lane_rows(stale))
+
+
+def test_S47_a_measured_split_is_printed_with_the_cycle_it_was_measured_at(tmp_path):
+    w = _work(tmp_path)
+    _shares(w, "EAI", 30, first_cycle=100)
+    ln = status.read_lanes(w, docker_env={}, current_cycle=129)
+    assert ln["cycles"] == 30
+    assert sorted(ln["measured"]) == ["adaptive", "explicit", "implicit"]
+    assert abs(sum(v["share"] for v in ln["measured"].values()) - 1.0) < 1e-9
+
+    doc = _collect(w)
+    doc["lanes"] = ln
+    flat = " ".join(status.render_text(doc).split())
+    assert "explicit 33%, adaptive 33%, implicit 33% over 30 cycles" in flat
+    assert "from shares.json, at cycle 129" in flat
+
+
+def test_S48_accepted_counts_explicit_cycles_once_the_stream_says_which_lane(tmp_path):
+    """Two cycles in three appending nothing is the schedule working. Folding those zeros
+    into the median puts it on the floor and reports a collapse that never happened."""
+    plain = _cycles(30, 40)
+    assert status.accept_rate(plain)["lane_aware"] is False
+    assert status.accept_rate(plain)["cycles"] == 30, "today's tail counts exactly as before"
+
+    mixed = []
+    for i, e in enumerate(_cycles(30, 40)):
+        lane = ("explicit", "adaptive", "implicit")[i % 3]
+        mixed.append(dict(e, lane=lane, accepted=(40 if lane == "explicit" else 0)))
+    acc = status.accept_rate(mixed)
+    assert acc["lane_aware"] is True
+    assert acc["cycles"] == 10 and acc["other_lane_cycles"] == 20
+    assert acc["recent_median"] == 40 and acc["collapsed"] is False
+
+    # the same tail counted blind: a floor of zeros and a collapse that is the schedule
+    blind = [{k: v for k, v in e.items() if k != "lane"} for e in mixed]
+    assert status.accept_rate(blind)["recent_median"] == 0
+
+    # a row written before the rotation existed carries no lane and is still counted
+    older = [{k: v for k, v in e.items() if k != "lane"} for e in mixed[:9]] + mixed[9:]
+    assert status.accept_rate(older)["cycles"] == 10 + 6
+
+    doc = _collect(_work(tmp_path))
+    doc["accept"] = acc
+    flat = " ".join(status.render_text(doc).split())
+    assert "per explicit cycle" in flat
+    assert "20 cycles in this tail were on another lane and are not counted above" in flat
+
+
+def test_S49_the_stall_row_names_explicit_cycles_only_under_a_rotation(tmp_path):
+    """A lane cycle appends nothing because that is what it was told to do. Counting it as a
+    cycle that failed to produce is the false stall this reading exists to prevent - and the
+    wording under today's all-explicit schedule is the wording it has always had."""
+    w = _work(tmp_path, **{"RUNSTATE.json": {"cycle_id": 2726, "phase": 3,
+                                             "stall_counter": 106, "current_cell": [6, 3]}})
+    doc = _collect(w)
+
+    doc["lanes"] = status.read_lanes(w, docker_env={}, current_cycle=2726)
+    today = " ".join(status.render_text(doc).split())
+    assert "106 cycles with no new elite" in today
+    assert "explicit cycles with no new elite" not in today
+
+    doc["lanes"] = status.read_lanes(w, docker_env={"RK_LANE_SCHEDULE": "EAI"},
+                                     current_cycle=2726)
+    armed = " ".join(status.render_text(doc).split())
+    assert "106 explicit cycles with no new elite" in armed
+    assert "a lane cycle appends nothing to the scored archive by design" in armed
+
+
+def test_S50_every_lane_shape_stays_ascii_and_inside_the_column_budget(tmp_path):
+    from rk_harness import lanes
+    w = _work(tmp_path, **{"HEARTBEAT": _iso(1)})
+    _shares(w, lanes.LEGACY_70_15_15, 40, first_cycle=100)
+    envs = [None, {}, {"RK_LANE_SCHEDULE": "EAI"}, {"RK_LANE_SCHEDULE": "EAIX"},
+            {"RK_LANE_SCHEDULE": lanes.LEGACY_70_15_15},
+            {"RK_LANE_SCHEDULE": "E" * lanes.MAX_SCHEDULE_LEN}]
+    doc = _collect(w)
+    for env in envs:
+        for cycle in (139, 139 + status.LANE_SHARES_STALE_CYCLES + 1):
+            doc["lanes"] = status.read_lanes(w, docker_env=env, current_cycle=cycle)
+            for refresh in (20, None):
+                body = status.render_text(doc, refresh_s=refresh)
+                body.encode("ascii")
+                overlong = [ln for ln in body.split("\r\n") if len(ln) > 90]
+                assert not overlong, (env, cycle, overlong[:2])
+
+
+def test_S51_a_schedule_that_was_set_and_is_not_in_force_is_said_out_loud(tmp_path, monkeypatch):
+    """The runner resolves an unusable schedule to the default rather than failing a cycle,
+    which is right and also silent. Silent and unnoticed are different things."""
+    w = _work(tmp_path, **{"HEARTBEAT": _iso(1)})
+    monkeypatch.setattr(status, "probe_docker", lambda name="rk": {
+        "ok": True, "state": "RUNNING", "status": "running",
+        "env": {"RK_LANE_SCHEDULE": "EAIX"}})
+    monkeypatch.setattr(status, "probe_containers",
+                        lambda *a, **k: {"ok": False, "skipped": True})
+    doc = status.collect(work=w, findings=w / "nowhere", with_host=False, with_gpu=False)
+    assert doc["lanes"]["schedule"] == "E" and doc["lanes"]["armed"] is False
+    note = [p for p in doc["problems"] if p.startswith("lane schedule:")]
+    assert note and "is ignored" in note[0]
+    flat = " ".join(status.render_text(doc).split())
+    assert "container value rejected" in flat
+    assert "every cycle explicit" in flat

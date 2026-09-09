@@ -172,6 +172,25 @@ nav.tabs.sub2 a{font-size:12.5px;padding:4px 12px;border-radius:7px;color:var(--
 nav.tabs.sub2 a:hover{color:var(--text-1)}
 nav.tabs.sub2 a.on{background:var(--surface-0);border:1px solid var(--line);
   color:var(--text-1);font-weight:600;box-shadow:none}
+nav.tabs.sub3{margin-top:0;padding-bottom:4px}
+nav.tabs.sub3 a{font-size:12px;padding:3px 12px;border-radius:7px;color:var(--text-3)}
+nav.tabs.sub3 a:hover{color:var(--text-1)}
+nav.tabs.sub3 a.on{background:var(--surface-0);border:1px solid var(--line);
+  color:var(--text-1);font-weight:600;box-shadow:none}
+
+/* the three method classes: one accent each, slots 1-3 of the validated palette */
+.card.klass{flex:1 1 280px;min-width:250px;max-width:380px;
+  border-left-width:3px;border-left-style:solid}
+.card.k-explicit{border-left-color:var(--s1)}
+.card.k-implicit{border-left-color:var(--s2)}
+.card.k-adaptive{border-left-color:var(--s3)}
+.card.klass .d{margin-top:0;margin-bottom:8px}
+.card.klass .n{font-size:12.5px;color:var(--text-2);margin:0 0 8px;max-width:none}
+.card.klass .go{font-size:13px;margin:auto 0 0;max-width:none}
+/* A class with nothing measured yet states that in words. Set smaller and in
+   the secondary colour so it does not read as a headline figure sitting beside
+   one, which is the comparison the hub row invites. */
+.card.unmeasured .v{font-size:17px;font-weight:550;color:var(--text-2);letter-spacing:0}
 
 /* one-line ledger rows: the summary carries the whole record, the body carries prose */
 .ledger{min-width:820px}
@@ -274,42 +293,97 @@ def _explain(*paras: str) -> str:
             f"<div>{body}</div></details>")
 
 
-# Two tiers: the pages that carry results first, the record and the reference behind
-# them second. A flat row of ten gave a reader no order to read them in.
+def _cards(rows) -> str:
+    """A row of stat cards from (key, value, description) triples.
+
+    One markup definition for every card row on the site. Values and descriptions are
+    plain text and are escaped here, so no caller can put markup in a card by accident.
+    An optional fourth element adds CSS classes to that card.
+    """
+    out = []
+    for row in rows:
+        key, value, desc = row[0], row[1], row[2]
+        extra = f" {row[3]}" if len(row) > 3 and row[3] else ""
+        out.append(f'<div class="card{extra}"><div class="k">{_esc(key)}</div>'
+                   f'<div class="v">{_esc(value)}</div>'
+                   f'<div class="d">{_esc(desc)}</div></div>')
+    return '<div class="cards">' + "".join(out) + "</div>"
+
+
+# The three method classes, in the order every page iterates them. Explicit leads
+# because it is the class the verifier scores; the other two follow in a fixed order so
+# the nav, the index cards and the page bodies cannot disagree about which is which.
+CLASS_ORDER: tuple[str, ...] = ("explicit", "implicit", "adaptive")
+_CLASS_PAGE = {cls: f"{cls}.html" for cls in CLASS_ORDER}
+
+
+def _class_cards(rows) -> str:
+    """The index's class row: one card per method class, each with one traced number.
+
+    rows are (class, headline value, what the number is, the file it came from, blurb).
+    A source of None means the document this card would have read has not been written,
+    and then the card carries no number at all: `value` is a statement of absence and
+    `what` says which document is missing. A zero here would be read as a measurement
+    that came back empty, which is a different claim from not having measured, and the
+    hub is the one page where the three classes sit side by side to be compared.
+    """
+    out = []
+    for cls, value, what, source, blurb in rows:
+        desc = _esc(what) if source is None else f"{_esc(what)}, from {_esc(source)}"
+        klass = "card klass k-" + _esc(cls) + ("" if source is not None else " unmeasured")
+        out.append(
+            f'<div class="{klass}">'
+            f'<div class="k">{_esc(cls)}</div>'
+            f'<div class="v">{_esc(value)}</div>'
+            f'<div class="d">{desc}</div>'
+            f'<p class="n">{_esc(blurb)}</p>'
+            f'<p class="go"><a href="{_esc(_CLASS_PAGE[cls])}">{_esc(cls)} methods</a></p>'
+            "</div>")
+    return '<div class="cards">' + "".join(out) + "</div>"
+
+
+# Three tiers. Tier 1 is the overview and the three method classes, in the order the
+# site leads with them, so each class is one click from anywhere and the three carry the
+# same weight in the same row. Tier 2 is the evidence that spans classes. Tier 3 is the
+# record and the reference.
 _NAV_ITEMS = (
     ("index.html", "overview", 1),
-    ("validation.html", "validation", 1),
-    ("benchmark.html", "benchmark", 1),
-    ("sidetrack.html", "side tracks", 1),
-    ("hypotheses.html", "hypotheses", 1),
-    ("falsification.html", "falsification", 1),
-    ("methodology.html", "methodology", 2),
-    ("costmodel.html", "cost model", 2),
-    ("literature.html", "literature", 2),
-    ("interpretation.html", "interpretation", 2),
-    ("glossary.html", "glossary", 2),
+    ("explicit.html", "explicit", 1),
+    ("implicit.html", "implicit", 1),
+    ("adaptive.html", "adaptive", 1),
+    ("validation.html", "validation", 2),
+    ("benchmark.html", "benchmark", 2),
+    ("hypotheses.html", "hypotheses", 2),
+    ("falsification.html", "falsification", 2),
+    ("methodology.html", "methodology", 3),
+    ("costmodel.html", "cost model", 3),
+    ("sidetrack.html", "measurement ledger", 3),
+    ("literature.html", "literature", 3),
+    ("interpretation.html", "interpretation", 3),
+    ("glossary.html", "glossary", 3),
 )
 
-# validation.html exists only when work_dir()/validation/results.json does,
-# benchmark.html only when work_dir()/benchmark/results.json does, and sidetrack.html
-# only when work_dir()/sidetrack/ledger.jsonl does; build() raises these flags (and
-# restores them) so every page's nav matches the pages written.
-_HAS_VALIDATION = False
-_HAS_BENCHMARK = False
-_HAS_SIDETRACK = False
+# The pages whose source file may be absent: validation.html needs
+# work_dir()/validation/results.json, benchmark.html needs benchmark/results.json and
+# sidetrack.html needs sidetrack/ledger.jsonl. build() raises _PRESENT to the hrefs it
+# actually wrote and clears it in the finally, so every page's nav matches the pages on
+# disk. A set rather than one module boolean per page: at fourteen entries a boolean
+# each stopped scaling, and a new conditional page no longer needs a new global.
+_CONDITIONAL = frozenset({"validation.html", "benchmark.html", "sidetrack.html"})
+_PRESENT: frozenset[str] = frozenset()
 
 
 def _nav(active: str) -> str:
     items = [(href, label, tier) for href, label, tier in _NAV_ITEMS
-             if (href != "validation.html" or _HAS_VALIDATION)
-             and (href != "benchmark.html" or _HAS_BENCHMARK)
-             and (href != "sidetrack.html" or _HAS_SIDETRACK)]
+             if href not in _CONDITIONAL or href in _PRESENT]
 
     def row(tier: int) -> str:
         return "".join(
             f'<a href="{href}"{" class=" + chr(34) + "on" + chr(34) if href == active else ""}>{_esc(label)}</a>'
             for href, label, t in items if t == tier)
-    return f'<nav class="tabs">{row(1)}</nav><nav class="tabs sub2">{row(2)}</nav>'
+    return (f'<nav class="tabs">{row(1)}</nav>'
+            f'<nav class="tabs sub2">{row(2)}</nav>'
+            f'<nav class="tabs sub3">{row(3)}</nav>')
 
 
 def _page(title: str, body: str, active: str = "", subtitle: str = "") -> str:
@@ -764,9 +838,7 @@ def _stat_cards(arch: ArchiveState) -> str:
         ("heldout_verified", str(verified), "top tier at insertion"),
         ("hypotheses", f"{len(arch.open_hypotheses)} open", f"{len(arch.refuted_hypotheses)} refuted"),
     ]
-    return '<div class="cards">' + "".join(
-        f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
-        f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>"
+    return _cards(cards)
 
 
 # ----------------------------------------------------------------------------
@@ -864,19 +936,179 @@ def _epoch_panel(data: dict | None = None) -> str:
 
 
 # ----------------------------------------------------------------------------
+# off-list documents: named on the page, never quoted from
+# ----------------------------------------------------------------------------
+
+# Some documents describe a method class in detail and still may not put a number on a
+# public page. The traceability rule names four sources, and the two-axis document, the
+# lane archives and the shares document each repeat the same sentence inside their own
+# schema, saying the document is not on that list. So a class page names such a
+# document, says whether it exists yet, and publishes none of its numbers.
+_OFF_LIST_RULE = (
+    "The traceability rule lists key_findings.json, validation/results.json, "
+    "benchmark/results.json and the side-track ledger with its artifacts. Each document "
+    "named above sits outside that list and says so in its own schema, so this page "
+    "names it and reports whether it exists without publishing a number from it. "
+    "Admitting one to the list is a decision for the owner, not for the page generator.")
+
+
+def _offlist_panel(rows) -> str:
+    """One row per off-list document: its path, whether it is written, what it holds."""
+    body = ['<div class="scroll"><table><tr><th>document</th><th>state</th>'
+            "<th>what it holds</th></tr>"]
+    for rel, present, holds in rows:
+        body.append(f'<tr><td class="mono">{_esc(rel)}</td>'
+                    f"<td>{'written' if present else 'not written yet'}</td>"
+                    f"<td>{_esc(holds)}</td></tr>")
+    body.append("</table></div>")
+    return ('<div class="panel">' + "\n".join(body)
+            + f'<p class="note">{_esc(_OFF_LIST_RULE)}</p></div>')
+
+
+# ----------------------------------------------------------------------------
 # pages
 # ----------------------------------------------------------------------------
 
-def render_index(arch: ArchiveState, benchmark: dict | None = None) -> str:
-    parts = [
-        '<p class="lead">This page summarizes the archive of an automated search for explicit '
-        "Runge-Kutta methods that hold up in " + _gloss("q15", "Q15") + " fixed-point arithmetic "
-        "on small microcontrollers. Every verified " + _gloss("tableau", "tableau") + " lives in a "
-        + _gloss("map-elites", "MAP-Elites grid") + "; the tables and charts below are generated "
-        "from that archive and each entry links to a detail page. Terms are defined in the "
-        '<a href="glossary.html">glossary</a>.</p>'
+_CLASS_BOUNDARY = (
+    "The scored archive holds one method class: explicit fixed-step Runge-Kutta "
+    "tableaus. The verifier accepts a strictly lower triangular A and a single b, and a "
+    "record has nowhere to put a second b vector, a diagonal entry or a Newton iteration "
+    "count, so implicit and adaptive methods are measured outside the archive and are "
+    "never ranked against it.")
+
+
+def _evidence_row(validation, benchmark, sidetrack) -> str:
+    """The cross-class evidence links, one line each, present pages only."""
+    head = []
+    if validation is not None:
+        head.append(("validation.html", "practical validation",
+                     "application-domain problems no search ever saw, at one budget"))
+    if benchmark is not None:
+        head.append(("benchmark.html", "library benchmark",
+                     "measured wall clock next to the analytic cycle model"))
+    if sidetrack is not None:
+        head.append(("sidetrack.html", "measurement ledger",
+                     "every off-archive point, its code hash and its artifact"))
+    items = [
+        ("hypotheses.html", "hypothesis ledger",
+         "predicates the planning model committed to, resolved by code"),
+        ("falsification.html", "falsification experiment",
+         "the kill-or-proceed measurement that ran before any searching"),
+        ("methodology.html", "methodology",
+         "how a candidate becomes a record, and what each number means"),
+        ("costmodel.html", "cost model",
+         "analytic cycles per step, the currency every budget is priced in"),
     ]
+    out = ["<ul>"]
+    for href, label, blurb in head + items:
+        out.append(f'<li><a href="{href}">{_esc(label)}</a>: {_esc(blurb)}</li>')
+    out.append("</ul>")
+    return "\n".join(out)
+
+
+def _ledger_class_card(cls: str, sidetrack, blurb: str) -> tuple:
+    """One hub card for a class whose evidence is the measurement ledger.
+
+    Three states, and the difference between the last two is the point: the ledger is
+    missing, the ledger exists and holds nothing for this class, or it holds points.
+    Only the third carries a number. A fresh work directory is in the first state, and
+    that is the state the site ships in at the start of an epoch, so it is the one the
+    wording has to get right.
+    """
+    if not isinstance(sidetrack, dict) or not (sidetrack.get("ledger") or []):
+        return (cls, "not measured", "no measurement ledger has been written yet",
+                None, blurb)
+    points = _distinct_points(_track_entries(sidetrack, cls))
+    if not points:
+        return (cls, "not measured", "the ledger records no points for this class yet",
+                None, blurb)
+    return (cls, str(points), "measured ledger points", "the measurement ledger", blurb)
+
+
+def render_index(arch: ArchiveState, benchmark: dict | None = None,
+                 validation: dict | None = None, sidetrack: dict | None = None) -> str:
+    """The hub: three classes, the boundary between them, and where to read each one.
+
+    This page carried the archive as well as the hub until the site gave the three
+    classes a page each; the grids, the scatter and the elite table are now on
+    explicit.html and this page links to them.
+    """
+    parts = [
+        '<p class="lead">An automated search for integration methods that hold up in '
+        + _gloss("q15", "Q15") + " fixed-point arithmetic on small microcontrollers. The "
+        "run covers three method classes: <strong>explicit</strong> Runge-Kutta tableaus, "
+        "which the verifier scores and the archive holds; <strong>implicit</strong> "
+        + _gloss("sdirk", "SDIRK") + " methods, which solve an equation at each stage and "
+        "stay stable where an explicit method cannot; and <strong>adaptive</strong> "
+        + _gloss("embedded-pair", "embedded pairs") + ", which choose their own step size "
+        "from an error estimate. Each class has its own page below. Terms are defined in "
+        'the <a href="glossary.html">glossary</a>.</p>'
+    ]
+    parts.append(f'<p class="note">{_esc(_CLASS_BOUNDARY)}</p>')
     parts.append(_epoch_panel())
+    parts.append("<h2>The three classes</h2>")
+    if arch.n_records:
+        rows = [("explicit", _num(arch.n_records), "archive records", "the run archive",
+                 "Scored, archived and ranked at an equal cycle budget.")]
+    else:
+        rows = [("explicit", "not started", "the run archive holds no records yet", None,
+                 "Scored, archived and ranked at an equal cycle budget.")]
+    stiff_gap = None
+    if isinstance(validation, dict):
+        v = validation.get("verdicts") or {}
+        no_fin = v.get("stiff_problems_with_no_discovered_finisher")
+        total = v.get("stiff_problems_total")
+        if isinstance(no_fin, int) and isinstance(total, int):
+            stiff_gap = f"{no_fin} of {total}"
+    imp_blurb = ("Off-archive by construction, and measured because the explicit class "
+                 "runs out of stability before it runs out of budget.")
+    if stiff_gap is not None:
+        rows.append(("implicit", stiff_gap,
+                     "stiff problems no discovered method finishes",
+                     "validation/results.json", imp_blurb))
+    else:
+        rows.append(_ledger_class_card("implicit", sidetrack, imp_blurb))
+    rows.append(_ledger_class_card(
+        "adaptive", sidetrack,
+        "Off-archive by construction: a record has no room for the second b "
+        "vector an error estimate needs."))
+    parts.append(_class_cards(rows))
+    parts.append('<p class="note">Each card carries one number and names the file it was '
+                 "read from. The class pages carry the rest, and each says plainly where "
+                 "its class has not been measured yet.</p>")
+    parts.append("<h2>Evidence that spans the classes</h2>")
+    parts.append(_evidence_row(validation, benchmark, sidetrack))
+    speed = _speed_sentence(benchmark)
+    if speed:
+        parts.append(f"<p>{speed}</p>")
+    return _page("rk-harness findings", "\n".join(parts), active="index.html",
+                 subtitle="Explicit, implicit and adaptive integrators in Q15 fixed point.")
+
+
+_EXPLICIT_CLASS = (
+    "An explicit Runge-Kutta method has a strictly lower triangular A, so every stage "
+    "input is a finished sum of stages already computed and a step is a fixed sequence of "
+    "multiply-accumulates with no equation to solve. It carries a single b vector, so it "
+    "has no error estimate of its own and no step-size controller, and its step count is "
+    "settled before the run: the cycle budget divided by the cost of one step. This is "
+    "the class the pinned verifier accepts, and the only class with an archive cell.")
+
+
+def render_explicit(arch: ArchiveState, validation: dict | None = None,
+                    benchmark: dict | None = None) -> str:
+    """The explicit class: the archive, the grids and every elite.
+
+    This body was index.html until the site gave the three classes a page each. The cell
+    pages keep their filenames, so every link into a cell still resolves.
+    """
+    parts = [
+        '<p class="lead">This page is the archive: every verified explicit '
+        + _gloss("tableau", "tableau") + " the search has kept, arranged in a "
+        + _gloss("map-elites", "MAP-Elites grid") + " by algebraic order, stage count and "
+        "cost. The tables and charts below are generated from that archive and each entry "
+        "links to a detail page carrying the whole record.</p>",
+        f'<p class="note">{_esc(_EXPLICIT_CLASS)}</p>',
+    ]
     parts.append(_stat_cards(arch))
     parts.append('<p class="note">Fitness is heldout_error under m0plus_fast at equal cycle budget; '
                  "lower is better and nothing more is claimed. Cells are (stages, cycle bucket).</p>")
@@ -950,8 +1182,30 @@ def render_index(arch: ArchiveState, benchmark: dict | None = None) -> str:
                      + _gloss("verifier-hash", "verifier hash")
                      + ("" if len(vhashes) == 1 else "es") + ": " + vlist
                      + ". Each record's own hash is on its detail page.</p>")
-    return _page("rk-harness findings", "\n".join(parts), active="index.html",
-                 subtitle="Explicit Runge-Kutta tableaus scored end-to-end in Q15 at a fixed cycle budget.")
+    parts.append("<h2>Where else this class is measured</h2>")
+    where = []
+    if validation is not None:
+        where.append('<li><a href="validation.html">Practical validation</a>: these '
+                     "tableaus on application-domain problems no optimizer saw, in Q15 at "
+                     "the shared cycle budget. The numbers live there rather than being "
+                     "restated here.</li>")
+    if benchmark is not None:
+        where.append('<li><a href="benchmark.html">Library benchmark</a>: measured wall '
+                     "clock for the same pinned fixed-step Q15 path, next to the analytic "
+                     "cycle model this page ranks by.</li>")
+    where.append('<li><a href="costmodel.html">Cost model</a>: the five instruction costs '
+                 "every cycle number on this page is built from.</li>")
+    where.append('<li><a href="methodology.html">Methodology</a>: how a candidate tableau '
+                 "becomes a record, and what each score field means.</li>")
+    parts.append("<ul>" + "".join(where) + "</ul>")
+    parts.append(_offlist_panel([
+        ("rk-work/validation/axes.json", _load_validation_axes() is not None,
+         "the two-axis document: this class at a fixed budget, and the same class "
+         "measured by cycles to a tolerance"),
+    ]))
+    return _page("explicit methods", "\n".join(parts), active="explicit.html",
+                 subtitle="Explicit Runge-Kutta tableaus scored end-to-end in Q15 at a "
+                          "fixed cycle budget.")
 
 
 def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
@@ -962,8 +1216,9 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
         '<p class="lead">This page is the full archive record for the '
         + _gloss("elite", "elite") + f" of one grid cell: algebraic order {order}, "
         f"{stages} stages, " + _gloss("cost-bucket", "cycle bucket") + f" {bucket}. "
-        'Everything here was produced by the pinned verifier; see the <a href="index.html">'
-        "overview</a> for where this cell sits in the archive. The "
+        'Everything here was produced by the pinned verifier; see the '
+        '<a href="explicit.html">explicit archive</a> for where this cell sits in '
+        "the grids. The "
         + _gloss("tiers", "tier") + " and phase label are assigned mechanically, and "
         + _gloss("verifier-hash", "verifier_hash") + " pins the exact scoring code.</p>")
     parts.append('<div class="panel">' + _record_meta(rec) + "</div>")
@@ -1017,7 +1272,7 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
     parts.append("<h3>Every per-problem error, by cost model</h3>")
     parts.append(_per_problem_matrix(sv))
     title = f"cell p{order} s{stages} b{bucket}"
-    return _page(title, "\n".join(parts), active="index.html")
+    return _page(title, "\n".join(parts), active="explicit.html")
 
 
 _PROBLEM_ROWS = ("dahlquist", "damped_osc", "vanderpol_mild",
@@ -1170,9 +1425,7 @@ def render_hypotheses(hyps: list[dict]) -> str:
         for h in group:
             counts[str(h.get("verdict") or "open")] = counts.get(str(h.get("verdict") or "open"), 0) + 1
 
-    parts.append('<div class="cards">' + "".join(
-        f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{counts.get(k, 0)}</div>'
-        f'<div class="d">{_esc(_HYP_GLOSS[k])}</div></div>' for k in _HYP_ORDER) + "</div>")
+    parts.append(_cards([(k, str(counts.get(k, 0)), _HYP_GLOSS[k]) for k in _HYP_ORDER]))
     repeats = sum(1 for g in by_pred.values() if len(g) > 1)
     parts.append(f'<p class="note">{len(hyps)} hypotheses over {len(by_pred)} distinct '
                  f"predicates; {repeats} predicates were posed more than once. Counts above are "
@@ -1450,6 +1703,16 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "cheaper method integrates with more, smaller steps. All errors on this site are "
         "equal-budget comparisons, never equal-step-count ones.",
     )),
+    ("cycles-to-tolerance", "cycles to tolerance", (
+        "The second way this project measures a method, and the one that lets classes "
+        "with different control parameters be compared: fix an accuracy target, then "
+        "ask how many modelled cycles a method needs to reach it. A fixed-step method "
+        "reaches a target by taking more steps, an adaptive one by being given a "
+        "tighter tolerance, and an implicit one by taking more Newton work per step, so "
+        "the target is the shared quantity and cycles are the answer. It is not the "
+        "same measurement as the fixed cycle budget the archive scores on, and the two "
+        "are never mixed in one number.",
+    )),
     ("directive", "directive", (
         "A JSON search instruction from the planning model: an id (D- prefix), a target order, "
         "stage counts, coefficient constraints, island count and a time budget, plus a "
@@ -1470,6 +1733,14 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "the lowest held-out error seen so far for that (order, stages, cost bucket) "
         "combination. A new record displaces the incumbent only by a strictly lower held-out "
         "error; ties keep the earlier record.",
+    )),
+    ("embedded-pair", "embedded pair", (
+        "Two Runge-Kutta methods sharing one A matrix and one set of stages, with two "
+        "weight vectors b and b_hat of different order. Subtracting the two updates "
+        "gives an estimate of the local error for the price of the arithmetic on the "
+        "difference, which is what a step-size controller needs. An archive record "
+        "holds one b, so an embedded pair has no place to live in the scored schema and "
+        "is measured off-archive.",
     )),
     ("floor-rounding", "floor rounding (ASRS)", (
         "The rounding rule of the Q15 arithmetic: a multiply computes (a * b) >> 15 with an "
@@ -1494,6 +1765,14 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "verdicts (supported, refuted, inconclusive) are computed from the data and the model "
         "never writes one.",
     )),
+    ("l-stability", "L-stability", (
+        "A stability property stronger than A-stability: the method is stable for every "
+        "decaying linear test problem, and in addition its stability function tends to "
+        "zero as the problem stiffness grows without bound, so a very fast mode is "
+        "damped out in one step instead of being carried along at full size. It is the "
+        "property that makes an implicit method useful on a stiff problem, and for the "
+        "two-stage SDIRK it holds only for particular values of the diagonal gamma.",
+    )),
     ("lsb", "LSB", (
         "Least significant bit: the smallest increment the Q15 format can represent, 2^-15, "
         "about 3.05e-5. It is the natural unit for quantization effects; floor rounding costs "
@@ -1505,6 +1784,15 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "bucket 0 to 7) and each cell keeping only its elite. The output of the project is "
         "coverage of this grid, a map of what accuracy is available at each shape and cost, "
         "rather than one recommended method.",
+    )),
+    ("off-archive", "off-archive", (
+        "Measured outside the scored path: not produced by the pinned verifier, not "
+        "stored as a record, not holding a grid cell, and not counted in any archive "
+        "statistic or hypothesis verdict. Implicit and adaptive measurements are "
+        "off-archive because the record schema cannot hold them, not because they are "
+        "less trusted. An off-archive number can be compared with other off-archive "
+        "numbers from the same code hash; it cannot be compared with an archive score, "
+        "which uses different arithmetic and a different budget.",
     )),
     ("order", "order (measured vs algebraic)", (
         "Algebraic order is the largest p whose order conditions the exact coefficients "
@@ -1521,11 +1809,35 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "verifier turns into a rejection. Coefficients are not Q15: they are dyadic (m, s) "
         "pairs applied by multiply and shift.",
     )),
+    ("sdirk", "SDIRK", (
+        "Singly diagonally implicit Runge-Kutta: the A matrix is lower triangular with "
+        "one repeated value gamma on the diagonal, so each stage is defined in terms of "
+        "itself and must be solved for, one stage at a time, rather than evaluated. The "
+        "prototype here solves each stage with a fixed number of Newton iterations. The "
+        "repeated diagonal means one Jacobian factorization serves every stage, which "
+        "is what makes the class affordable on small hardware at all.",
+    )),
     ("stage", "stage", (
         "One derivative evaluation inside a single step: an s-stage explicit method calls the "
         "problem right-hand side s times per step, each call fed by a weighted combination of "
         "the earlier stage results. Stage count is a major cost driver and one axis of the "
         "archive grids.",
+    )),
+    ("step-size-controller", "step-size controller", (
+        "The rule an adaptive method uses to turn an error estimate into the next step "
+        "size. A proportional-integral controller scales the step by the ratio of the "
+        "tolerance to the estimated error, raised to fixed exponents, using both the "
+        "current and the previous ratio so the step sequence settles instead of "
+        "oscillating. A step whose estimate exceeds the tolerance is rejected and "
+        "retried at a smaller size, so an adaptive run costs work on attempts that "
+        "never advance the solution.",
+    )),
+    ("stiffness-ratio", "stiffness ratio", (
+        "The ratio of the fastest decay rate in a problem to the slowest, taken over "
+        "the linearization; a large ratio means an explicit method's step size is "
+        "capped by a mode that has already died away, so it takes far more steps than "
+        "accuracy alone would need. The validation suite labels each problem stiff or "
+        "not on this basis and reports the ratio next to the label.",
     )),
     ("tableau", "tableau", (
         "The Butcher tableau (A, b, c) that defines a Runge-Kutta method. A is a strictly "
@@ -1550,6 +1862,13 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "byte changed in any of them changes the hash, and the container refuses to start if "
         "the computed hash differs from the pinned one. Every record stores the hash that was "
         "active when it was scored, so scores from different code can never be silently mixed.",
+    )),
+    ("work-precision", "work-precision", (
+        "A chart form for comparing methods that do not share a control parameter: "
+        "achieved error on one log axis against work spent on the other, one mark per "
+        "run and one line per method, so a reader picks an accuracy and reads off what "
+        "it cost. Work is counted in whatever unit the runs share, usually derivative "
+        "evaluations or modelled cycles. Down and to the left is better on both axes.",
     )),
 )
 
@@ -1776,9 +2095,7 @@ def render_validation(data: dict, benchmark: dict | None = None) -> str:
              _ratio_card(verdicts.get("median_ratio_discovered_over_classical")),
              "best discovered / best classical; below 1.0 favors discovered"),
         ]
-    parts.append('<div class="cards">' + "".join(
-        f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
-        f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>")
+    parts.append(_cards(cards))
     overall = verdicts.get("overall")
     if overall:
         parts.append(f"<p>{_esc(overall)}</p>")
@@ -2061,9 +2378,7 @@ def render_benchmark(data: dict) -> str:
         cards.append(("cycles against time", f"r = {float(corr['pearson_r']):.3f}",
                       f"Pearson r over {_num(corr.get('n_points'))} fixed-step Q15 runs"))
     if cards:
-        parts.append('<div class="cards">' + "".join(
-            f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
-            f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>")
+        parts.append(_cards(cards))
 
     chart = _bench_us_chart(sp, methods)
     if chart:
@@ -2313,9 +2628,59 @@ def _load_sidetrack() -> dict | None:
     return {"ledger": rows, "artifacts": artifacts}
 
 
+# ----------------------------------------------------------------------------
+# off-list documents: loaded for presence, never for a published number
+# ----------------------------------------------------------------------------
+
+# The unpinned lane archives, one directory per method class. Written by the lane
+# search, which this module neither imports nor runs: it reads the file if it is there.
+LANE_CLASSES: tuple[str, ...] = ("implicit", "adaptive")
+
+
+def _load_validation_axes() -> dict | None:
+    """The two-axis validation document, or None when it has not been written.
+
+    Absent is the normal state: nothing in the cycle builds it yet. Loaded so a class
+    page can say whether it exists; its numbers stay off the site, because the document
+    says in its own schema that it is not on the traceability list.
+    """
+    return _load_json_or_none(work_dir() / "validation" / "axes.json")
+
+
+def _load_lane_archive(cls: str) -> dict | None:
+    """One class's unpinned lane archive, or None.
+
+    Same rule as the axes document: presence only. A lane record is not comparable with
+    an archive record, and the lane records say so themselves.
+    """
+    if cls not in LANE_CLASSES:
+        return None
+    return _load_json_or_none(work_dir() / f"{cls}_archive" / "elites.json")
+
+
+def _load_shares() -> dict | None:
+    """The per-cycle lane log summarised per method class, or None."""
+    return _load_json_or_none(work_dir() / "schedule" / "shares.json")
+
+
+# ----------------------------------------------------------------------------
+# the off-archive ledger, shared by the two side-class pages
+# ----------------------------------------------------------------------------
+
 # Summary keys that read as the shape of a point rather than as one of its results, so
 # they lead the table instead of landing wherever the alphabet puts them.
 _ST_KEY_ORDER = ("points", "finished", "candidates", "statuses")
+
+
+def _soft(text) -> str:
+    """Escape a string that came out of an artifact, after the vocabulary pass.
+
+    Artifact text is written by prototype code and by failure messages, so one unlucky
+    word would fail check_banned and publish nothing that cycle. literature.soften is a
+    pure substitution, so routing every artifact-sourced string through it keeps the
+    build deterministic and keeps the reader's message intact.
+    """
+    return _esc(literature_mod.soften(str(text)))
 
 
 def _st_cell(v) -> str:
@@ -2330,149 +2695,718 @@ def _st_cell(v) -> str:
     if isinstance(v, list):
         return ", ".join(_st_cell(x) for x in v) if v else "none"
     if isinstance(v, dict):
-        return "; ".join(f"{_esc(k)} {_st_cell(v[k])}" for k in sorted(v)) if v else "none"
-    return _esc(v)
+        return "; ".join(f"{_soft(k)} {_st_cell(v[k])}" for k in sorted(v)) if v else "none"
+    return _soft(v)
 
 
-def render_sidetrack(data: dict) -> str:
-    ledger = [e for e in (data.get("ledger") or []) if isinstance(e, dict)]
-    artifacts = data.get("artifacts") or {}
-    ok = [e for e in ledger if e.get("status") == "ok"]
-    failed = [e for e in ledger if e.get("status") == "failed"]
+def _track_entries(sidetrack, track: str) -> list[dict]:
+    """Completed ledger entries for one method class, sorted by (job, point).
 
-    parts = [
-        '<p class="lead">The side tracks are off-archive measurements for the two method '
-        "classes the run does not score. Adaptive embedded pairs and implicit SDIRK methods "
-        "cannot enter the archive as things stand, because the verifier accepts only "
-        "explicit fixed-step tableaus; everything on this page is produced outside the scored "
-        "path and exists so the epoch-2 and epoch-3 designs are settled on measurements "
-        "rather than estimates. Each job states its own arithmetic below, because they "
-        "differ. Nothing here ranks against the archive, and nothing here is Q15.</p>"
-    ]
+    Sorted rather than left in file order, so a page is a function of what the ledger
+    holds and not of the order the executor happened to measure in.
+    """
+    if not isinstance(sidetrack, dict):
+        return []
+    rows = [e for e in (sidetrack.get("ledger") or [])
+            if isinstance(e, dict) and e.get("status") == "ok"
+            and str(e.get("track", "")) == track]
+    return sorted(rows, key=lambda e: (str(e.get("job", "")), str(e.get("key", ""))))
 
-    codes = sorted({str(e.get("code_hash", "")) for e in ok if e.get("code_hash")})
-    tracks = sorted({str(e.get("track", "")) for e in ok if e.get("track")})
-    jobs_seen = sorted({str(e.get("job", "")) for e in ok if e.get("job")})
-    cards = [
-        ("points measured", str(len(ok)), "one per parameter point in the plan"),
-        ("jobs", str(len(jobs_seen)), "each closes one open design question"),
-        ("tracks", ", ".join(tracks) or "none", "adaptive is epoch 2, implicit is epoch 3"),
-        ("code hash", (codes[-1][:12] if codes else "n/a"),
-         "digest over the executor and the prototypes"),
-    ]
-    if failed:
-        cards.append(("failed points", str(len(failed)), "recorded, retried, then set aside"))
-    parts.append('<div class="cards">' + "".join(
-        f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
-        f'<div class="d">{_esc(d)}</div></div>' for k, v, d in cards) + "</div>")
 
-    parts.append(_explain(
-        "A <em>point</em> is one member of a job's finite, deterministic plan. A firing of the "
-        "side-track executor measures the points it has not measured yet, writes each as its own "
-        "artifact, and appends a line to the ledger this page is rendered from.",
-        "Every artifact is a pure function of the code and the point's parameters: no clock, no "
-        "host detail, no unseeded randomness, so re-measuring a point reproduces it byte for "
-        "byte. The <strong>code hash</strong> is a digest over the executor and the prototype "
-        "modules. A point counts as measured only under the hash that measured it, so editing a "
-        "prototype re-opens its points instead of leaving stale numbers standing beside fresh "
-        "ones.",
-        "These runs are float64 and off-archive by design. They carry no "
-        + _gloss("q15", "Q15") + " quantization, no floor bias, and no cycle budget, so their "
-        "errors are not comparable with anything on the "
-        + _gloss("elite", "elite") + " grids. The comparison they support is between methods "
-        "inside this page, not between this page and the archive."))
+def _art_text(doc, *keys) -> str:
+    """The earliest non-empty artifact field among keys, softened and escaped."""
+    if not isinstance(doc, dict):
+        return ""
+    for k in keys:
+        v = str(doc.get(k) or "").strip()
+        if v:
+            return _soft(v)
+    return ""
 
+
+def _summary_max(entries, key: str, job: str | None = None):
+    """The largest finite value of one summary key over the given points, or None."""
+    out = None
+    for e in entries:
+        if job is not None and str(e.get("job", "")) != job:
+            continue
+        summary = e.get("summary") if isinstance(e.get("summary"), dict) else {}
+        v = summary.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+            continue
+        out = float(v) if out is None else max(out, float(v))
+    return out
+
+
+def _code_hashes(entries) -> list[str]:
+    return sorted({str(e.get("code_hash", "")) for e in entries if e.get("code_hash")})
+
+
+def _distinct_points(entries) -> int:
+    """Points, not ledger lines.
+
+    A point re-measured after the executor changed leaves a second line under a second
+    code hash, and the two lines are one point measured twice. Counting lines inflates
+    the total by however many points a code change re-opened, which is a number that
+    says something about the edit history and nothing about the plan.
+    """
+    return len({(str(e.get("job", "")), str(e.get("key", ""))) for e in entries})
+
+
+def _newest_code_hash(entries) -> str:
+    """The hash the most recent measurement ran under, or "" if none is stamped.
+
+    By timestamp, not alphabetically. These are digests, so their lexicographic order
+    carries no information at all, and taking the last one advertises whichever hash
+    happens to sort highest as the code the readings were taken under. The card is
+    read as provenance, so it has to be the current one.
+    """
+    stamped = [e for e in entries if e.get("code_hash")]
+    if not stamped:
+        return ""
+    newest = max(stamped, key=lambda e: (str(e.get("ts", "")), str(e.get("code_hash", ""))))
+    return str(newest.get("code_hash", ""))
+
+
+def _points_caption(entries) -> str:
+    """Says so when the line count and the point count differ, rather than hiding it."""
+    extra = len(entries) - _distinct_points(entries)
+    if extra <= 0:
+        return "one per parameter point in the plan"
+    return (f"one per parameter point in the plan; {extra} of them were measured again "
+            "after the executor changed")
+
+
+def _ledger_cards(entries, extra=()) -> str:
+    """The card row every off-archive page opens with, plus this class's own cards."""
+    jobs = sorted({str(e.get("job", "")) for e in entries if e.get("job")})
+    newest = _newest_code_hash(entries)
+    cards = [("points measured", str(_distinct_points(entries)), _points_caption(entries)),
+             ("jobs", str(len(jobs)), "each closes one open design question")]
+    cards.extend(extra)
+    cards.append(("code hash", newest[:12] if newest else "n/a",
+                  "digest over the executor and the prototypes, at the latest measurement"))
+    return _cards(cards)
+
+
+def _job_tables(entries, artifacts) -> list[str]:
+    """One section per job: what it closes, the arithmetic it ran in, and its points.
+
+    The same renderer the measurement ledger used when both side classes shared a page,
+    now taking an already-filtered list so each class page shows only its own jobs.
+    """
     by_job: dict[str, list[dict]] = {}
-    for e in ok:
+    for e in entries:
         by_job.setdefault(str(e.get("job", "")), []).append(e)
-    ordered = sorted(by_job, key=lambda j: (str(by_job[j][0].get("track", "")), j))
-
-    for job in ordered:
-        entries = sorted(by_job[job], key=lambda e: str(e.get("key", "")))
-        track = str(entries[0].get("track", ""))
-        doc = artifacts.get(str(entries[0].get("artifact", "")), {})
-        parts.append(f"<h2>{_esc(job)}</h2>")
-        parts.append(f'<p class="sub">{_esc(track)} track, {len(entries)} points</p>')
-        closes = str(doc.get("closes", "")).strip()
+    parts: list[str] = []
+    for job in sorted(by_job):
+        rows_in = sorted(by_job[job], key=lambda e: str(e.get("key", "")))
+        doc = artifacts.get(str(rows_in[0].get("artifact", "")), {})
+        parts.append(f"<h3>{_esc(job)}</h3>")
+        parts.append(f'<p class="sub">{len(rows_in)} points</p>')
+        closes = _art_text(doc, "closes")
         if closes:
-            parts.append(f"<p>Closes: {_esc(closes)}</p>")
-        arith = str(doc.get("arithmetic", "")).strip()
+            parts.append(f"<p>Closes: {closes}</p>")
+        arith = _art_text(doc, "arithmetic")
         if arith:
-            parts.append(f'<p class="note">Arithmetic: {_esc(arith)}</p>')
-        note = str(doc.get("construction") or doc.get("question") or doc.get("note") or "").strip()
+            parts.append(f'<p class="note">Arithmetic: {arith}</p>')
+        note = _art_text(doc, "construction", "question", "note")
         if note:
-            parts.append(f'<p class="note">{_esc(note)}</p>')
-
-        # Counts lead, then everything else alphabetically. Both halves are a total order,
-        # so the column list is a function of the data and nothing else.
-        seen = {k for e in entries
+            parts.append(f'<p class="note">{note}</p>')
+        # Counts lead, then everything else alphabetically. Both halves are a total
+        # order, so the column list is a function of the data and nothing else.
+        seen = {k for e in rows_in
                 for k in (e.get("summary") or {}) if isinstance(e.get("summary"), dict)}
         keys: list[str] = sorted(
             seen, key=lambda k: (_ST_KEY_ORDER.index(k) if k in _ST_KEY_ORDER
                                  else len(_ST_KEY_ORDER), k))
         head = ("<tr><th>point</th><th>cycle</th>"
-                + "".join(f"<th>{_esc(k)}</th>" for k in keys) + "</tr>")
+                + "".join(f"<th>{_soft(k)}</th>" for k in keys) + "</tr>")
         rows = []
-        for e in entries:
+        for e in rows_in:
             summary = e.get("summary") if isinstance(e.get("summary"), dict) else {}
             cells = "".join(f"<td>{_st_cell(summary.get(k))}</td>" for k in keys)
-            rows.append(f'<tr><th class="mono">{_esc(e.get("key"))}</th>'
+            rows.append(f'<tr><th class="mono">{_soft(e.get("key"))}</th>'
                         f'<td class="num">{_num(e.get("cycle"))}</td>{cells}</tr>')
         parts.append('<div class="scroll"><table>\n' + head + "\n"
                      + "\n".join(rows) + "\n</table></div>")
+    return parts
 
+
+# The canonical invariants for every off-archive number on this site. One constant,
+# rendered by the measurement ledger and by both side-class pages, so the invariants
+# cannot drift into two versions that disagree.
+_NOT_THESE_NUMBERS: tuple[tuple[str, str], ...] = (
+    ("Not scored.",
+     "No off-archive measurement enters the archive, changes an elite, or affects a "
+     "hypothesis verdict. The executor sits outside the verifier hash by construction."),
+    ("Not Q15.",
+     "Except where a job says otherwise, nothing here carries the quantization effects "
+     "that dominate the archive, the floor bias in particular, and nothing here runs "
+     "under a cycle budget. Each job states its own arithmetic, because they differ: "
+     "the solver jobs run in float64, while the stability scan is exact over rationals "
+     "with only the measured order in float."),
+    ("Not a cost comparison with the archive.",
+     "There is no shared cycle budget. Where cycles per step appear, the explicit "
+     "anchors are priced by the same pinned cost model the archive uses, and SDIRK2 is "
+     "priced by the unpinned prototype estimate with a finite-difference Jacobian. "
+     "Neither figure includes the right-hand side or the Jacobian evaluation itself."),
+    ("Preliminary.",
+     "These exist to choose the parameters that get frozen at an epoch boundary. The "
+     "scored implementation is written fresh against the pinned interfaces when that "
+     "boundary arrives."),
+)
+
+_NOT_THESE_WHERE = ("Plan, job catalogue and invariants: docs/SIDETRACK-AUTOMATION.md in "
+                    "the harness repository. Designs these feed: docs/EPOCH2-DESIGN.md "
+                    "and docs/EPOCH3-DESIGN.md.")
+
+
+def _not_these_numbers() -> str:
+    items = "".join(f"<li><strong>{_esc(h)}</strong> {_esc(b)}</li>"
+                    for h, b in _NOT_THESE_NUMBERS)
+    return ("<h2>What these numbers are not</h2>\n"
+            f"<ul>{items}</ul>\n"
+            f'<p class="note">{_esc(_NOT_THESE_WHERE)}</p>')
+
+
+_NO_POINTS = ("No measurements recorded under the current code hash. The ledger for this "
+              "class is empty, which is where a fresh work directory starts; the sections "
+              "that would carry numbers say so rather than showing an empty table or a "
+              "zero that reads as a measurement.")
+
+
+# ----------------------------------------------------------------------------
+# library counterparts, read from benchmark/results.json
+# ----------------------------------------------------------------------------
+
+# Which method class each scipy integrator belongs to. Held here as data rather than
+# imported: sitegen runs inside the cycle and rk_harness.benchcounts pulls in the
+# prototypes and the second pass. tests/test_t18_class_pages.py asserts this mapping
+# agrees with benchcounts.SCIPY_ADAPTIVE and benchcounts.SCIPY_IMPLICIT, so the two
+# cannot drift apart without a failing test.
+_LIB_CLASS: dict[str, str] = {
+    "RK23": "adaptive", "RK45": "adaptive", "DOP853": "adaptive",
+    "Radau": "implicit", "BDF": "implicit", "LSODA": "implicit",
+}
+
+_NEVER_SAME_WORK = ("Adaptive and implicit library integrators choose their own step "
+                    "counts, so their work is reported for context and is never a "
+                    "same-work comparison with any fixed-step run on this site.")
+
+
+def _sort_num(v) -> tuple:
+    """A total order that puts every finite number ahead of everything else."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return (1, 0.0)
+    return (0, float(v))
+
+
+def _library_rows(benchmark, cls: str) -> list[dict]:
+    """benchmark/results.json adaptive_results, restricted to one method class."""
+    if not isinstance(benchmark, dict):
+        return []
+    rows = [r for r in (benchmark.get("adaptive_results") or [])
+            if isinstance(r, dict) and _LIB_CLASS.get(str(r.get("integrator"))) == cls]
+    return sorted(rows, key=lambda r: (str(r.get("problem")), str(r.get("integrator")),
+                                       _sort_num(r.get("rtol"))))
+
+
+def _library_table(rows) -> str:
+    out = ['<div class="scroll"><table><tr><th>problem</th><th>integrator</th>'
+           '<th class="num">error</th><th class="num">rtol</th><th class="num">atol</th>'
+           '<th class="num">accepted steps</th><th class="num">rhs evaluations</th>'
+           '<th class="num">median s per solve</th><th>status</th></tr>']
+    for r in rows:
+        timing = r.get("timing") if isinstance(r.get("timing"), dict) else {}
+        out.append(
+            "<tr>"
+            f"<td>{_soft(r.get('problem'))}</td>"
+            f"<td>{_soft(r.get('integrator'))}</td>"
+            f'<td class="num">{_num(r.get("error"))}</td>'
+            f'<td class="num">{_num(r.get("rtol"))}</td>'
+            f'<td class="num">{_num(r.get("atol"))}</td>'
+            f'<td class="num">{_num(r.get("n_steps_accepted"))}</td>'
+            f'<td class="num">{_num(r.get("nfev"))}</td>'
+            f'<td class="num">{_num(timing.get("median_s"))}</td>'
+            f"<td>{_soft(r.get('status'))}</td>"
+            "</tr>")
+    out.append("</table></div>")
+    return "\n".join(out)
+
+
+_SERIES_SWATCH = ("var(--s1)", "var(--s2)", "var(--s3)")
+
+
+def _workprec_chart(rows, aria: str) -> str:
+    """Achieved error against derivative evaluations, log-log, one line per series.
+
+    A series is one (problem, integrator) pair, drawn in tolerance order. With a single
+    tolerance rung on the ladder a series is one mark and no line is drawn; the caption
+    says so rather than implying a curve that was never measured. Geometry comes from
+    the same _LogLog, _log_ticks and _legend the other charts use.
+    """
+    pts = [(str(r.get("problem")), str(r.get("integrator")),
+            float(r.get("nfev")), float(r.get("error")))
+           for r in rows
+           if _finite_pos(r.get("nfev")) and _finite_pos(r.get("error"))]
+    if not pts:
+        return ""
+    integrators = sorted({i for _p, i, _x, _y in pts})
+    swatch = {name: _SERIES_SWATCH[i % len(_SERIES_SWATCH)]
+              for i, name in enumerate(integrators)}
+    xs = [x for _p, _i, x, _y in pts]
+    ys = [y for _p, _i, _x, y in pts]
+    xlo = 10 ** math.floor(math.log10(min(xs)))
+    xhi = 10 ** math.ceil(math.log10(max(xs)))
+    ylo = 10 ** math.floor(math.log10(min(ys)))
+    yhi = 10 ** math.ceil(math.log10(max(ys)))
+    pl = _LogLog(640, 340, xlo, xhi, ylo, yhi,
+                 "derivative evaluations per solve", "error against the reference")
+    pl.frame()
+    series: dict[tuple[str, str], list[tuple[float, float]]] = {}
+    for prob, integ, x, y in pts:
+        series.setdefault((prob, integ), []).append((x, y))
+    curves = 0
+    for key in sorted(series):
+        prob, integ = key
+        ordered = sorted(series[key])
+        sw = swatch[integ]
+        if len(ordered) > 1:
+            curves += 1
+            path = " ".join(f"{'M' if i == 0 else 'L'} {_fmt(pl.x(x))} {_fmt(pl.y(y))}"
+                            for i, (x, y) in enumerate(ordered))
+            pl.parts.append(f'<path d="{path}" fill="none" stroke="{sw}" stroke-width="2"/>')
+        for x, y in ordered:
+            title = (f"{prob} / {integ}: error {_num(y)} after {int(x)} derivative "
+                     "evaluations")
+            pl.parts.append(f'<circle cx="{_fmt(pl.x(x))}" cy="{_fmt(pl.y(y))}" r="4.5" '
+                            f'fill="{sw}" class="cellstroke">'
+                            f"<title>{_soft(title)}</title></circle>")
+    tail = ("Each line joins the tolerance rungs of one problem under one integrator."
+            if curves else
+            "The measured ladder holds one tolerance rung, so each series is a single "
+            "mark and no line is drawn.")
+    return ('<figure><figcaption>Achieved error against derivative evaluations, both '
+            "axes log, one mark per solve. Down and to the left is better on both axes: "
+            "less work for less error. " + _esc(tail) + " " + _esc(_NEVER_SAME_WORK)
+            + " Hover a mark for exact values.</figcaption>"
+            + _legend([(swatch[name], name) for name in integrators])
+            + pl.svg(aria) + "</figure>")
+
+
+# ----------------------------------------------------------------------------
+# the implicit class
+# ----------------------------------------------------------------------------
+
+_IMPLICIT_CLASS = (
+    "An implicit Runge-Kutta method lets a stage depend on itself: A has entries on and "
+    "above the diagonal, so a stage is the solution of an equation rather than a sum of "
+    "quantities already known. The prototype here is a two-stage SDIRK, which repeats a "
+    "single value gamma down the diagonal and solves each stage with a fixed number of "
+    "Newton iterations. That buys stability on stiff problems, where an explicit "
+    "method's step size is capped by a mode that has already decayed away, and it costs "
+    "a Jacobian and several derivative evaluations per stage.")
+
+_IMPLICIT_OFF_ARCHIVE = (
+    "The pinned verifier accepts a strictly lower triangular A, and a record has no "
+    "field for gamma, for a Newton iteration count or for a Jacobian policy, so an "
+    "implicit method cannot hold an archive cell as things stand. Everything on this "
+    "page is measured outside the scored path.")
+
+
+def render_implicit(sidetrack: dict | None = None, validation: dict | None = None,
+                    benchmark: dict | None = None) -> str:
+    entries = _track_entries(sidetrack, "implicit")
+    artifacts = (sidetrack or {}).get("artifacts") or {}
+    parts = [
+        '<p class="lead">Implicit methods: the class that stays stable where an explicit '
+        "method cannot, measured " + _gloss("off-archive", "off-archive") + " because the "
+        "scored record schema has nowhere to put one. This page carries what the run has "
+        "measured about the class, the evidence for why it is worth measuring, and a "
+        "plain statement of what these numbers are not.</p>",
+        f'<p class="note">{_esc(_IMPLICIT_CLASS)}</p>',
+        f'<p class="note">{_esc(_IMPLICIT_OFF_ARCHIVE)}</p>',
+    ]
+    if entries:
+        window = _summary_max(entries, "l_stable_gammas", job="sdirk.gamma_a21_scan")
+        extra = []
+        if window is not None:
+            extra.append(("L-stable gammas", _num(int(window)),
+                          "the scan has found none at any sdirk.gamma_a21_scan point"
+                          if window == 0 else
+                          "most found at any single sdirk.gamma_a21_scan point"))
+        parts.append(_ledger_cards(entries, extra))
+    else:
+        parts.append(f"<p>{_esc(_NO_POINTS)}</p>")
+
+    parts.append("<h2>Why this class exists</h2>")
+    verdicts = (validation or {}).get("verdicts") if isinstance(validation, dict) else None
+    per = (verdicts or {}).get("per_problem") or {}
+    problems = (validation or {}).get("problems") or [] if isinstance(validation, dict) else []
+    stiff_names = [str(p.get("name")) for p in problems
+                   if isinstance(p, dict) and p.get("stiff")]
+    no_fin = (verdicts or {}).get("stiff_problems_with_no_discovered_finisher")
+    total = (verdicts or {}).get("stiff_problems_total")
+    if stiff_names and isinstance(no_fin, int) and isinstance(total, int):
+        parts.append(
+            "<p>Stiff problems on the practical validation suite where no discovered "
+            f"explicit method finishes at all: {_num(no_fin)} of {_num(total)}. On each "
+            "of those, every discovered method overflows Q15 range before the "
+            "integration ends. That is the gap this class is measured against, and it "
+            "is the reason the run spends time on a class that cannot enter the "
+            'archive. The counts below come from <a href="validation.html">'
+            "validation/results.json</a>, which is also where the non-stiff half of the "
+            "same suite is reported.</p>")
+        parts.extend(_best_table(stiff_names, per, stiff_cols=True))
+        parts.append('<p class="note">finishers are counted per problem: how many '
+                     "classical anchors and how many discovered methods completed the "
+                     "integration without overflowing. A problem with no discovered "
+                     "finisher has no ratio, because there is nothing to divide.</p>")
+    else:
+        parts.append("<p>The practical validation suite has not reported a stiff subset "
+                     "yet, so the size of the gap this class addresses is not stated "
+                     "here. It is reported on the validation page once that suite has "
+                     "run with stiff problems labelled.</p>")
+
+    if entries:
+        parts.append("<h2>What the run has measured</h2>")
+        parts.append(_explain(
+            "A <em>point</em> is one member of a job's finite, deterministic plan. A "
+            "firing of the side-track executor measures the points it has not measured "
+            "yet, writes each as its own artifact, and appends a line to the ledger "
+            "these tables are rendered from.",
+            "Every artifact is a pure function of the code and the point's parameters: "
+            "no clock, no host detail, no unseeded randomness, so re-measuring a point "
+            "reproduces it byte for byte. The <strong>code hash</strong> is a digest "
+            "over the executor and the prototype modules, and a point counts as "
+            "measured only under the hash that measured it, so editing a prototype "
+            "re-opens its points instead of leaving stale numbers standing beside fresh "
+            "ones.",
+            "These runs are float64 and " + _gloss("off-archive", "off-archive") + " by "
+            "design. They carry no " + _gloss("q15", "Q15") + " quantization, no floor "
+            "bias and no cycle budget, so their errors are not comparable with anything "
+            "on the " + _gloss("elite", "elite") + " grids. The comparison they support "
+            "is between methods inside this class, not between this page and the "
+            "archive."))
+        parts.extend(_job_tables(entries, artifacts))
+
+    lib = _library_rows(benchmark, "implicit")
+    if lib:
+        parts.append("<h2>Library implicit integrators</h2>")
+        parts.append("<p>The same problems solved by the compiled implicit integrators "
+                     "scipy provides, at the benchmark's tolerance. They are accuracy "
+                     "and work context for the class, measured in a different regime "
+                     'from anything else on this site; the <a href="benchmark.html">'
+                     "benchmark page</a> carries the whole set and the environment they "
+                     "ran in.</p>")
+        chart = _workprec_chart(lib, "Error against derivative evaluations for the "
+                                     "library implicit integrators")
+        if chart:
+            parts.append('<div class="panel">' + chart + "</div>")
+        parts.append(_library_table(lib))
+        parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
+
+    parts.append("<h2>Further evidence, not published here</h2>")
+    parts.append(_offlist_panel([
+        ("rk-work/validation/axes.json", _load_validation_axes() is not None,
+         "the cycles-to-tolerance rows for this class, next to the explicit class on "
+         "the same accuracy targets"),
+        ("rk-work/implicit_archive/elites.json", _load_lane_archive("implicit") is not None,
+         "the unpinned lane archive: candidate SDIRK parameter sets ranked among "
+         "themselves"),
+        ("rk-work/schedule/shares.json", _load_shares() is not None,
+         "the per-cycle lane log summarised per method class"),
+    ]))
+    parts.append(_not_these_numbers())
+    return _page("implicit methods", "\n".join(parts), active="implicit.html",
+                 subtitle="SDIRK methods measured off-archive, and the stiff problems "
+                          "that motivate them.")
+
+
+# ----------------------------------------------------------------------------
+# the adaptive class
+# ----------------------------------------------------------------------------
+
+_ADAPTIVE_CLASS = (
+    "An adaptive method carries an embedded pair: two weight vectors over one set of "
+    "stages, of different order. The difference between the two updates estimates the "
+    "local error of the step, and a step-size controller turns that estimate into the "
+    "next step size, shrinking after a step whose estimate exceeds the tolerance and "
+    "growing when there is accuracy to spare. A step the controller declines is "
+    "recomputed at a smaller size, so an adaptive run spends work on attempts that "
+    "never advance the solution.")
+
+_ADAPTIVE_OFF_ARCHIVE = (
+    "A record holds one b vector, and the verifier scores a fixed step count against a "
+    "fixed cycle budget. An embedded pair has a second b vector with nowhere to live, "
+    "and an adaptive run has no fixed step count to score, so the class is measured "
+    "outside the scored path and its runs are never ranked against an archive score.")
+
+# Controller counters a point may record. Rendered as one table when at least one point
+# carries any of them, so the page shows accepted and rejected work rather than only
+# aggregate rates.
+_CTRL_COLS: tuple[tuple[str, str], ...] = (
+    ("total_accepted", "accepted steps"),
+    ("total_rejected", "declined attempts"),
+    ("rejection_rate", "declined share"),
+    ("total_fevals", "rhs evaluations"),
+    ("max_error", "largest error"),
+)
+
+
+def _controller_table(entries) -> str:
+    rows = [e for e in entries
+            if isinstance(e.get("summary"), dict)
+            and any(k in e["summary"] for k, _label in _CTRL_COLS)]
+    if not rows:
+        return ""
+    head = ("<tr><th>job</th><th>point</th><th>cycle</th>"
+            + "".join(f'<th class="num">{_esc(label)}</th>' for _k, label in _CTRL_COLS)
+            + "</tr>")
+    body = []
+    for e in rows:
+        summary = e["summary"]
+        cells = "".join(f'<td class="num">{_st_cell(summary.get(k))}</td>'
+                        for k, _label in _CTRL_COLS)
+        body.append(f"<tr><td>{_soft(e.get('job'))}</td>"
+                    f'<th class="mono">{_soft(e.get("key"))}</th>'
+                    f'<td class="num">{_num(e.get("cycle"))}</td>{cells}</tr>')
+    return ('<div class="scroll"><table>\n' + head + "\n" + "\n".join(body)
+            + "\n</table></div>")
+
+
+def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None) -> str:
+    entries = _track_entries(sidetrack, "adaptive")
+    artifacts = (sidetrack or {}).get("artifacts") or {}
+    parts = [
+        '<p class="lead">Adaptive methods: the class that chooses its own step size from '
+        "an error estimate, measured " + _gloss("off-archive", "off-archive") + " because "
+        "the scored record schema holds one set of weights and one fixed step count. "
+        "This page carries what the run has measured about the class, the library "
+        "integrators that stand next to it, and a plain statement of what these numbers "
+        "are not.</p>",
+        f'<p class="note">{_esc(_ADAPTIVE_CLASS)}</p>',
+        f'<p class="note">{_esc(_ADAPTIVE_OFF_ARCHIVE)}</p>',
+    ]
+    if entries:
+        extra = []
+        rate = _summary_max(entries, "rejection_rate")
+        if rate is None:
+            rate = _summary_max(entries, "rejection_rate_max")
+        if rate is not None:
+            extra.append(("highest declined share", _num(rate),
+                          "largest share of attempts the controller declined at any "
+                          "measured point"))
+        parts.append(_ledger_cards(entries, extra))
+    else:
+        parts.append(f"<p>{_esc(_NO_POINTS)}</p>")
+
+    parts.append("<h2>What an embedded pair is</h2>")
+    parts.append("<p>Two methods share one A matrix and one set of stage derivatives. "
+                 "The higher-order weights b give the update that advances the solution; "
+                 "the lower-order weights b_hat give a second update from the same "
+                 "stages, and the difference between them is the error estimate, bought "
+                 "for the price of the arithmetic on the difference alone. The "
+                 + _gloss("step-size-controller", "step-size controller") + " compares "
+                 "that estimate against the requested tolerance: when the estimate is "
+                 "larger, the attempt is declined and recomputed at a smaller step size. "
+                 "Nothing in an archive record can hold b_hat, which "
+                 "is the whole of why this class sits outside the grids. The terms are "
+                 'defined in the <a href="glossary.html#embedded-pair">glossary</a>.</p>')
+
+    if entries:
+        ctrl = _controller_table(entries)
+        if ctrl:
+            parts.append("<h2>Accepted and declined work</h2>")
+            parts.append("<p>What the controller did at each measured point: how many "
+                         "attempts advanced the solution, how many were declined and "
+                         "recomputed, and how much derivative work the whole run cost. "
+                         "The declined share is the number a fixed-step method has no "
+                         "counterpart for, and it is the reason an adaptive run cannot "
+                         "be priced by its step count alone.</p>")
+            parts.append(ctrl)
+        parts.append("<h2>What the run has measured</h2>")
+        parts.append(_explain(
+            "A <em>point</em> is one member of a job's finite, deterministic plan. A "
+            "firing of the side-track executor measures the points it has not measured "
+            "yet, writes each as its own artifact, and appends a line to the ledger "
+            "these tables are rendered from.",
+            "Every artifact is a pure function of the code and the point's parameters: "
+            "no clock, no host detail, no unseeded randomness, so re-measuring a point "
+            "reproduces it byte for byte. The <strong>code hash</strong> is a digest "
+            "over the executor and the prototype modules, and a point counts as "
+            "measured only under the hash that measured it.",
+            "These runs are " + _gloss("off-archive", "off-archive") + " by design and, "
+            "except where a job says otherwise, they are float64: no "
+            + _gloss("q15", "Q15") + " quantization, no floor bias, no cycle budget. "
+            "Their errors are not comparable with anything on the "
+            + _gloss("elite", "elite") + " grids."))
+        parts.extend(_job_tables(entries, artifacts))
+
+    lib = _library_rows(benchmark, "adaptive")
+    if lib:
+        parts.append("<h2>Library adaptive integrators</h2>")
+        parts.append("<p>The same problems solved by the compiled explicit adaptive "
+                     "integrators scipy provides, at the benchmark's tolerance. They are "
+                     "the counterpart this class gets to stand next to, in the same "
+                     'place as its own numbers; the <a href="benchmark.html">benchmark '
+                     "page</a> carries the whole set and the environment they ran in.</p>")
+        chart = _workprec_chart(lib, "Error against derivative evaluations for the "
+                                     "library adaptive integrators")
+        if chart:
+            parts.append('<div class="panel">' + chart + "</div>")
+        parts.append(_library_table(lib))
+        parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
+
+    parts.append("<h2>Further evidence, not published here</h2>")
+    parts.append(_offlist_panel([
+        ("rk-work/validation/axes.json", _load_validation_axes() is not None,
+         "the cycles-to-tolerance rows for this class, and the measured floor of the "
+         "Q15 error estimate that bounds how tight a tolerance can mean anything"),
+        ("rk-work/adaptive_archive/elites.json", _load_lane_archive("adaptive") is not None,
+         "the unpinned lane archive: candidate pairs and controller gains ranked among "
+         "themselves"),
+        ("rk-work/schedule/shares.json", _load_shares() is not None,
+         "the per-cycle lane log summarised per method class"),
+    ]))
+    parts.append(_not_these_numbers())
+    return _page("adaptive methods", "\n".join(parts), active="adaptive.html",
+                 subtitle="Embedded pairs and step-size control, measured off-archive.")
+
+
+# ----------------------------------------------------------------------------
+# the measurement ledger: provenance for every off-archive point
+# ----------------------------------------------------------------------------
+
+def render_sidetrack(data: dict) -> str:
+    """The provenance record. The readings moved to the class pages; the ledger did not.
+
+    The file keeps its name and its URL. It has been published under sidetrack.html for
+    long enough that the name is a permanent link as far as anyone who bookmarked it is
+    concerned, so the page changes role rather than being deleted and replaced.
+    """
+    rows_all = [e for e in (data.get("ledger") or []) if isinstance(e, dict)]
+    ok = sorted([e for e in rows_all if e.get("status") == "ok"],
+                key=lambda e: (str(e.get("track", "")), str(e.get("job", "")),
+                               str(e.get("key", ""))))
+    failed = sorted([e for e in rows_all if e.get("status") == "failed"],
+                    key=lambda e: (str(e.get("track", "")), str(e.get("job", "")),
+                                   str(e.get("key", ""))))
+    tracks = sorted({str(e.get("track", "")) for e in ok if e.get("track")})
+    jobs_seen = sorted({str(e.get("job", "")) for e in ok if e.get("job")})
+    codes = _code_hashes(ok)
+
+    parts = [
+        '<p class="lead">Every measurement the run has taken outside the scored archive, '
+        "in one list, with the code hash that produced it and the artifact it was read "
+        "from. This page is the provenance record; the readings themselves are on the "
+        '<a href="implicit.html">implicit</a> and <a href="adaptive.html">adaptive</a> '
+        "pages, where each class states what its numbers mean. Nothing here is scored, "
+        "nothing here is Q15, and nothing here is ranked against the archive.</p>"
+    ]
+    newest = _newest_code_hash(ok)
+    cards = [("points measured", str(_distinct_points(ok)), _points_caption(ok)),
+             ("jobs", str(len(jobs_seen)), "each closes one open design question"),
+             ("classes", ", ".join(tracks) or "none",
+              "the two method classes the archive cannot hold"),
+             ("code hash", newest[:12] if newest else "n/a",
+              "digest over the executor and the prototypes, at the latest measurement")]
+    if failed:
+        cards.append(("failed points", str(len(failed)),
+                      "recorded, retried, then set aside"))
+    parts.append(_cards(cards))
+
+    parts.append("<h2>The whole ledger</h2>")
+    parts.append('<p class="note">Sorted by class, then job, then point, so the listing '
+                 "is a function of what the ledger holds and not of the order the "
+                 "executor happened to measure in. cycle is the run cycle the point was "
+                 "measured on; the summary column is the artifact's own summary block, "
+                 "with its keys in sorted order.</p>")
+    if not ok:
+        parts.append("<p>no points measured yet</p>")
+    else:
+        body = ['<div class="scroll"><table><tr><th>class</th><th>job</th><th>point</th>'
+                '<th class="num">cycle</th><th>code hash</th><th>artifact</th>'
+                "<th>summary</th></tr>"]
+        for e in ok:
+            summary = e.get("summary") if isinstance(e.get("summary"), dict) else {}
+            body.append(
+                "<tr>"
+                f"<td>{_soft(e.get('track'))}</td>"
+                f"<td>{_soft(e.get('job'))}</td>"
+                f'<th class="mono">{_soft(e.get("key"))}</th>'
+                f'<td class="num">{_num(e.get("cycle"))}</td>'
+                f'<td class="hash">{_soft(str(e.get("code_hash", ""))[:12])}</td>'
+                f'<td class="mono">{_soft(e.get("artifact"))}</td>'
+                f"<td>{_st_cell(summary)}</td>"
+                "</tr>")
+        body.append("</table></div>")
+        parts.append("\n".join(body))
+
+    parts.append("<h2>The code-hash rule</h2>")
+    parts.append("<p>Every artifact is a pure function of the code and the point's "
+                 "parameters: no clock, no host detail, no unseeded randomness, so "
+                 "re-measuring a point reproduces it byte for byte. The code hash is a "
+                 "digest over the executor and the prototype modules, and a point counts "
+                 "as measured only under the hash that measured it. Editing a prototype "
+                 "re-opens its points instead of leaving stale numbers standing beside "
+                 "fresh ones, which is why a listing can carry more than one hash while "
+                 "a job is being re-measured.</p>")
+    if len(codes) > 1:
+        parts.append('<p class="note">Points in this listing were measured under '
+                     f"{len(codes)} code hashes: "
+                     + ", ".join(f'<span class="hash">{_esc(h)}</span>' for h in codes)
+                     + ".</p>")
+
+    parts.append("<h2>The retry policy</h2>")
+    parts.append("<p>A point that raises is recorded with its message and retried on "
+                 "later firings. After three failures under one code hash it is set "
+                 "aside and reported here rather than retried forever, so one broken "
+                 "point cannot consume the whole side-track budget. A side-track failure "
+                 "never costs a cycle: the executor swallows it and the run continues.</p>")
     if failed:
         rows = "\n".join(
-            f'<tr><th class="mono">{_esc(e.get("job"))}:{_esc(e.get("key"))}</th>'
-            f'<td>{_esc(literature_mod.soften(str(e.get("error", ""))[:200]))}</td></tr>'
-            for e in sorted(failed, key=lambda e: (str(e.get("job")), str(e.get("key")))))
-        parts.append("<h2>Points that did not complete</h2>")
-        parts.append("<p>A failed point is recorded and retried on later firings. After three "
-                     "failures under one code hash it is set aside and reported rather than "
-                     "retried forever.</p>")
+            f'<tr><th class="mono">{_soft(e.get("job"))}:{_soft(e.get("key"))}</th>'
+            f'<td>{_soft(str(e.get("error", ""))[:200])}</td></tr>'
+            for e in failed)
+        parts.append("<h3>Points that did not complete</h3>")
         parts.append('<div class="scroll"><table>\n<tr><th>point</th><th>error</th></tr>\n'
                      + rows + "\n</table></div>")
 
-    parts.append("<h2>What these numbers are not</h2>")
-    parts.append(
-        "<ul>"
-        "<li>Not scored. No side-track measurement enters the archive, changes an elite, or "
-        "affects a hypothesis verdict. The executor is outside the verifier hash by "
-        "construction.</li>"
-        "<li>Not Q15. Nothing on this page carries the quantization effects that dominate "
-        "the archive, the floor bias in particular, and nothing here runs under a cycle "
-        "budget. Each job states its own arithmetic above, because they differ: the solver "
-        "jobs run in float64, while the stability scan is exact over rationals with only "
-        "the measured order in float.</li>"
-        "<li>Not a cost comparison with the archive. There is no shared cycle budget. Where "
-        "cycles per step appear, the explicit anchors are priced by the same pinned cost "
-        "model the archive uses, and SDIRK2 is priced by the unpinned prototype estimate "
-        "with a finite-difference Jacobian. Neither figure includes the right-hand side or "
-        "Jacobian evaluation itself.</li>"
-        "<li>Preliminary. These exist to choose the parameters that get frozen at an epoch "
-        "boundary. The scored implementation is written fresh against the pinned interfaces "
-        "when that boundary arrives.</li>"
-        "</ul>")
-    parts.append('<p class="note">Plan, job catalogue and invariants: '
-                 "docs/SIDETRACK-AUTOMATION.md in the harness repository. Designs these feed: "
-                 "docs/EPOCH2-DESIGN.md and docs/EPOCH3-DESIGN.md.</p>")
-
-    return _page("side tracks", "\n".join(parts), active="sidetrack.html",
-                 subtitle="off-archive adaptive and implicit measurements")
+    parts.append(_not_these_numbers())
+    return _page("measurement ledger", "\n".join(parts), active="sidetrack.html",
+                 subtitle="Provenance for every off-archive measurement: code hash, "
+                          "artifact and summary.")
 
 
 def build(arch: ArchiveState, out_dir: Path) -> None:
-    global _HAS_VALIDATION, _HAS_BENCHMARK, _HAS_SIDETRACK
+    global _PRESENT
     out_dir = Path(out_dir)
     validation = _load_validation()
     benchmark = _load_benchmark()
     sidetrack = _load_sidetrack()
-    _HAS_VALIDATION = validation is not None
-    _HAS_BENCHMARK = benchmark is not None
-    _HAS_SIDETRACK = sidetrack is not None
+    present = set()
+    if validation is not None:
+        present.add("validation.html")
+    if benchmark is not None:
+        present.add("benchmark.html")
+    if sidetrack is not None:
+        present.add("sidetrack.html")
+    _PRESENT = frozenset(present)
     try:
         pages: dict[str, str] = {}
-        pages["index.html"] = render_index(arch, benchmark=benchmark)
+        pages["index.html"] = render_index(arch, benchmark=benchmark,
+                                           validation=validation, sidetrack=sidetrack)
+        # The three class pages are unconditional. A class that vanished from a fresh
+        # build would take its nav entry with it, and the site would quietly go back to
+        # having one method class.
+        pages["explicit.html"] = render_explicit(arch, validation=validation,
+                                                 benchmark=benchmark)
+        pages["implicit.html"] = render_implicit(sidetrack=sidetrack,
+                                                 validation=validation,
+                                                 benchmark=benchmark)
+        pages["adaptive.html"] = render_adaptive(sidetrack=sidetrack, benchmark=benchmark)
         for order in sorted(arch.grids.keys()):
             grid = arch.grids[order]
             for (stg, bucket) in sorted(grid.keys()):
@@ -2503,6 +3437,4 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
             with open(out_dir / name, "wb") as fh:
                 fh.write(pages[name].encode("utf-8"))
     finally:
-        _HAS_VALIDATION = False
-        _HAS_BENCHMARK = False
-        _HAS_SIDETRACK = False
+        _PRESENT = frozenset()

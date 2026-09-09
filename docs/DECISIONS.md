@@ -865,6 +865,132 @@ runner stays hung for the next window too.
 
 ---
 
+## D33 - The lane-search inertness gate exempts read-only viewers, by name and by function (2026-09-09)
+
+**Decision.** `test_nothing_in_the_package_runs_the_lane_search` now allows a named viewer to
+call a named read-only surface of `lanesearch`, and fails on anything else. `_LANE_VIEWERS` is
+`{watch.py}`; `_LANE_READERS` is the eight functions that answer a question about a lane archive
+without being able to create one. A second test asserts every name in that surface is a real
+function and that none of them opens a file for writing, so the exemption cannot widen by typo
+or by a reader quietly becoming a writer.
+
+**Why, and the alternative it rejects.** The gate exists so no cycle runs a lane before batch 9
+wires the rotation. A viewer that renders one row per existing lane archive cannot start a
+search, so it does not arm anything. The alternative was to drop `_lanesearch_rows` from
+`watch.py` until the lanes are wired, and that defeats the point of doing the viewers first:
+the whole reason batch 7 precedes batch 10 is so that no cycle spent on a lane ever reads as a
+stalled explicit cycle. Removing the row would guarantee exactly one release where it does.
+
+**Evidence.** `rk_harness/watch.py:478-506` calls `lanesearch.lane_dir` and `lanesearch.status`
+and nothing else; verified by injecting `lanesearch.step` into `watch.py` (gate fails) and a
+bare mention into `runner.py` (gate fails), both restored.
+
+**Consequence.** `runner.py`, `islands.py` and every other module in the package remain unable to
+mention the module at all. When batch 9 wires the loop, the change is to add `runner.py` to
+`_LANE_VIEWERS` with the driver functions it needs, deliberately, and the second test will then
+refuse to call those functions readers.
+
+**Closes.** The one red test blocking batches 6 and 7.
+
+**Epoch impact.** None. A test file and an unpinned viewer.
+
+---
+
+## D34 - An off-archive count is points, not ledger lines, and the code-hash card is the latest measurement (2026-09-09)
+
+**Decision.** Two one-line rules applied in three places. `_distinct_points` counts distinct
+`(job, key)` pairs, so a point re-measured under a later code hash is one point.
+`_newest_code_hash` picks the hash of the entry with the greatest timestamp rather than the
+alphabetically last. `rk-overview/tools/key_findings.py` stops recomputing both and takes its
+totals from `rk_harness.sidetrack.status()`, which already drew the distinction correctly.
+
+**What was published.** The measurement ledger holds 143 ok lines and 103 distinct points: 40 were
+re-measured after the executor changed. Every card captioned "one per parameter point in the plan"
+showed the line count. The findings site said adaptive 80 (56), implicit 63 (47), ledger 143 (103);
+the overview said `143/40`, a hand-typed plan size of 40 against a line count of 143, which reads
+as more work done than the plan holds. Both sites showed code hash `a98acb39fb4f`, the superseded
+digest, while the executor had been on `305c692a1b5c085a` since cycle 2540. It sorted higher, and
+these are digests, so their lexicographic order carries no information at all.
+
+**Why it mattered more today.** Both defects predate this work and both were live. The split into
+three class pages lifts the adaptive figure onto the hub as one of three headline class numbers,
+where a reader sets it beside the archive record count, and puts the code-hash card on two more
+pages. Promoting a wrong number is a reason to fix it, not a reason to call it pre-existing.
+
+**Consequence.** A caption now says so when the two differ: "24 of them were measured again after
+the executor changed". `points_planned` comes from the catalogue and is absent rather than wrong
+when the catalogue cannot be read. `ledger_lines` and `points_remeasured` are new keys in
+`key_findings.json`, so the raw count is still available to anything that wants it.
+
+**Evidence.** `rk_harness/sitegen.py` `_distinct_points`, `_newest_code_hash`, `_points_caption`;
+`rk-overview/tools/key_findings.py` side-tracks block; `rk-overview/tools/generate.py`
+`sidetrack_section`. Confirmed against the live ledger: 56 / 47 / 103 and `305c692a1b5c`.
+
+**Epoch impact.** None. Nothing scored is read or written; these are off-archive counts.
+
+---
+
+## D35 - The saturation window is measured in the lane the rule is about (2026-09-09)
+
+**Decision.** `saturation.search_hours_since` sums the recorded seconds of explicit-lane cycles
+since the last progress event, read from `rk-work/schedule/cycles.jsonl`, and `assess` compares
+that to the 48-hour window instead of wall clock. With no lane log it returns None and the caller
+falls back to wall clock, stating which measure ran in `window_basis`.
+
+**Why.** The rule was written when every cycle was an explicit search, so wall clock and search
+time were one quantity and nobody had to say which one the window meant. Under a rotation they
+part company: at a third of the cycles the explicit lane accumulates 48 hours of searching in
+about 144 hours of wall clock. A window still counted in wall clock would reach FREEZE on a third
+of the evidence the rule was designed to require, and would do it while the machine was doing
+exactly what it had been told. `auto_freeze` is false so the verdict is advisory, but a wrong
+advisory is worse than none: it is the thing a reader checks instead of thinking.
+
+**Why not scale the threshold by the scheduled share.** The scheduled share is what was asked for;
+the recorded seconds are what happened. Substituting the first for the second is the failure mode
+`lanes._MEASURED_NOT_INTENDED` exists to name, and the survey behind this rotation found a run
+whose intended split had in fact been 0.0005 percent.
+
+**Direction of error.** The tail is bounded at `LANE_WINDOW_CYCLES = 6000`, about 293 hours at
+the 176 s cadence measured 2026-09-09. When it does not reach back to the progress event the sum
+is a floor and `window_basis_complete` is False. An undercount can only delay a freeze, never
+trigger one early, which is the safe direction for a rule whose action is to stop the run.
+
+**Consequence.** Today, with no lane log, the assessment is the old one unchanged: CONTINUE,
+17.52 hours since progress, basis "wall clock; no lane log, so every cycle is an explicit search".
+This lands before the rotation is armed, which is the point.
+
+**Evidence.** `rk_harness/saturation.py` `search_hours_since`; `tests/test_t9_saturation.py`
+S9 to S16.
+
+**Epoch impact.** None. The orchestrator is operational, unpinned, and advisory.
+
+---
+
+## D36 - The system drive gets a guard, because the run cannot outlive the daemon (2026-09-09)
+
+**Decision.** `watchdog.min_free_system_gb = 2.0`, up from 0, which was report-only.
+
+**Why now.** The watchdog has been logging "system drive C: free 4.4 GB and unguarded" every
+thirty minutes. C: is at 100 percent with about 4.3 GB free and falling; Docker's VHDX is 43.7 GB
+and lives there, and `docker system df` reports 23 GB of build cache with 14.16 GB reclaimable
+plus 7 GB of reclaimable images. None of that is the run's doing: `rk-work` is on D:, which has
+200 GB free.
+
+**What the guard buys.** At 2 GB the watchdog stops the container. A stopped run resumes with
+start.ps1. A Docker daemon that hits a full VHDX does not necessarily, and takes the archive's
+writer with it mid-append. Stopping deliberately at a threshold is the recoverable failure.
+
+**What it does not fix.** The disk still fills. Reclaiming the build cache is a machine-wide action
+that touches other projects' caches and is the owner's call, not a side effect of this work; it is
+recorded here as the recommendation rather than taken.
+
+**Evidence.** `rk-harness/scripts/watchdog.ps1:346-364`; `watchdog.log` 2026-09-09T20:18:07Z and
+20:48:10Z; `docker system df`.
+
+**Epoch impact.** None. A host config value.
+
+---
+
 ## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
 
 **Decision.** `stats.txt` declares a staleness deadline on both paths, not only when a loop wrote

@@ -542,3 +542,109 @@ def test_C28_the_peer_default_matches_the_config_default():
     m = re.search(r"""\[string\]\$PeerContainers\s*=\s*["']([^"']*)["']""", text)
     assert m, "watchdog.ps1 has no $PeerContainers parameter"
     assert m.group(1) == schema[key][0]
+
+
+# ---------------------------------------------------------------- the lane panel
+#
+# The watcher's side-track row was written when a cycle could only be an explicit search and
+# the two other classes shared one optional slot. Under a lane rotation a cycle can be any of
+# the three, and a panel that cannot say which reports a stall for a cycle that did exactly
+# what it was told. These pin the panel before the rotation is armed.
+
+def _health_text(watch, work, dk, width=100) -> str:
+    """The health panel alone, rendered wide enough that nothing wraps mid-sentence."""
+    from rich.console import Console
+    events, _ = watch.load_events()
+    console = Console(width=width, record=True, force_terminal=False)
+    console.print(watch.health_panel(events, watch._now(), "this run", dk, 7))
+    return " ".join(console.export_text().replace("|", " ").split())
+
+
+def test_C29_the_health_panel_reads_a_cycle_as_a_lane_not_as_a_search(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    _watch_events_file(work)
+    watch = _watch_module(tmp_path, monkeypatch, work)
+
+    # Docker answered and the container sets no lane schedule: the run as it stands. The
+    # panel must say so plainly, and must not suggest a rotation is under way.
+    today = _health_text(watch, work, {"status": "running", "env": {"RK_LLM": "codex"}})
+    assert "every cycle explicit (schedule 'E'; container sets none)" in today
+    assert "unknown; no rotation is scheduled, so none is recorded" in today
+    assert "33%" not in today
+
+    # Docker silent: nothing is claimed about the container, here as in stats.txt.
+    silent = _health_text(watch, work, {"status": "unknown"})
+    assert "unknown; no shares.json names one and Docker did not say" in silent
+
+    # Armed, with a document that records what actually happened.
+    from rk_harness import lanes
+    rows = [lanes.cycle_row(100 + i, lanes.lane_for(100 + i, "EAI"),
+                            "2026-09-09T06:{:02d}:00Z".format(i), 176.0, 100.0,
+                            schedule="EAI")
+            for i in range(30)]
+    doc = lanes.build_shares(rows, schedule="EAI", window_cycles=200)
+    lanes.validate_shares(doc)
+    lanes.write_shares(doc, work / "schedule" / "shares.json")
+    armed = _health_text(watch, work, {"status": "running",
+                                       "env": {"RK_LANE_SCHEDULE": "EAI"}})
+    assert "schedule 'EAI', named in shares.json" in armed
+    assert "asks for explicit 33%, adaptive 33%, implicit 33%" in armed
+    assert "explicit 33%, adaptive 33%, implicit 33% over 30 cycles" in armed
+
+
+def test_C30_the_watcher_and_stats_txt_render_the_same_lane_lines(tmp_path, monkeypatch):
+    """stats.txt exists because a file the container writes cannot report that the container
+    is dead, and the machine panel already shares its probes so the two cannot disagree. The
+    lane lines are the same arrangement: one reader, two displays."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _watch_events_file(work)
+    watch = _watch_module(tmp_path, monkeypatch, work)
+    from rk_harness import status
+
+    for env in (None, {}, {"RK_LANE_SCHEDULE": "EAI"}):
+        dk = {"status": "running", "env": env} if env is not None else {"status": "unknown"}
+        want = status.lane_rows(status.read_lanes(work, docker_env=env, current_cycle=7))
+        assert watch.lane_panel_rows(dk, 7) == want, env
+
+
+def test_C31_the_side_track_plan_is_reported_per_lane(tmp_path, monkeypatch):
+    """The two side tracks share one slot, one budget and, until now, one number. '103 of 103'
+    cannot say which lane the catalogue was for, which is the arrangement the rotation
+    replaces, so the row is broken out before the rotation arrives."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _watch_events_file(work)
+    watch = _watch_module(tmp_path, monkeypatch, work)
+    from rk_harness import sidetrack
+    monkeypatch.setattr(sidetrack, "status", lambda *a, **k: {
+        "code_hash": "305c692a1b5c085a", "ledger_lines": 143, "planned_total": 103,
+        "done_total": 103, "set_aside_total": 0, "remaining_total": 0,
+        "estimated_seconds_remaining": None,
+        "jobs": [{"job": "sweep", "track": "adaptive", "planned": 61, "done": 61, "set_aside": 0},
+                 {"job": "gain", "track": "implicit", "planned": 42, "done": 42, "set_aside": 0}]})
+    text = _health_text(watch, work, {"status": "running", "env": {}}, width=140)
+    assert "adaptive 61/61, implicit 42/42 points measured" in text
+    assert "plan exhausted" in text
+
+
+def test_C32_a_lane_archive_that_does_not_exist_yet_shows_nothing(tmp_path, monkeypatch):
+    """The two parallel lane archives arrive with the rotation. Until then the panel must be
+    silent about them rather than printing an empty one, and must never fail on the read."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _watch_events_file(work)
+    watch = _watch_module(tmp_path, monkeypatch, work)
+    assert watch._lanesearch_rows() == []
+
+    from rk_harness import lanesearch
+    (work / "adaptive_archive").mkdir(parents=True, exist_ok=True)
+    watch._cache.pop(("lanesearch", "adaptive"), None)
+    watch._cache.pop(("lanesearch", "implicit"), None)
+    rows = watch._lanesearch_rows()
+    if lanesearch.lane_dir("adaptive").exists():
+        assert rows and rows[0][0] == "adaptive archive"
+        assert "candidates measured under code" in rows[0][1]
+    watch._cache.pop(("lanesearch", "adaptive"), None)
+    watch._cache.pop(("lanesearch", "implicit"), None)
