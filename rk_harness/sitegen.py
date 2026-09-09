@@ -1182,6 +1182,8 @@ def render_explicit(arch: ArchiveState, validation: dict | None = None,
                      + _gloss("verifier-hash", "verifier hash")
                      + ("" if len(vhashes) == 1 else "es") + ": " + vlist
                      + ". Each record's own hash is on its detail page.</p>")
+    parts.extend(_matched_section(benchmark, "explicit"))
+
     parts.append("<h2>Where else this class is measured</h2>")
     where = []
     if validation is not None:
@@ -2902,6 +2904,126 @@ def _sort_num(v) -> tuple:
     return (0, float(v))
 
 
+def _matched_rows(benchmark, cls: str) -> list[dict]:
+    """benchmark/results.json matched_accuracy, restricted to one method class.
+
+    Matched ACCURACY, not matched tolerance, and the difference is the whole point of the
+    table. Asking two solvers for the same tolerance does not put them at the same
+    accuracy: one overshoots and one undershoots, and comparing their work then compares
+    two different jobs. These rows fix the achieved error instead and report what each
+    side spent to reach it.
+    """
+    if not isinstance(benchmark, dict):
+        return []
+    rows = [r for r in (benchmark.get("matched_accuracy") or [])
+            if isinstance(r, dict) and str(r.get("class")) == cls]
+    return sorted(rows, key=lambda r: (str(r.get("problem")), str(r.get("side")),
+                                       str(r.get("solver")), _sort_num(r.get("target_error"))))
+
+
+def _three_class_text(benchmark, *keys) -> str:
+    """One sentence out of verdicts.three_class, or "" when the document predates it."""
+    if not isinstance(benchmark, dict):
+        return ""
+    node = benchmark.get("verdicts")
+    if not isinstance(node, dict):
+        return ""
+    node = node.get("three_class")
+    for key in keys:
+        if not isinstance(node, dict):
+            return ""
+        node = node.get(key)
+    return str(node) if isinstance(node, str) else ""
+
+
+def _matched_table(rows) -> str:
+    """Ours and the library side by side, with the grade of every number stated.
+
+    `cost_grade` travels with the row rather than being inferred here, because whether a
+    cycle count is a measurement, a model or absent is a property of how the row was
+    produced and not of how it is displayed.
+    """
+    out = ['<div class="scroll"><table><tr><th>problem</th><th>side</th><th>solver</th>'
+           "<th>arithmetic</th>"
+           '<th class="num">target error</th><th class="num">achieved</th>'
+           '<th class="num">steps</th><th class="num">rhs evaluations</th>'
+           '<th class="num">analytic cycles</th><th>cost grade</th><th>status</th></tr>']
+    for r in rows:
+        out.append(
+            "<tr>"
+            f"<td>{_soft(r.get('problem'))}</td>"
+            f"<td>{_soft(r.get('side'))}</td>"
+            f"<td>{_soft(r.get('solver'))}</td>"
+            f"<td>{_soft(r.get('arithmetic'))}</td>"
+            f'<td class="num">{_num(r.get("target_error"))}</td>'
+            f'<td class="num">{_num(r.get("achieved_error"))}</td>'
+            f'<td class="num">{_num(r.get("n_steps_accepted"))}</td>'
+            f'<td class="num">{_num(r.get("nfev"))}</td>'
+            f'<td class="num">{_num(r.get("analytic_cycles_total"))}</td>'
+            f"<td>{_soft(r.get('cost_grade'))}</td>"
+            f"<td>{_soft(r.get('status'))}</td>"
+            "</tr>")
+    out.append("</table></div>")
+    return "".join(out)
+
+
+_MATCHED_ABSENT = (
+    "The benchmark document in this work directory predates the three-class tables, so "
+    "the matched-accuracy comparison is not stated here. It appears once "
+    "rk_harness.benchmark has been run against the current code; nothing is inferred "
+    "from the older tables in its place.")
+
+
+def _matched_section(benchmark, cls: str, extra_keys=()) -> list[str]:
+    """The class page's "against real counterparts" section, or an honest absence."""
+    rows = _matched_rows(benchmark, cls)
+    parts = ["<h2>Measured against real counterparts, at matched accuracy</h2>"]
+    if not rows:
+        parts.append(f'<p class="note">{_esc(_MATCHED_ABSENT)}</p>')
+        return parts
+    sentence = _three_class_text(benchmark, "per_class", cls)
+    if sentence:
+        parts.append(f"<p>{_esc(sentence)}</p>")
+    parts.append(
+        "<p>Each row fixes the achieved final-state error at a target and reports what "
+        "the solver spent to reach it, so the two sides are answering the same question "
+        "rather than two tolerances that happen to share a number. Rows that did not "
+        "reach their target say so in the status column and are kept, because a target a "
+        "method cannot reach is a result about the method.</p>")
+    for key in extra_keys:
+        text = _three_class_text(benchmark, key)
+        if text:
+            parts.append(f"<p>{_esc(text)}</p>")
+    parts.append(_matched_table(rows))
+    grades = _three_class_text(benchmark, "cost_grades")
+    if grades:
+        parts.append(f'<p class="note">{_esc(grades)}</p>')
+    parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
+    return parts
+
+
+def _implicit_budget_table(benchmark) -> list[str]:
+    """SDIRK2 on the stiff application problems at the shared cycle budget."""
+    if not isinstance(benchmark, dict):
+        return []
+    doc = benchmark.get("implicit_budget")
+    if not isinstance(doc, dict) or not doc:
+        return []
+    out = ["<h2>The implicit anchor at the shared cycle budget</h2>",
+           "<p>SDIRK2 given the same cycle budget every scored method is given, on the "
+           "stiff application problems, so the step count is the one the budget buys "
+           "rather than one chosen for it.</p>",
+           '<div class="scroll"><table><tr><th>problem</th>'
+           '<th class="num">steps at budget</th><th class="num">error</th></tr>']
+    for name in sorted(doc):
+        e = doc[name] if isinstance(doc[name], dict) else {}
+        out.append(f"<tr><td>{_soft(name)}</td>"
+                   f'<td class="num">{_num(e.get("steps_at_budget"))}</td>'
+                   f'<td class="num">{_num(e.get("error"))}</td></tr>')
+    out.append("</table></div>")
+    return out
+
+
 def _library_rows(benchmark, cls: str) -> list[dict]:
     """benchmark/results.json adaptive_results, restricted to one method class."""
     if not isinstance(benchmark, dict):
@@ -3107,6 +3229,9 @@ def render_implicit(sidetrack: dict | None = None, validation: dict | None = Non
         parts.append(_library_table(lib))
         parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
 
+    parts.extend(_matched_section(benchmark, "implicit", ("stiff",)))
+    parts.extend(_implicit_budget_table(benchmark))
+
     parts.append("<h2>Further evidence, not published here</h2>")
     parts.append(_offlist_panel([
         ("rk-work/validation/axes.json", _load_validation_axes() is not None,
@@ -3258,6 +3383,8 @@ def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None
             parts.append('<div class="panel">' + chart + "</div>")
         parts.append(_library_table(lib))
         parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
+
+    parts.extend(_matched_section(benchmark, "adaptive", ("adaptive_pair",)))
 
     parts.append("<h2>Further evidence, not published here</h2>")
     parts.append(_offlist_panel([

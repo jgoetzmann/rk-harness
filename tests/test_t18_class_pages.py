@@ -743,3 +743,129 @@ def test_the_points_caption_says_so_when_lines_and_points_differ(monkeypatch, tm
                                                        ts="2026-09-01T00:00:00Z")]})
     assert "measured again" not in plain
     assert "one per parameter point in the plan" in plain
+
+
+# --------------------------------------------------------------------------------------
+# matched accuracy: the comparison against real counterparts
+# --------------------------------------------------------------------------------------
+
+def _matched_fixture() -> dict:
+    """A benchmark document carrying the three-class tables benchmark.py now writes."""
+    def row(cls, side, solver, problem, arith, target, achieved, steps, nfev,
+            cycles=None, grade="model", status="ok"):
+        return {"class": cls, "side": side, "solver": solver, "problem": problem,
+                "arithmetic": arith, "target_error": target,
+                "achieved_error": achieved, "n_steps_accepted": steps, "nfev": nfev,
+                "analytic_cycles_total": cycles, "cost_grade": grade, "status": status}
+    return {
+        "matched_accuracy": [
+            row("explicit", "ours", "rk4", "dc_motor", "q15", 1e-3, 8.2e-4, 26, 104, 1716),
+            row("implicit", "ours", "sdirk2_fd_jac", "enzyme_qssa", "float64",
+                1e-3, 9.1e-4, 176, 900, 58000),
+            row("implicit", "library", "Radau", "enzyme_qssa", "float64",
+                1e-3, 4.0e-7, 88, 795, None, grade="absent"),
+            row("adaptive", "ours", "bs32_q15", "pendulum", "q15", 1e-3, 2.0e-3, 40, 160,
+                3978, status="not_reached"),
+            row("adaptive", "library", "RK23", "pendulum", "float64", 1e-3, 7.0e-4,
+                31, 130, None, grade="absent"),
+        ],
+        "implicit_budget": {
+            "enzyme_qssa": {"steps_at_budget": 176, "error": 1.46e-06},
+            "robertson_scaled": {"steps_at_budget": 100, "error": None},
+        },
+        "verdicts": {"three_class": {
+            "per_class": {
+                "explicit": "The explicit class carries 1 row of ours and 0 library rows.",
+                "implicit": "The implicit class carries 1 row of ours and 1 library row.",
+                "adaptive": "The adaptive class carries 1 row of ours and 1 library row.",
+            },
+            "adaptive_pair": "SciPy RK23 runs the same tableau our pair runs.",
+            "stiff": "On the stiff application problems, 9 of 12 solvers reached the target.",
+            "cost_grades": "A cost grade says whether a cycle count is measured or modelled.",
+        }},
+    }
+
+
+def test_each_class_page_publishes_its_matched_accuracy_rows(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    bench = _matched_fixture()
+    pages = {
+        "explicit": render_explicit(_stocked_arch(), benchmark=bench),
+        "implicit": render_implicit(benchmark=bench),
+        "adaptive": render_adaptive(benchmark=bench),
+    }
+    for cls, html in pages.items():
+        assert "Measured against real counterparts, at matched accuracy" in html, cls
+        assert bench["verdicts"]["three_class"]["per_class"][cls] in html, cls
+        check_banned(html)
+    # rows land on their own class page and nowhere else
+    assert "sdirk2_fd_jac" in pages["implicit"]
+    assert "sdirk2_fd_jac" not in pages["adaptive"]
+    assert "RK23" in pages["adaptive"] and "RK23" not in pages["implicit"]
+    assert "rk4" in pages["explicit"]
+
+
+def test_the_class_specific_sentence_goes_only_to_its_own_class(monkeypatch, tmp_path):
+    """The RK23 head-to-head is an adaptive fact and the stiff sentence an implicit one.
+    Printing either on the wrong page would attribute a measurement to a class that did
+    not produce it."""
+    _env(monkeypatch, tmp_path)
+    bench = _matched_fixture()
+    adaptive = render_adaptive(benchmark=bench)
+    implicit = render_implicit(benchmark=bench)
+    pair = bench["verdicts"]["three_class"]["adaptive_pair"]
+    stiff = bench["verdicts"]["three_class"]["stiff"]
+    assert pair in adaptive and pair not in implicit
+    assert stiff in implicit and stiff not in adaptive
+
+
+def test_a_row_that_missed_its_target_is_kept_and_says_so(monkeypatch, tmp_path):
+    """A target a method cannot reach is a result about the method. Dropping the row
+    would leave a table where every method reaches everything."""
+    _env(monkeypatch, tmp_path)
+    html = render_adaptive(benchmark=_matched_fixture())
+    assert "not_reached" in html
+    assert "did not" in html and "status column" in html
+
+
+def test_the_cost_grade_travels_with_the_row(monkeypatch, tmp_path):
+    """Whether a cycle count is measured, modelled or absent is a property of how the
+    row was produced, so it is displayed rather than inferred at render time."""
+    _env(monkeypatch, tmp_path)
+    html = render_implicit(benchmark=_matched_fixture())
+    assert "<td>model</td>" in html and "<td>absent</td>" in html
+    assert "cost grade" in html
+
+
+def test_the_implicit_budget_table_is_implicit_only(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    bench = _matched_fixture()
+    implicit = render_implicit(benchmark=bench)
+    assert "The implicit anchor at the shared cycle budget" in implicit
+    assert "enzyme_qssa" in implicit
+    assert "The implicit anchor at the shared cycle budget" not in render_adaptive(
+        benchmark=bench)
+
+
+def test_an_older_benchmark_document_says_so_rather_than_showing_nothing(
+        monkeypatch, tmp_path):
+    """The state every work directory is in until rk_harness.benchmark is re-run. An
+    empty section would read as "we compared and found nothing"."""
+    _env(monkeypatch, tmp_path)
+    for html in (render_explicit(_stocked_arch(), benchmark={"adaptive_results": []}),
+                 render_implicit(benchmark={"adaptive_results": []}),
+                 render_adaptive(benchmark=None)):
+        assert "Measured against real counterparts, at matched accuracy" in html
+        assert "predates the three-class tables" in html
+        assert "<td>ours</td>" not in html
+        check_banned(html)
+
+
+def test_the_matched_helpers_tolerate_rubbish(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    for bad in (None, {}, {"matched_accuracy": None}, {"matched_accuracy": "no"},
+                {"matched_accuracy": [None, 3, {"class": "adaptive"}]},
+                {"verdicts": "not a dict"}, {"verdicts": {"three_class": 7}}):
+        assert isinstance(sitegen._matched_rows(bad, "adaptive"), list)
+        assert isinstance(sitegen._three_class_text(bad, "per_class", "adaptive"), str)
+        assert isinstance(sitegen._implicit_budget_table(bad), list)
