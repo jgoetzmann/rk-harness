@@ -1,11 +1,16 @@
 # Lane search: open-ended work for adaptive and implicit (rk_harness/lanesearch.py)
 
-Status: **shipped inert, one read-only caller**. No cycle runs a lane search and no page
-reads either archive. The one importer is `watch.py`, which renders a row per lane archive
-that exists and calls nothing but `lane_dir` and `status`; the gate in
-`tests/test_t16_lanesearch.py` enforces that surface by name and by function (D33). The live
-container behaves exactly as it did before this file existed. This note says what is in the
-tree, what the two archives are and are not, and what it would take to point a lane at one.
+Status: **driven by the cycle loop**. `runner._run_lane_cycle` calls `step` once per
+adaptive or implicit cycle with a `run.lane_max_seconds` budget (D37, D38). `watch.py` is
+the only other caller and it may call the read-only surface only; the gate in
+`tests/test_t16_lanesearch.py` holds that line by name and by function, and asserts no
+viewer can reach `step` even now that the runner can.
+
+No page reads either archive. The records still carry `NOT_A_PAGE_SOURCE` and the
+traceability list in CLAUDE.md rule 11 still does not name them, so a class page reports
+that an archive exists and quotes no number out of it. This note says what is in the tree,
+what the two archives are and are not, and what would have to be decided before a number
+from one could be published.
 
 ## Why it exists
 

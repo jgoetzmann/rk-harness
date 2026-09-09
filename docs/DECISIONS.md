@@ -991,6 +991,110 @@ recorded here as the recommendation rather than taken.
 
 ---
 
+## D37 - The cycle loop asks which lane it is on, and every cycle records the answer (2026-09-09)
+
+**Decision.** `_run_cycle` resolves the schedule once at the top, `lanes.lane_for` names the lane,
+and a lane that is not explicit branches to `_run_lane_cycle` immediately after the archive
+replay. Every cycle, explicit included, appends a row to `rk-work/schedule/cycles.jsonl` and
+refreshes `shares.json`. `cycle_done` gains a `lane` field. Shipped with
+`run.lane_schedule = 'E'`, which is one explicit search per cycle: the behaviour the run has
+always had, now taking the same code path an armed schedule takes.
+
+**Where the branch sits, and why there.** After the replay, before the encourager. The site build
+needs the archive state, so the replay is shared; nothing below that line does anything a lane
+wants. A lane cycle does not call the encourager, because the encourager's domain is the archive
+grid and a lane record does not live in a cell. It does not call the model, because a directive
+names a target order and a stage count and this lane is not choosing one. It does not enumerate,
+evaluate or verify, because nothing here goes through the pinned checker. It appends to the
+lane's own unpinned archive and to nothing else.
+
+**`stall_counter` is passed through untouched, and this is the edit that matters most.** It counts
+cycles since the explicit search last improved a cell. A lane cycle neither advances it (the
+explicit search did not fail, it did not run) nor clears it (nothing improved). Advancing it is
+how a rotation manufactures a false stall, and the stall counter feeds the encourager's
+escalation.
+
+**Every cycle writes a row, not just the lanes.** A log that recorded only the lanes would leave
+the explicit share unmeasurable, and an unmeasurable share is exactly how an intended 70/15/15
+and a real 0.0005 percent drifted apart with nothing in the system in a position to notice. The
+row separates `records_appended` (scored) from `lane_records_appended` (the lane's own archive),
+because a lane cycle appending nothing scored is a fact to read rather than a gap.
+
+**Reporting may not end a cycle.** Both writes are wrapped: a failure logs `lane_log_failed` or
+`lane_shares_failed` and the cycle completes. The work is upstream of the record of it.
+
+**The gate changed deliberately, which is what D33 said this moment would look like.** The
+allowlist now has two roles. A VIEWER (`watch.py`) may call the read-only surface and nothing
+else. A DRIVER (`runner.py`) may also call `step`, and exactly one module is allowed to be one,
+because deciding how the machine spends its time belongs in the cycle loop. A second test asserts
+the distinction survives: no viewer may call `step` even now that the runner can, since a live
+view that could start a measurement would make the act of looking at the run change it.
+
+**Measured end to end, off in a scratch directory, with the real search rather than a stub.** One
+adaptive cycle: 59.3 s, one record. One implicit cycle: 45.9 s, fifteen records. `stall_counter`
+41 before and 41 after both. No scored archive directory was created. Both rows validated,
+`shares.json` written and schema-checked, no failure event.
+
+**Evidence.** `rk_harness/runner.py` `_run_lane_cycle`, `_record_cycle`, `_lane_budget_seconds`;
+`tests/test_t16_lane_cycle.py`; `tests/test_t16_lanesearch.py` `_LANE_VIEWERS` / `_LANE_DRIVERS`.
+
+**Epoch impact.** None while disarmed, and none when armed: no pinned file is read or written by a
+lane, nothing a lane produces is scored, and `VERIFIER_HASH` is not involved.
+
+---
+
+## D38 - The rotation is armed, and the three classes get equal turns (2026-09-09)
+
+**Decision.** `run.lane_schedule = 'EAI'`. One cycle in three searches the explicit archive, one
+measures the adaptive lane, one measures the implicit lane. `run.lane_max_seconds = 180`, matching
+the side-track budget it replaces.
+
+**Why now and not earlier.** The blocker was never the schedule, it was that the two side classes
+had no open-ended work. `sidetrack.JOBS` is a finite catalogue of 103 points, complete since cycle
+2540, and every firing since has logged `sidetrack_exhausted` in about five hundredths of a
+second. Arming before B5 would have handed two thirds of the machine an empty queue.
+`lanesearch.py` is that queue: a deterministic unbounded enumeration per lane. The end-to-end run
+above measured 1 adaptive and 15 implicit candidates in two cycles, so the queue produces work.
+
+**What the run gives up.** Two thirds of its cycles. The explicit archive will grow at about a
+third of its previous rate. That is the request, stated plainly: equal time is not equal time if
+one class keeps 97 percent of it.
+
+**What protects the explicit half from being misread as broken.** All of it landed first, on
+purpose. `saturation` measures its 48-hour window in explicit-lane seconds (D35), so it will not
+reach FREEZE on a third of the evidence. `stall_counter` advances only on explicit cycles (D37).
+The viewers name the lane a cycle belonged to, and `accept_rate` counts the explicit lane once a
+cycle carries the field. `watchdog.no_candidate_minutes` stays 30: the longest run of non-explicit
+letters in 'EAI' is two, so the worst gap between verified candidates is three cycles, 8.8 minutes
+at the measured 176 s cadence and 15 at 300 s.
+
+**Rule 10 is not relaxed, and the measured split does not go on a page.** The obvious way to make
+the sites "reflect" the rotation would be to publish the realised share. That is exactly the
+attention split CLAUDE.md rule 10 keeps internal, and B6 added a build gate that fails on a
+percentage triple. The sites reflect the three classes by giving them a page, a nav entry and a
+hub card each, with explicit leading, which is the structural claim. The time budget stays in
+`rk-work/schedule/shares.json` and in the host viewers, where the people running it can see it.
+
+**What the lane archives may say on a page, which is still only that they exist.**
+`lanesearch`'s own records carry `NOT_A_PAGE_SOURCE`, and the traceability list in CLAUDE.md
+rule 11 does not name them. Arming does not change that: the class pages will flip their presence
+line from "not written yet" to written, and will quote no number out of either archive. Whether
+`rk-work/validation/axes.json` joins the list is a separate question and still the owner's,
+because it is the one that would let a lane's PERFORMANCE be published.
+
+**Side tracks are left switched on at every 20 cycles.** They now fire only on explicit cycles,
+since `_maybe_sidetrack` sits below the branch. The catalogue is exhausted so each firing costs
+about 0.05 s, and leaving the cadence set means a refilled catalogue (B8) resumes without a config
+change.
+
+**Reversal is one value.** `python configure.py set run.lane_schedule=E`, then a restart. Nothing
+a lane wrote is in the scored archive, so reverting loses no scored work and invalidates no score.
+
+**Epoch impact.** None. This is where the run spends its time, not what it considers correct.
+`VERIFIER_HASH` is untouched and every archived score keeps its meaning.
+
+---
+
 ## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
 
 **Decision.** `stats.txt` declares a staleness deadline on both paths, not only when a loop wrote

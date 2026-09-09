@@ -586,21 +586,26 @@ def _no_constant(name):
 _LANE_READERS = frozenset({"lane_dir", "ledger_path", "elites_path", "load_ledger",
                            "load_records", "load_elites", "status", "code_hash"})
 
-# Viewers, by file name. watch.py renders one row per lane archive that exists, which
-# is the whole point of making the viewers lane-aware before the rotation is armed: a
-# cycle that spent its budget on a lane must not read as a stalled explicit cycle.
-_LANE_VIEWERS = frozenset({"watch.py"})
+# Two roles, and the difference between them is the whole point of this gate.
+#
+# A VIEWER renders what already exists. It may call the read-only surface and nothing
+# else, because a row that reports an archive cannot create one.
+#
+# A DRIVER runs the search. Exactly one module is allowed to, and it is the cycle loop,
+# because that is where a decision about how the machine spends its time belongs. B9
+# added it deliberately: before B9 this set was empty and the gate said so. Widening it
+# again means someone else has started spending the run's time, which is a thing to
+# argue about in a review rather than discover in a log.
+_LANE_VIEWERS = {"watch.py": _LANE_READERS}
+_LANE_DRIVERS = {"runner.py": _LANE_READERS | {"step"}}
+_LANE_CALLERS = {**_LANE_VIEWERS, **_LANE_DRIVERS}
 
 
-def test_nothing_in_the_package_runs_the_lane_search():
-    """The lanes ship inert: the module exists, no cycle runs it. When batch 9 wires
-    them into the cycle loop this test is the one to change, deliberately.
+def test_only_the_cycle_loop_runs_the_lane_search():
+    """Who may call this module, and which of its functions.
 
-    Viewers are exempt by name and by function. A row that reports an archive cannot
-    create one, so a read-only caller does not arm anything, and holding the viewers
-    out until the loop is wired would mean shipping one cycle where a lane firing
-    looks like a fault. What the gate actually protects is that no module decides to
-    RUN a lane: the enumerate, measure and write entry points have no caller here.
+    Before B9 nothing in the package could name it. Now the runner drives it and the
+    watcher reports it, and every other module in the package still cannot mention it.
     """
     pkg = HARNESS_DIR / "rk_harness"
     used: dict[str, set[str]] = {}
@@ -612,12 +617,22 @@ def test_nothing_in_the_package_runs_the_lane_search():
             continue
         used[path.name] = set(re.findall(r"lanesearch\.(\w+)", text))
 
-    unexpected = sorted(set(used) - _LANE_VIEWERS)
+    unexpected = sorted(set(used) - set(_LANE_CALLERS))
     assert unexpected == [], f"lanesearch is referenced by {unexpected}"
 
     for name in sorted(used):
-        beyond = sorted(used[name] - _LANE_READERS)
-        assert beyond == [], f"{name} calls {beyond}, which is past the read-only surface"
+        beyond = sorted(used[name] - _LANE_CALLERS[name])
+        assert beyond == [], f"{name} calls {beyond}, which is past what it is allowed"
+
+
+def test_a_viewer_may_not_run_a_search_even_now_that_the_runner_can():
+    """The distinction has to survive B9 or it was never a distinction. The viewers run
+    on the host, outside the cycle, and a live view that could start a measurement would
+    make the act of looking at the run change it."""
+    for name, allowed in _LANE_VIEWERS.items():
+        assert allowed <= _LANE_READERS, name
+        assert "step" not in allowed, name
+    assert set(_LANE_DRIVERS) == {"runner.py"}
 
 
 def test_the_read_only_surface_names_functions_that_exist_and_never_write():

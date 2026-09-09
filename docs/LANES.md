@@ -1,14 +1,13 @@
 # Lanes: the three-way split as data (rk_harness/lanes.py)
 
-Status: **shipped inert, read by the viewers**. No cycle runs a lane. What imports
-`rk_harness.lanes` is the reporting side only: `status.py` reads the schedule and the
-measured shares so `stats.txt` and the watcher can name the lane a cycle belonged to, and
-`saturation.py` measures its no-progress window in explicit-lane seconds rather than wall
-clock (D35). All three are read-only and all three fall back to today's behaviour when the
-cycle log does not exist, which it does not. The live container behaves exactly as it did
-before this file existed, and it will keep doing so until someone wires the runner and sets
-a config value. This note says what is in the tree, what it costs to arm, and what has to
-happen before arming would be honest.
+Status: **armed**. `run.lane_schedule = 'EAI'` since 2026-09-09 (D38): one cycle in three
+searches the explicit archive, one measures the adaptive lane, one measures the implicit
+lane. `runner._run_cycle` resolves the schedule once and branches after the archive replay
+(D37); every cycle, explicit included, appends a row to `rk-work/schedule/cycles.jsonl` and
+refreshes `shares.json`. `status.py` and `saturation.py` read those, read-only.
+
+To put it back the way it was: `python configure.py set run.lane_schedule=E`, then a
+restart. Nothing a lane writes is in the scored archive, so reverting loses no scored work.
 
 ## Why it exists
 

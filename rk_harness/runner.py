@@ -25,7 +25,9 @@ from rk_harness import directive as directive_mod
 from rk_harness import encourager
 from rk_harness import enumeration
 from rk_harness import evaluator
+from rk_harness import lanes
 from rk_harness import ledger
+from rk_harness import lanesearch
 from rk_harness import literature
 from rk_harness import orderconditions
 from rk_harness import prompts
@@ -967,12 +969,116 @@ def _fallback_like(directive_id: str, order: int, stages: list[int], rationale: 
     }
 
 
+def _lane_budget_seconds() -> float:
+    """Wall seconds a lane cycle may spend STARTING candidates.
+
+    lanes.lane_max_seconds() clamps rather than rejects, for the reason stated there: a
+    budget cannot arm anything on its own. The schedule is the thing that arms.
+    """
+    return lanes.lane_max_seconds()
+
+
+def _record_cycle(new_cycle_id: int, lane: str, schedule: str, seconds: float,
+                  productive: float | None, *, records_appended: int = 0,
+                  lane_records: int = 0, points: int = 0) -> None:
+    """Append one row to the cycle log and refresh the shares document.
+
+    EVERY cycle writes a row, explicit included. A log that only recorded the lanes
+    would make the explicit share unmeasurable, and an unmeasurable share is how the
+    intended split and the real one drifted to 0.0005 percent with nothing in a
+    position to notice. Failures here are logged and swallowed: the rotation is
+    reporting, and reporting must not be able to end a cycle that did its work.
+    """
+    try:
+        row = lanes.cycle_row(new_cycle_id, lane, iso_now(), seconds,
+                              productive_seconds=productive,
+                              records_appended=records_appended,
+                              points_measured=points,
+                              lane_records_appended=lane_records,
+                              schedule=schedule,
+                              code_hash=lanesearch.code_hash() if lane != "explicit" else None)
+        lanes.append_cycle(row)
+    except Exception as e:  # noqa: BLE001
+        log_event("lane_log_failed", error=repr(e)[:200], cycle_id=new_cycle_id, lane=lane)
+        return
+    try:
+        lanes.update_shares(schedule=schedule)
+    except Exception as e:  # noqa: BLE001
+        log_event("lane_shares_failed", error=repr(e)[:200], cycle_id=new_cycle_id)
+
+
+def _run_lane_cycle(state: RunState, new_cycle_id: int, arch, lane: str,
+                    schedule: str, started: float) -> RunState:
+    """One cycle of open-ended search for the adaptive or implicit lane.
+
+    WHAT THIS DOES NOT DO, and each omission is the point rather than a shortcut. It
+    does not call the encourager, because the encourager's whole domain is the archive
+    grid and a lane record does not live in a cell. It does not call the LLM, because a
+    directive names a target order and a stage count and this lane is not choosing one.
+    It does not enumerate, evaluate or verify, because nothing here goes through the
+    pinned checker and nothing here is scored. It appends to the lane's own unpinned
+    archive and to nothing else.
+
+    What it DOES share with an explicit cycle is the replay it was handed and the site
+    build below, so a lane cycle publishes its own class page in the same cycle it
+    measured, exactly as an explicit cycle publishes the archive.
+
+    stall_counter is passed through untouched. It counts cycles since the explicit
+    search last improved a cell, so a lane cycle neither advances it (the explicit
+    search did not fail, it did not run) nor clears it (nothing improved).
+    """
+    log_event("lane_cycle_start", cycle_id=new_cycle_id, lane=lane, schedule=schedule)
+    budget = _lane_budget_seconds()
+    lane_started = time.monotonic()
+    records: list = []
+    try:
+        records = lanesearch.step(lane, seed=new_cycle_id, budget_seconds=budget,
+                                  cycle=new_cycle_id, log=log_event)
+    except Exception as e:  # noqa: BLE001 - a lane must not be able to end the run
+        log_event("lane_cycle_failed", cycle_id=new_cycle_id, lane=lane,
+                  error=repr(e)[:300])
+    productive = time.monotonic() - lane_started
+
+    if os.environ.get("RK_SITE") != "off":
+        try:
+            sitegen.build(arch, findings_dir() / "docs")
+        except sitegen.BannedWordError as e:
+            log_event("site_build_failed", error=repr(e))
+    if os.environ.get("RK_GIT_COMMIT") == "on":
+        _commit_outputs(new_cycle_id)
+
+    new_state = RunState(
+        cycle_id=new_cycle_id,
+        phase=state.phase,
+        started_at=state.started_at,
+        last_heartbeat=iso_now(),
+        spend_usd=state.spend_usd,
+        stall_counter=state.stall_counter,
+        current_cell=state.current_cell,
+    )
+    save_state(new_state)
+    _record_cycle(new_cycle_id, lane, schedule, time.monotonic() - started, productive,
+                  lane_records=len(records))
+    log_event("cycle_done", cycle_id=new_cycle_id, phase=new_state.phase, improved=False,
+              stall_counter=new_state.stall_counter, accepted=0, rejected=0,
+              spend_usd=new_state.spend_usd, cap_usd=credentials.monthly_cap_usd(),
+              policy="lane", lane=lane, lane_records=len(records))
+    return new_state
+
+
 def _run_cycle(state: RunState) -> RunState:
     new_cycle_id = state.cycle_id + 1
     phase = state.phase
+    cycle_started = time.monotonic()
     # One policy for the whole cycle, decided before anything is chosen, so every event this
     # cycle writes can be attributed to it afterwards (rk_harness.policyab).
     policy = _search_policy(new_cycle_id)
+    # And one lane, for the same reason: resolved once from the environment and passed
+    # down, so the event line and the work it describes cannot disagree because the
+    # variable changed between two reads. Under the shipped schedule 'E' this is
+    # "explicit" on every cycle and the branch below is never taken.
+    schedule = lanes.lane_schedule()
+    lane = lanes.lane_for(new_cycle_id, schedule)
 
     # 1. replay, verifier hash, baselines
     # This is the only full pass over the archive in a cycle. It used to be five (a replay
@@ -1000,6 +1106,12 @@ def _run_cycle(state: RunState) -> RunState:
         log_event("archive_checkpoint_written",
                   covered_files=archive.last_checkpoint_write().get("covered_files"),
                   n_records=arch.n_records)
+
+    # 1b. A lane cycle takes the replay it was handed and goes no further down this path.
+    # Placed after the replay and before the encourager because the site build needs the
+    # archive state and nothing below this line does anything a lane wants.
+    if lane != "explicit":
+        return _run_lane_cycle(state, new_cycle_id, arch, lane, schedule, cycle_started)
 
     # 2. encourager
     action = encourager.next_action(state, arch, now())
@@ -1173,9 +1285,12 @@ def _run_cycle(state: RunState) -> RunState:
         current_cell=last_cell,
     )
     save_state(new_state)
+    _record_cycle(new_cycle_id, lane, schedule, time.monotonic() - cycle_started, None,
+                  records_appended=n_accepted)
     log_event("cycle_done", cycle_id=new_cycle_id, phase=new_phase, improved=improved,
               stall_counter=new_state.stall_counter, accepted=n_accepted, rejected=n_rejected,
-              spend_usd=new_state.spend_usd, cap_usd=credentials.monthly_cap_usd(), policy=policy)
+              spend_usd=new_state.spend_usd, cap_usd=credentials.monthly_cap_usd(),
+              policy=policy, lane=lane)
     return new_state
 
 
