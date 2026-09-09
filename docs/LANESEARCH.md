@@ -1,9 +1,11 @@
 # Lane search: open-ended work for adaptive and implicit (rk_harness/lanesearch.py)
 
-Status: **shipped inert**. Nothing imports `rk_harness.lanesearch`, no page reads either
-archive, and the live container behaves exactly as it did before this file existed. This
-note says what is in the tree, what the two archives are and are not, and what it would take
-to point a lane at one.
+Status: **shipped inert, one read-only caller**. No cycle runs a lane search and no page
+reads either archive. The one importer is `watch.py`, which renders a row per lane archive
+that exists and calls nothing but `lane_dir` and `status`; the gate in
+`tests/test_t16_lanesearch.py` enforces that surface by name and by function (D33). The live
+container behaves exactly as it did before this file existed. This note says what is in the
+tree, what the two archives are and are not, and what it would take to point a lane at one.
 
 ## Why it exists
 

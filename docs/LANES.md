@@ -1,9 +1,14 @@
 # Lanes: the three-way split as data (rk_harness/lanes.py)
 
-Status: **shipped inert**. Nothing imports `rk_harness.lanes`. The live container behaves
-exactly as it did before this file existed, and it will keep doing so until someone wires
-the runner and sets a config value. This note says what is in the tree, what it costs to
-arm, and what has to happen before arming would be honest.
+Status: **shipped inert, read by the viewers**. No cycle runs a lane. What imports
+`rk_harness.lanes` is the reporting side only: `status.py` reads the schedule and the
+measured shares so `stats.txt` and the watcher can name the lane a cycle belonged to, and
+`saturation.py` measures its no-progress window in explicit-lane seconds rather than wall
+clock (D35). All three are read-only and all three fall back to today's behaviour when the
+cycle log does not exist, which it does not. The live container behaves exactly as it did
+before this file existed, and it will keep doing so until someone wires the runner and sets
+a config value. This note says what is in the tree, what it costs to arm, and what has to
+happen before arming would be honest.
 
 ## Why it exists
 
