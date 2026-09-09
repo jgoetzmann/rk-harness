@@ -11,9 +11,20 @@ The B70 block covers rk_harness/coeffmem.py and the two numbers the
 trade-offs matrix needs from this document: coefficient memory per method and
 the repeat-to-repeat timing spread per method.
 
+The B4 block covers rk_harness/benchcounts.py and the three-class tables:
+matched accuracy as the shared condition with a side on every row, our
+embedded pair against SciPy RK23 and RK45 at matched tolerance, our SDIRK2
+against Radau, BDF and LSODA on the stiff application problems, and the
+honesty rules the validator now enforces (full coverage of the declared cross
+product, no cycle number under a cost grade that says there is no cost model,
+no wall-clock ratio across two timing families, and no class that vanishes
+without saying so).
+
 Timings inside the module-scoped document use a reduced repeat count so the
 suite stays quick; the accuracy numbers those tests check are the same ones a
 full run produces because nothing about accuracy depends on the repeat count.
+The three-class scope is likewise reduced, and the coverage assertion checks
+the rows against that reduced scope exactly as it would against the full one.
 """
 from __future__ import annotations
 
@@ -29,6 +40,7 @@ from pathlib import Path
 import pytest
 
 from rk_harness import benchmark as B
+from rk_harness import benchcounts as BC
 from rk_harness import coeffmem, coeffrep
 from rk_harness.simulate import problem_error, solve_float, steps_for_budget
 from rk_harness.tableau import classical, content_hash, make_tableau, to_json
@@ -70,10 +82,25 @@ def _synthetic_validation_doc() -> dict:
     }
 
 
+# A small but complete three-class scope: two application problems (one of them
+# stiff, which is the regime the implicit class exists for), two targets, short
+# ladders. Every coverage rule is checked against this declaration, so a reduced
+# scope buys speed and gives up no strictness.
+_SCOPE = B.ThreeClassScope(
+    problems=("buck_converter", "enzyme_qssa"),
+    targets=(2.0 ** -6, 2.0 ** -10),
+    n_max=64, bisect_probes=2,
+    tol_ladder=(32, 128), max_attempts=2000,
+    lib_tol_ladder=(2.0 ** -8, 2.0 ** -14),
+    adaptive_tols=(2.0 ** -6,),
+    budget_problems=("enzyme_qssa",),
+)
+
+
 @pytest.fixture(scope="module")
 def doc():
     return B.build_results(validation_doc=_synthetic_validation_doc(),
-                           n_repeats=_N_REPEATS, warmup=_N_WARMUP)
+                           n_repeats=_N_REPEATS, warmup=_N_WARMUP, scope=_SCOPE)
 
 
 # ------------------------------------------------------------ tolerance rule
@@ -548,3 +575,397 @@ def test_write_results_round_trips(doc, tmp_path):
         loaded = json.load(fh)
     B.validate_results(loaded)
     assert loaded["budget_cycles"] == B.BUDGET_CYCLES
+
+
+# ------------------------------------------------- B4 three-class benchmark
+
+
+def test_B4_q15_tolerance_lsb_follows_the_stated_rule():
+    """max(1, round(tol * scale * 2**15)), and the clamp is the whole reason the
+    rule needs writing down: below one LSB there is no tolerance to ask for."""
+    assert BC.q15_tolerance_lsb(2.0 ** -6, 1.0) == 512
+    assert BC.q15_tolerance_lsb(2.0 ** -6, 0.25) == 128
+    assert BC.q15_tolerance_lsb(2.0 ** -20, 0.25) == 1        # clamped
+    for tol in (2.0 ** -4, 2.0 ** -8, 2.0 ** -12):
+        for scale in (0.125, 0.25, 1.0, 8.0):
+            got = BC.q15_tolerance_lsb(tol, scale)
+            assert got == max(1, round(tol * scale * 32768.0))
+            assert got >= 1
+    with pytest.raises(ValueError):
+        BC.q15_tolerance_lsb(0.0, 1.0)
+    with pytest.raises(ValueError):
+        BC.q15_tolerance_lsb(1.0, 0.0)
+    assert "2**15" in BC.TOLERANCE_RULE_ADAPTIVE
+
+
+def test_B4_below_bias_floor_reads_the_bias_magnitude():
+    """The floor bias is reported signed because floor rounding biases downward;
+    it is the magnitude that says whether a tolerance is askable."""
+    flag, basis = BC.below_bias_floor(1, -1.98)
+    assert flag is True and "magnitude" in basis
+    flag, basis = BC.below_bias_floor(8, -1.98)
+    assert flag is False
+    flag, basis = BC.below_bias_floor(1, None)
+    assert flag is True and "no floor statistics" in basis
+
+
+def test_B4_select_benchmark_methods_skips_non_explicit_entries():
+    """A validation document that carries implicit or adaptive entries must not
+    feed them to a pool that runs the pinned explicit solver."""
+    vdoc = _synthetic_validation_doc()
+    cls = classical()
+    vdoc["methods"].append(
+        {"name_or_hash": "sdirk2_fd_jac", "kind": "prototype", "class": "implicit",
+         "roles": [], "order": 2, "stages": 2, "tableau": to_json(cls["rk4"])})
+    vdoc["methods"].append(
+        {"name_or_hash": "bs32_propagating_b", "kind": "prototype",
+         "class": "adaptive", "derived_fixed_step": True, "roles": [],
+         "order": 3, "stages": 4, "tableau": to_json(cls["rk4"])})
+    names = [m["name_or_hash"] for m in B.select_benchmark_methods(vdoc)]
+    assert "sdirk2_fd_jac" not in names
+    assert "bs32_propagating_b" not in names
+    assert "rk4" in names and "euler" in names
+    # the guard runs before the hash check, so a non-explicit entry carrying a
+    # deliberately wrong name is skipped rather than raising
+    vdoc["methods"][-1]["name_or_hash"] = "0" * 64
+    B.select_benchmark_methods(vdoc)
+
+
+def test_B4_adaptive_results_rows_carry_a_class(doc):
+    """RK45 and RK23 are explicit pairs under a controller; Radau, BDF and LSODA
+    solve an implicit system every step. The table used to file all five under
+    one heading that said adaptive."""
+    seen = {}
+    for r in doc["adaptive_results"]:
+        seen[r["integrator"]] = r["class"]
+        assert r["side"] == "library"
+        assert r["arithmetic"] == "compiled_float64"
+        assert r["timing_family"] == "compiled_scipy"
+        assert isinstance(r["family"], str) and r["family"]
+    assert seen["RK45"] == "adaptive" and seen["RK23"] == "adaptive"
+    for name in ("Radau", "BDF", "LSODA"):
+        assert seen[name] == "implicit", name
+
+
+def test_B4_matched_accuracy_covers_the_declared_cross_product(doc):
+    scope = doc["three_class_scope"]
+    solvers = [s["solver"] for s in doc["solvers"]]
+    cells = {(r["solver"], r["problem"], r["target_key"])
+             for r in doc["matched_accuracy"]}
+    expect = {(s, p, repr(float(t))) for s in solvers
+              for p in scope["resolved_problems"] for t in scope["targets"]}
+    assert cells == expect
+    assert len(doc["matched_accuracy"]) == len(expect)
+    for cls, entry in doc["classes"].items():
+        assert entry["n_rows"]["matched_accuracy_ours"] >= 1, cls
+        assert (entry["n_rows"]["matched_accuracy_library"] >= 1
+                or entry.get("library_absent_reason")), cls
+
+
+def test_B4_rows_name_what_they_do_not_control_for(doc):
+    """The bar is honesty: a cross-class or cross-library row states the
+    uncontrolled differences in fields, not in a comment."""
+    for r in doc["matched_accuracy"]:
+        assert r["controls_for"] and isinstance(r["controls_for"], list)
+        assert r["not_controlled"] and isinstance(r["not_controlled"], list)
+        assert any("arithmetic" in s for s in r["not_controlled"])
+        assert any("implementation" in s for s in r["not_controlled"])
+        assert r["timing_family"] in BC.TIMING_FAMILIES
+        assert r["cost_grade"] in BC.COST_GRADES
+        assert r["control_unit"]
+        if r["cost_grade"] == "none":
+            assert r["analytic_cycles_total"] is None
+            assert r["analytic_cycles_per_step"] is None
+        if r["status"] != "reached":
+            assert r["reason"], (r["solver"], r["problem"], r["status"])
+
+
+def test_B4_library_rows_publish_nulls_with_reasons(doc):
+    """SciPy reports no rejected-step count. For RK23 and RK45 it is recoverable
+    exactly from the fixed per-attempt evaluation count; for the rest the field
+    is null with the reason beside it rather than a plausible figure."""
+    lib = [r for r in doc["matched_accuracy"] if r["side"] == "library"]
+    assert lib
+    for r in lib:
+        assert r["analytic_cycles_total"] is None
+        assert r["cost_grade"] == "none"
+        assert r["n_steps_rejected_basis"]
+        if r["solver"] in ("RK23", "RK45") and r["status"] == "reached":
+            assert isinstance(r["n_steps_rejected"], int)
+            assert r["n_steps_rejected"] >= 0
+            k = BC.SCIPY_FEVALS_PER_ATTEMPT[r["solver"]]
+            attempts = (r["nfev"] - BC.SCIPY_INIT_FEVALS) // k
+            assert r["n_steps_rejected"] == attempts - r["n_steps_accepted"]
+        if r["solver"] in ("Radau", "BDF", "LSODA"):
+            assert r["n_steps_rejected"] is None
+            assert "cannot be recovered" in r["n_steps_rejected_basis"]
+
+
+def test_B4_implied_attempts_refuses_a_rounding():
+    got, basis = BC.implied_attempts("RK23", 53)
+    assert got == 17 and "derived exactly" in basis
+    got, basis = BC.implied_attempts("RK23", 54)      # not 2 plus a multiple of 3
+    assert got is None and "rounding" in basis
+    got, basis = BC.implied_attempts("Radau", 500)
+    assert got is None and "fixed number of derivative evaluations" in basis
+
+
+def test_B4_adaptive_pairs_hold_the_tableau_constant(doc):
+    """SciPy RK23 is Bogacki-Shampine 3(2), the pair our prototype runs, so the
+    entry states same_pair and the only differences are the controller and the
+    arithmetic. No wall-clock ratio crosses the two implementations."""
+    pairs = doc["adaptive_pairs"]
+    assert pairs
+    for e in pairs:
+        assert e["same_pair"] is True
+        assert e["counterpart"] == "RK23"
+        assert e["ours_solver"] == BC.M_BS32_Q15
+        assert set(e["solvers"]) <= set(BC.PAIR_SOLVER_ORDER)
+        assert e["time_ratio_ours_over_rk23"] is None
+        assert e["time_ratio_reason"]
+        fams = {v["timing_family"] for v in e["solvers"].values()}
+        assert len(fams) > 1                       # which is why the ratio is null
+        ours = e["solvers"].get(BC.M_BS32_Q15)
+        rk23 = e["solvers"].get("RK23")
+        if ours and rk23 and ours["n_fevals"] and rk23["n_fevals"]:
+            assert math.isclose(e["fevals_ratio_ours_over_rk23"],
+                                ours["n_fevals"] / rk23["n_fevals"], rel_tol=1e-9)
+
+
+def test_B4_adaptive_tolerance_rows_state_the_conversion(doc):
+    rows = doc["adaptive_matched_tolerance"]
+    assert rows
+    for r in rows:
+        assert r["rtol"] == r["tol"] and r["atol"] == r["tol"]
+        if r["arithmetic"] == "q15":
+            assert r["tol_q_lsb"] == BC.q15_tolerance_lsb(r["tol"], r["scale"])
+            assert r["below_bias_floor"] in (True, False)
+            assert r["bias_floor_basis"]
+        else:
+            assert r["tol_q_lsb"] is None
+    keys = {(r["solver"], r["problem"], r["tol"]) for r in rows}
+    scope = doc["three_class_scope"]
+    assert keys == {(s, p, t) for s in BC.PAIR_SOLVER_ORDER
+                    for p in scope["resolved_problems"]
+                    for t in scope["adaptive_tols"]}
+
+
+@pytest.mark.slow
+def test_B4_implicit_budget_agrees_with_the_side_track():
+    """The budget ladder is recomputed here rather than cited, so a test holds it
+    equal to sidetrack's own J9 job cell for cell; otherwise the two documents
+    drift and both look authoritative."""
+    from rk_harness import sidetrack as ST
+    name = "enzyme_qssa"
+    mine = BC.implicit_budget((name,))[name]
+    theirs = ST._run_stiff_budget({"problem": name})["methods"]["sdirk2"]
+    assert mine["cycles_per_step"] == theirs["est_cycles_per_step"]
+    assert mine["steps_at_budget"] == theirs["steps_at_budget"]
+    assert mine["error_at_budget"] == theirs["error_at_budget"]
+    assert mine["status_at_budget"] == theirs["status_at_budget"]
+    assert mine["f_evals_per_step"] == theirs["f_evals_per_step"]
+    assert [r["n"] for r in mine["ladder"]] == theirs["ladder"]
+    for a, b in zip(mine["ladder"], theirs["points"]):
+        assert a["n"] == b["n"] and a["status"] == b["status"]
+        assert a["error"] == b["error"]
+        assert a["analytic_cycles"] == b["analytic_cycles"]
+    assert mine["library_column"] is None and mine["why_no_library"]
+
+
+def test_B4_implicit_budget_in_the_document_is_ours_only(doc):
+    for name, e in doc["implicit_budget"].items():
+        assert e["library_column"] is None
+        assert "cycle model" in e["why_no_library"]
+        assert e["cost_grade"] == "design_estimate"
+        assert e["steps_at_budget"] == e["budget_cycles"] // e["cycles_per_step"]
+        for row in e["ladder"]:
+            assert row["analytic_cycles"] == row["n"] * e["cycles_per_step"]
+
+
+@pytest.mark.slow
+def test_B4_matched_explicit_rows_agree_with_validation_axes():
+    """The ours side runs validation_axes's own probes on secondpass's own
+    ladder. Pin that: a benchmark row and the two-axis document's scan of the
+    same method on the same problem select the same step count."""
+    from rk_harness import validation_axes as VA
+    t = classical()["rk4"]
+    targets = (2.0 ** -6, 2.0 ** -10)
+    spec = BC.explicit_spec("rk4", t)
+    rows = BC.explicit_matched_rows(spec, "application", "buck_converter",
+                                    targets, n_max=128, bisect_probes=2)
+    scan = VA._explicit_scan(t, "buck_converter", targets, 128, 2)
+    for r in rows:
+        e = scan["targets"][r["target_key"]]
+        assert r["control_value"] == e["n"]
+        assert r["analytic_cycles_total"] == e["cycles"]
+        assert r["probes"] == e["probes"]
+        if e["n"] is not None:
+            assert r["analytic_cycles_total"] == e["n"] * r["analytic_cycles_per_step"]
+
+
+@pytest.mark.slow
+def test_B4_implicit_rows_price_the_step_from_the_sdirk_estimate():
+    from rk_harness.prototypes import sdirk as SD
+    spec = [s for s in BC.prototype_specs() if s.key == BC.M_SDIRK_ANALYTIC][0]
+    rows = BC.implicit_matched_rows(spec, "application", "enzyme_qssa",
+                                    (2.0 ** -10,), n_max=32, bisect_probes=2)
+    est = SD.estimate_sdirk2_cycles(2, B.COST_MODEL, newton_iters=SD.NEWTON_ITERS,
+                                    fd=False)
+    r = rows[0]
+    assert r["analytic_cycles_per_step"] == est["total"]
+    assert r["cost_grade"] == "design_estimate"
+    assert r["cycle_terms"] == est["terms"]
+    if r["status"] == "reached":
+        assert r["njev"] == r["control_value"]
+        assert r["nlu"] == r["control_value"]
+        assert r["nlinsolve"] == r["control_value"] * SD.STAGES * SD.NEWTON_ITERS
+        assert r["analytic_cycles_total"] == r["control_value"] * est["total"]
+
+
+def test_B4_timing_is_measured_only_where_the_row_selected_something(doc):
+    """Fifteen repeats on every rung of every ladder would be hours. Timing lands
+    on the configuration the tightest reached target selected, and nowhere else."""
+    timed = [r for r in doc["matched_accuracy"] if r["timing"] is not None]
+    assert timed
+    for r in timed:
+        assert r["status"] == "reached" and r["control_value"] is not None
+        assert r["timing"]["n"] == _N_REPEATS
+    for r in doc["matched_accuracy"]:
+        if r["status"] != "reached":
+            assert r["timing"] is None
+    assert "timing_policy" in doc and "family" in doc["timing_policy"]
+
+
+def test_B4_validator_rejects_the_dishonest_shapes(doc):
+    """Every honesty rule that can be checked by machine is checked by machine."""
+    broken = copy.deepcopy(doc)
+    broken["matched_accuracy"].pop()
+    with pytest.raises(ValueError, match="every declared"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    for r in broken["matched_accuracy"]:
+        if r["cost_grade"] == "none":
+            r["analytic_cycles_total"] = 12345
+            break
+    with pytest.raises(ValueError, match="cost_grade none"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    broken["adaptive_pairs"][0]["time_ratio_ours_over_rk23"] = 3.5
+    with pytest.raises(ValueError, match="across two timing families"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    broken["classes"]["adaptive"]["n_rows"]["matched_accuracy_library"] = 0
+    broken["classes"]["adaptive"].pop("library_absent_reason", None)
+    with pytest.raises(ValueError, match="no library row"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    broken["classes"]["implicit"]["n_rows"]["matched_accuracy_ours"] = 0
+    with pytest.raises(ValueError, match="no rows of ours"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    for r in broken["matched_accuracy"]:
+        if r["status"] != "reached":
+            r["reason"] = None
+            break
+    with pytest.raises(ValueError, match="no reason"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    broken["adaptive_pairs"][0]["fevals_ratio_ours_over_rk23"] = 99.0
+    with pytest.raises(ValueError, match="does not match its rows"):
+        B.validate_results(broken)
+
+    broken = copy.deepcopy(doc)
+    del broken["comparability"]
+    with pytest.raises(ValueError, match="comparability"):
+        B.validate_results(broken)
+
+
+def test_B4_three_class_prose_avoids_the_banned_words(doc):
+    banned = re.compile(
+        r"(?<![a-z0-9-])(novel|first|beats|outperforms|breakthrough|proves|"
+        r"state-of-the-art|best-ever)(?![a-z0-9-])")
+    tv = doc["verdicts"]["three_class"]
+    comp = doc["comparability"]
+    texts = [tv["adaptive_pair"], tv["stiff"], tv["cost_grades"], tv["overall"],
+             *tv["per_class"].values(), comp["shared_condition"],
+             comp["not_matched"], comp["ratio_rule"], comp["null_rule"],
+             comp["tolerance_rule_matched"], comp["tolerance_rule_adaptive"],
+             doc["timing_policy"], doc["problem_sets"]["why_two_sets"]]
+    texts.extend(str(v) for v in comp["timing_families"].values())
+    texts.extend(str(v) for v in comp["arithmetic"].values())
+    for block in comp["cost_grades"].values():
+        texts.extend(str(v) for v in block.values())
+    for r in doc["matched_accuracy"][:40]:
+        texts.extend(r["controls_for"] + r["not_controlled"])
+    for text in texts:
+        assert not banned.search(str(text).lower()), text
+        assert "—" not in str(text)
+
+
+def test_B4_full_scope_is_the_default_and_covers_every_application_problem():
+    """The tests run a reduced scope; the document the host writes does not."""
+    import inspect
+    sig = inspect.signature(B.build_results)
+    assert sig.parameters["scope"].default is B.FULL_SCOPE
+    full = B.FULL_SCOPE
+    assert full.resolved_problems() == BC.problem_names("application")
+    assert len(full.resolved_problems()) == 8
+    assert full.targets == BC.TARGETS
+    assert set(full.resolved_budget_problems()) == set(BC.STIFF_NAMES)
+    for name in ("RK23", "RK45", "Radau", "BDF", "LSODA"):
+        assert name in full.library
+    assert any(BC.problem_entry("application", p)["stiff"]
+               for p in full.resolved_problems())
+
+
+def test_B4_problem_sets_registry_names_the_stiff_regime():
+    reg = BC.problem_sets_block()
+    assert reg["frozen"]["scored"] is True
+    assert reg["application"]["scored"] is False
+    assert set(reg["application"]["stiff"]) == set(BC.STIFF_NAMES)
+    for name in BC.STIFF_NAMES:
+        assert reg["application"]["stiffness_ratio"][name] > 200.0
+    # the reason the three-class tables do not run on the frozen set
+    ratios = [v for v in reg["frozen"]["stiffness_ratio"].values() if v is not None]
+    assert max(ratios) < 100.0
+
+
+def test_B4_benchcounts_writes_no_thread_environment():
+    """The reason benchcounts is its own module: importing benchmark exports five
+    BLAS thread variables before numpy loads, which is a process-wide change no
+    counter needs to make. The deterministic half makes none."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import os;"
+         "keys=('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS',"
+         "'NUMEXPR_NUM_THREADS','VECLIB_MAXIMUM_THREADS');"
+         "before=[os.environ.get(k) for k in keys];"
+         "import rk_harness.benchcounts;"
+         "print([os.environ.get(k) for k in keys] == before)"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(Path(__file__).resolve().parents[1]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "True", out.stdout
+
+
+def test_B4_library_rows_degrade_to_a_stated_skip_without_scipy(monkeypatch):
+    """A venv without scipy is a stated skip on every library row, with the
+    coverage of the table unchanged, rather than a missing class."""
+    monkeypatch.setattr(BC, "scipy_available",
+                        lambda: (False, "ImportError: no scipy"))
+    spec = BC.library_specs(("Radau",))[0]
+    rows = BC.library_matched_rows(spec, "application", "buck_converter",
+                                   (2.0 ** -6, 2.0 ** -10))
+    assert len(rows) == 2
+    for r in rows:
+        assert r["status"] == "skipped"
+        assert "scipy unavailable" in r["reason"]
+        assert r["analytic_cycles_total"] is None
+        assert r["achieved_error"] is None
+        assert r["not_controlled"]
