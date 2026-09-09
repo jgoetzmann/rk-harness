@@ -42,6 +42,13 @@ rc_thermal gets worse as the steps get smaller), so a bisection can land on a
 non-minimal n. Every ladder carries ``ladder_monotone`` and every number derived
 from it carries the flag forward.
 
+The ladder itself is not specific to a fixed-step Q15 run and does not live inside
+``cycles_to_tolerance`` any more. ``ladder_scan`` takes a probe, so an adaptive run
+controlled by a tolerance in LSB and an implicit run controlled by a step count read
+on the same axis as an explicit one, with the same rung statuses, the same target
+statuses and the same ``ladder_monotone`` honesty flag. ``cycles_to_tolerance`` is
+the fixed-step Q15 probe plugged into it and returns exactly the bytes it always did.
+
 The artifact is not a legal source for a public-page number. The traceability rule
 lists key_findings.json, validation/results.json, benchmark/results.json and the
 side-track ledger; extending that list is a separate decision.
@@ -366,6 +373,144 @@ def _target_key(target: float) -> str:
     return repr(float(target))
 
 
+def _normalize_targets(target_or_targets) -> list[float]:
+    """One target or many, de-duplicated with the caller's order kept.
+
+    The order is kept rather than sorted because the target keys are written into
+    the document in the order they are asked for, and sorting here would quietly
+    reorder an existing artifact.
+    """
+    if isinstance(target_or_targets, (int, float)):
+        raw = [float(target_or_targets)]
+    else:
+        raw = [float(v) for v in target_or_targets]
+    targets: list[float] = []
+    for v in raw:
+        if v not in targets:
+            targets.append(v)
+    return targets
+
+
+def ladder_scan(probe, target_or_targets, *, unit_ladder=None,
+                n_max: int = N_MAX, bisect_probes: int = BISECT_PROBES,
+                per_unit_cost: int | None = None, bisect: bool = True) -> dict:
+    """The shared work-precision ladder, over any probe that returns a rung status.
+
+    This is the body ``cycles_to_tolerance`` used to carry inline, lifted out so a
+    caller that is not a fixed-step Q15 run can stand on the same axis: an adaptive
+    run controlled by a tolerance in LSB, or an implicit one controlled by a step
+    count, both read the same way as an explicit one.
+
+    ``probe(unit) -> (status, error, max_abs_q)`` with ``status`` in
+    ``RUNG_STATUSES``, ``error`` a float or None, ``max_abs_q`` an int or None. The
+    probe owns its own cache: this function calls it once per rung and once per
+    bisection step, and counts the bisection steps it asked for rather than the
+    ones that reached the integrator, which is what ``probes`` has always meant.
+    Counters a probe wants to keep beside a rung (accepted and rejected steps, for
+    instance) belong in that cache, keyed by the same control value.
+
+    ``unit_ladder`` replaces the power-of-two ladder with an explicit set of
+    control values IN ASCENDING COST ORDER, the cheapest rung leading. That order is
+    the whole contract: the answer is the earliest rung that meets the target, so
+    on a step-count ladder it reads as the smallest n and on a tolerance ladder as
+    the coarsest tolerance. Pass ``bisect=False`` with it when there is nothing
+    between adjacent rungs, as with a tolerance in whole LSB; then ``probes`` comes
+    back 0 because none were taken, rather than as a fiction.
+
+    ``per_unit_cost`` turns a rung into a cycle count. Leave it None when cycles
+    are not the control value times a constant (an adaptive run pays per attempt,
+    and the attempt count is not the tolerance), and every ``cycles`` comes back
+    None for the caller to fill in from its own counters.
+    """
+    targets = _normalize_targets(target_or_targets)
+
+    if unit_ladder is None:
+        units: list = []
+        n = 1
+        while n <= n_max:
+            units.append(n)
+            n *= 2
+        ladder_max: int | None = n_max
+    else:
+        units = list(unit_ladder)
+        if not units:
+            raise ValueError("ladder_scan: unit_ladder must name at least one rung")
+        # n_max did not bound this ladder, so reporting it would misdescribe the run.
+        ladder_max = None
+    if bisect:
+        # Bisection walks the integers between two rungs, so it is only defined on
+        # an ascending integer ladder. A ladder with nothing between its rungs is
+        # exactly what bisect=False is for.
+        if any(not isinstance(u, int) or isinstance(u, bool) for u in units):
+            raise ValueError("ladder_scan: bisect=True needs an integer ladder")
+        if any(a >= b for a, b in zip(units, units[1:])):
+            raise ValueError("ladder_scan: bisect=True needs a strictly ascending ladder")
+
+    ladder: list[dict] = []
+    for u in units:
+        status, err, max_q = probe(u)
+        ladder.append({"n": u, "status": status, "error": err, "max_abs_q": max_q})
+
+    ok_errors = [row["error"] for row in ladder if row["status"] == "ok"]
+    monotone = all(a >= b for a, b in zip(ok_errors, ok_errors[1:]))
+    any_ok = bool(ok_errors)
+    any_overflow = any(row["status"] == "overflow" for row in ladder)
+
+    # No clean rung anywhere means the method never ran, which is a different fact
+    # from running and staying above the target.
+    missed = "never_reached" if any_ok or not any_overflow else "overflow_before_target"
+
+    out_targets: dict[str, dict] = {}
+    for target in targets:
+        hit_at = None
+        for idx, row in enumerate(ladder):
+            if row["status"] == "ok" and row["error"] <= target:
+                hit_at = idx
+                break
+        entry = {
+            "target": target,
+            "n": None,
+            "cycles": None,
+            "status": missed,
+            "probes": 0,
+            "probed": [],
+            "ladder_monotone": monotone,
+        }
+        if hit_at is not None:
+            best = ladder[hit_at]["n"]
+            # The rung below the hit, or 0 when the cheapest rung already met the
+            # target. On the power-of-two ladder that is exactly best // 2, which
+            # is the bracket cycles_to_tolerance has always bisected inside.
+            lo = ladder[hit_at - 1]["n"] if hit_at > 0 else 0
+            probed: list[dict] = []
+            while bisect and best - lo > 1 and len(probed) < bisect_probes:
+                mid = (lo + best) // 2
+                status, err, _ = probe(mid)
+                probed.append({"n": mid, "status": status, "error": err})
+                if status == "ok" and err <= target:
+                    best = mid
+                else:
+                    lo = mid
+            entry.update({
+                "n": best,
+                "cycles": None if per_unit_cost is None else best * per_unit_cost,
+                "status": "reached",
+                "probes": len(probed),
+                "probed": sorted(probed, key=lambda p: p["n"]),
+            })
+        out_targets[_target_key(target)] = entry
+
+    return {
+        "n_max": ladder_max,
+        "bisect_probes": bisect_probes,
+        "bisect": bool(bisect),
+        "per_unit_cost": per_unit_cost,
+        "ladder_monotone": monotone,
+        "ladder": ladder,
+        "targets": out_targets,
+    }
+
+
 def cycles_to_tolerance(t: Tableau, problem: Problem, target_or_targets,
                         n_max: int = N_MAX,
                         bisect_probes: int = BISECT_PROBES) -> dict:
@@ -384,79 +529,25 @@ def cycles_to_tolerance(t: Tableau, problem: Problem, target_or_targets,
     The result is the smallest n on the sampled set, not the smallest n. Q15 error
     can rise with n once quantization dominates, and ``ladder_monotone`` says
     whether it did on the rungs that ran.
+
+    The ladder itself now lives in ``ladder_scan``; what is left here is the
+    fixed-step Q15 probe plugged into it. The keys and the values are what they
+    have always been, so a document built before the split and one built after it
+    are the same bytes.
     """
-    if isinstance(target_or_targets, (int, float)):
-        raw = [float(target_or_targets)]
-    else:
-        raw = [float(v) for v in target_or_targets]
-    targets: list[float] = []
-    for v in raw:
-        if v not in targets:
-            targets.append(v)
-
     cache: dict[int, tuple[str, float | None, int | None]] = {}
-    ladder: list[dict] = []
-    n = 1
-    while n <= n_max:
-        status, err, max_q = _probe(t, problem, n, cache)
-        ladder.append({"n": n, "status": status, "error": err, "max_abs_q": max_q})
-        n *= 2
-
-    ok_errors = [row["error"] for row in ladder if row["status"] == "ok"]
-    monotone = all(a >= b for a, b in zip(ok_errors, ok_errors[1:]))
-    any_ok = bool(ok_errors)
-    any_overflow = any(row["status"] == "overflow" for row in ladder)
     per_step = cycle_count(t, COST_MODEL, problem.n_states)
-
-    # No clean rung anywhere means the method never ran, which is a different fact
-    # from running and staying above the target.
-    missed = "never_reached" if any_ok or not any_overflow else "overflow_before_target"
-
-    out_targets: dict[str, dict] = {}
-    for target in targets:
-        hit = None
-        for row in ladder:
-            if row["status"] == "ok" and row["error"] <= target:
-                hit = row["n"]
-                break
-        entry = {
-            "target": target,
-            "n": None,
-            "cycles": None,
-            "status": missed,
-            "probes": 0,
-            "probed": [],
-            "ladder_monotone": monotone,
-        }
-        if hit is not None:
-            lo = hit // 2                   # 0 when the smallest rung already hit
-            best = hit
-            probed: list[dict] = []
-            while best - lo > 1 and len(probed) < bisect_probes:
-                mid = (lo + best) // 2
-                status, err, _ = _probe(t, problem, mid, cache)
-                probed.append({"n": mid, "status": status, "error": err})
-                if status == "ok" and err <= target:
-                    best = mid
-                else:
-                    lo = mid
-            entry.update({
-                "n": best,
-                "cycles": best * per_step,
-                "status": "reached",
-                "probes": len(probed),
-                "probed": sorted(probed, key=lambda p: p["n"]),
-            })
-        out_targets[_target_key(target)] = entry
-
+    scan = ladder_scan(lambda n: _probe(t, problem, n, cache), target_or_targets,
+                       n_max=n_max, bisect_probes=bisect_probes,
+                       per_unit_cost=per_step)
     return {
         "problem": problem.name,
         "n_max": n_max,
         "bisect_probes": bisect_probes,
         "cycles_per_step": per_step,
-        "ladder_monotone": monotone,
-        "ladder": ladder,
-        "targets": out_targets,
+        "ladder_monotone": scan["ladder_monotone"],
+        "ladder": scan["ladder"],
+        "targets": scan["targets"],
     }
 
 

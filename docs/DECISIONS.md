@@ -826,6 +826,45 @@ beside `VERIFIER_HASH` and is read by nothing that computes it.
 
 ---
 
+## D32 - A paused container may not be killed for the silence the pause caused (2026-09-09)
+
+**Decision.** Stamp `$resumedAt` on every unpause, and suppress the heartbeat-stale kill for one
+staleness window afterwards. Both resume paths, the CPU guard and the battery guard, stamp it.
+
+**What happened, from the watchdog's own log.** 08:11:25Z host CPU 71.99 percent above 70 for
+30 s, docker pause. 08:35:50Z host CPU 16.11 percent below 30 for 30 s, docker unpause.
+08:36:00Z heartbeat stale 1474.8 s, docker kill. Exit 137, not an OOM. The run was down for
+about thirty minutes.
+
+**Why the existing guard did not cover it.** The stale check already skipped while `$isPaused`,
+and there is a startup grace for a container younger than the threshold. Neither covers the ten
+seconds after a resume, when `$isPaused` is correctly false, container uptime is twelve hours,
+and the heartbeat age still carries the whole pause. A paused process is frozen, so it cannot
+have written one. The guard paused the container and then killed it for the silence it had
+itself caused.
+
+**This was reachable because of D20.** The defect is as old as the two guards, but it needs a
+pause longer than `heartbeat_stale_seconds`, and the guard sat near-inert at 97/85/90/88 until
+D20 restored the shipped 70/30/60/40 the day before. D20's measurement was sound as far as it
+went: the baseline really is a median of 25 percent and the guard really does not fire on
+ambient load. What it did not ask was what happens after the guard fires legitimately.
+
+**Why it was diagnosed in one read.** P07 gave the watchdog a log file and `status.py` the
+ability to read it back, landed the previous day. Before that this sequence existed only in a
+minimised console window that `start.ps1` had already replaced, and the evidence would have
+been an exit code and a guess.
+
+**Evidence.** `rk-harness/scripts/watchdog.ps1`: `$resumedAt`, the `$resumeGrace` term in the
+stale check, and the two unpause sites. `watchdog.log` lines 144, 147, 148.
+
+**Consequence.** A resume is followed by one quiet window in which a genuinely dead container
+is not killed. That is the right trade: the stale kill exists for a hung runner, and a hung
+runner stays hung for the next window too.
+
+**Epoch impact.** None. A host script.
+
+---
+
 ## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
 
 **Decision.** `stats.txt` declares a staleness deadline on both paths, not only when a loop wrote

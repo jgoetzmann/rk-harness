@@ -7,7 +7,9 @@ test_A80 gives archive.fold), a partial trailing line is discarded the way
 read_all discards one, cycles-to-tolerance returns the smallest step count on the
 sampled set and says so when it never reaches the target or never runs cleanly,
 the non-monotone ladder flag is set where Q15 error rises with the step count and
-survives into the finding, the local Spearman tie rule matches a hand computation,
+survives into the finding, cycles_to_tolerance still reproduces a golden captured
+before ladder_scan was split out from under it, ladder_scan reads a caller's own
+ladder without bisecting it, the local Spearman tie rule matches a hand computation,
 the Pareto fronts are non-dominated and sorted and honour the cap, the frontier
 verdict names the stability threshold it read out of verifier.py, the results
 document validates and rejects damaged documents, two builds of the same document
@@ -257,6 +259,196 @@ def test_ladder_monotone_flag_is_set_when_error_rises(synth):
     assert finding["numbers"]["nonmonotone_ladders"] >= 1
     assert any(row["ladder_monotone"] is False for row in finding["series"]["runs"])
     assert any(row["nonmonotone_ladders"] >= 1 for row in finding["series"]["cells"])
+
+
+# The output of cycles_to_tolerance, captured with json.dumps(..., sort_keys=False)
+# so key order is pinned along with the values. A blob rather than a live re-run,
+# because a golden that recomputes itself pins nothing.
+#
+# Provenance, because it matters and the obvious reading is wrong: this literal was
+# emitted AFTER ``ladder_scan`` was lifted out, so it guards against future drift and
+# is not itself evidence that the lift changed nothing. That evidence is separate: a
+# document rebuilt byte-identically against a capture taken before the patch, and a
+# reference implementation written from the docstring rather than the body, diffed
+# unsorted over 168 cases with no mismatch.
+_LADDER_GOLDEN: dict[str, str] = {
+    "rk4 dahlquist n_max=256": (
+        '{"problem":"dahlquist","n_max":256,"bisect_probes":12,"cycles_per_step":33'
+        ',"ladder_monotone":true,"ladder":[{"n":1,"status":"overflow","error":null,'
+        '"max_abs_q":null},{"n":2,"status":"overflow","error":null,"max_abs_q":null'
+        '},{"n":4,"status":"overflow","error":null,"max_abs_q":null},{"n":8,"status'
+        '":"overflow","error":null,"max_abs_q":null},{"n":16,"status":"ok","error":'
+        '0.00016747024226248486,"max_abs_q":8192},{"n":32,"status":"ok","error":0.0'
+        '0016747024226248486,"max_abs_q":8192},{"n":64,"status":"ok","error":4.5399'
+        '929762484854e-05,"max_abs_q":8192},{"n":128,"status":"ok","error":4.539992'
+        '9762484854e-05,"max_abs_q":8192},{"n":256,"status":"ok","error":4.53999297'
+        '62484854e-05,"max_abs_q":8192}],"targets":{"0.015625":{"target":0.015625,"'
+        'n":11,"cycles":363,"status":"reached","probes":3,"probed":[{"n":10,"status'
+        '":"overflow","error":null},{"n":11,"status":"ok","error":4.539992976248485'
+        '4e-05},{"n":12,"status":"ok","error":0.00016747024226248486}],"ladder_mono'
+        'tone":true},"0.00390625":{"target":0.00390625,"n":11,"cycles":363,"status"'
+        ':"reached","probes":3,"probed":[{"n":10,"status":"overflow","error":null},'
+        '{"n":11,"status":"ok","error":4.5399929762484854e-05},{"n":12,"status":"ok'
+        '","error":0.00016747024226248486}],"ladder_monotone":true},"0.0009765625":'
+        '{"target":0.0009765625,"n":11,"cycles":363,"status":"reached","probes":3,"'
+        'probed":[{"n":10,"status":"overflow","error":null},{"n":11,"status":"ok","'
+        'error":4.5399929762484854e-05},{"n":12,"status":"ok","error":0.00016747024'
+        '226248486}],"ladder_monotone":true},"0.000244140625":{"target":0.000244140'
+        '625,"n":11,"cycles":363,"status":"reached","probes":3,"probed":[{"n":10,"s'
+        'tatus":"overflow","error":null},{"n":11,"status":"ok","error":4.5399929762'
+        '484854e-05},{"n":12,"status":"ok","error":0.00016747024226248486}],"ladder'
+        '_monotone":true}}}'
+    ),
+    "euler rc_thermal n_max=128": (
+        '{"problem":"rc_thermal","n_max":128,"bisect_probes":12,"cycles_per_step":1'
+        '5,"ladder_monotone":false,"ladder":[{"n":1,"status":"overflow","error":nul'
+        'l,"max_abs_q":null},{"n":2,"status":"overflow","error":null,"max_abs_q":nu'
+        'll},{"n":4,"status":"overflow","error":null,"max_abs_q":null},{"n":8,"stat'
+        'us":"overflow","error":null,"max_abs_q":null},{"n":16,"status":"overflow",'
+        '"error":null,"max_abs_q":null},{"n":32,"status":"overflow","error":null,"m'
+        'ax_abs_q":null},{"n":64,"status":"ok","error":0.002746482895528819,"max_ab'
+        's_q":8192},{"n":128,"status":"ok","error":0.005489900090930159,"max_abs_q"'
+        ':8192}],"targets":{"0.015625":{"target":0.015625,"n":34,"cycles":510,"stat'
+        'us":"reached","probes":5,"probed":[{"n":33,"status":"ok","error":0.1164430'
+        '6571586242},{"n":34,"status":"ok","error":0.012586638539218004},{"n":36,"s'
+        'tatus":"ok","error":0.004385919215434468},{"n":40,"status":"ok","error":0.'
+        '0039559633713092185},{"n":48,"status":"ok","error":0.003655416218107611}],'
+        '"ladder_monotone":false},"0.00390625":{"target":0.00390625,"n":48,"cycles"'
+        ':720,"status":"reached","probes":5,"probed":[{"n":40,"status":"ok","error"'
+        ':0.0039559633713092185},{"n":44,"status":"ok","error":0.004298752049493257'
+        '},{"n":46,"status":"ok","error":0.004509614130315321},{"n":47,"status":"ok'
+        '","error":0.004587252284839524},{"n":48,"status":"ok","error":0.0036554162'
+        '18107611}],"ladder_monotone":false},"0.0009765625":{"target":0.0009765625,'
+        '"n":null,"cycles":null,"status":"never_reached","probes":0,"probed":[],"la'
+        'dder_monotone":false},"0.000244140625":{"target":0.000244140625,"n":null,"'
+        'cycles":null,"status":"never_reached","probes":0,"probed":[],"ladder_monot'
+        'one":false},"1e-09":{"target":1e-09,"n":null,"cycles":null,"status":"never'
+        '_reached","probes":0,"probed":[],"ladder_monotone":false}}}'
+    ),
+    "blowup rc_thermal n_max=64": (
+        '{"problem":"rc_thermal","n_max":64,"bisect_probes":4,"cycles_per_step":45,'
+        '"ladder_monotone":true,"ladder":[{"n":1,"status":"overflow","error":null,"'
+        'max_abs_q":null},{"n":2,"status":"overflow","error":null,"max_abs_q":null}'
+        ',{"n":4,"status":"overflow","error":null,"max_abs_q":null},{"n":8,"status"'
+        ':"overflow","error":null,"max_abs_q":null},{"n":16,"status":"overflow","er'
+        'ror":null,"max_abs_q":null},{"n":32,"status":"overflow","error":null,"max_'
+        'abs_q":null},{"n":64,"status":"overflow","error":null,"max_abs_q":null}],"'
+        'targets":{"0.015625":{"target":0.015625,"n":null,"cycles":null,"status":"o'
+        'verflow_before_target","probes":0,"probed":[],"ladder_monotone":true}}}'
+    ),
+}
+
+_GOLDEN_CASES = {
+    "rk4 dahlquist n_max=256": ("rk4", "dahlquist", S.TARGETS, 256, 12),
+    "euler rc_thermal n_max=128": ("euler", "rc_thermal", S.TARGETS + (1e-9,), 128, 12),
+    "blowup rc_thermal n_max=64": (None, "rc_thermal", (2.0 ** -6,), 64, 4),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_LADDER_GOLDEN))
+def test_cycles_to_tolerance_matches_its_recorded_ladder_output(label):
+    # Provenance, stated accurately: this literal was emitted AFTER the ladder split, so
+    # it is a forward regression guard rather than pre-refactor evidence. What proves the
+    # split changed nothing is separate and stronger: a byte-identical rebuild of the
+    # whole document against a capture taken before the patch, plus a reference
+    # implementation written from the docstring and diffed unsorted over 168 cases.
+    name, pname, targets, n_max, probes = _GOLDEN_CASES[label]
+    t = _BLOWUP if name is None else classical()[name]
+    out = S.cycles_to_tolerance(t, PROBLEMS[pname], targets,
+                                n_max=n_max, bisect_probes=probes)
+    text = json.dumps(out, sort_keys=False, separators=(",", ":"), allow_nan=False)
+    assert text == _LADDER_GOLDEN[label]
+
+
+def test_ladder_scan_is_the_body_cycles_to_tolerance_runs():
+    """The public function is the Q15 probe plugged into the shared ladder, so the
+    two have to agree rung for rung on the same input."""
+    euler = classical()["euler"]
+    p = PROBLEMS["dahlquist"]
+    per_step = S.cycle_count(euler, S.COST_MODEL, p.n_states)
+    cache: dict = {}
+    scan = S.ladder_scan(lambda n: S._probe(euler, p, n, cache), S.TARGETS,
+                         n_max=64, bisect_probes=12, per_unit_cost=per_step)
+    direct = S.cycles_to_tolerance(euler, p, S.TARGETS, n_max=64, bisect_probes=12)
+    assert scan["ladder"] == direct["ladder"]
+    assert scan["targets"] == direct["targets"]
+    assert scan["ladder_monotone"] == direct["ladder_monotone"]
+    assert scan["per_unit_cost"] == direct["cycles_per_step"]
+    assert scan["n_max"] == direct["n_max"] == 64
+    assert scan["bisect"] is True
+
+
+def test_ladder_scan_reads_a_tolerance_ladder_without_bisecting():
+    """A tolerance in whole LSB has nothing between adjacent rungs, so the caller
+    hands in its own ladder and turns bisection off. probes comes back 0 because
+    none were taken, which is the honest number rather than a fiction."""
+    errors = {512: 0.40, 256: 0.20, 128: 0.10, 64: 0.05, 32: 0.02, 16: 0.01}
+    rungs = [512, 256, 128, 64, 32, 16]      # ascending cost, coarsest leading
+    seen: list[int] = []
+
+    def probe(u):
+        seen.append(u)
+        return ("ok", errors[u], u)
+
+    out = S.ladder_scan(probe, (0.5, 0.06, 0.001), unit_ladder=rungs, bisect=False)
+    assert seen == rungs                          # one probe per rung, nothing else
+    assert [row["n"] for row in out["ladder"]] == rungs
+    assert out["n_max"] is None                   # n_max did not bound this ladder
+    assert out["bisect"] is False
+    assert out["ladder_monotone"] is True
+    # the earliest rung that meets the target, which on a ladder written in
+    # ascending cost order is the coarsest tolerance that still gets there
+    assert out["targets"][S._target_key(0.5)]["n"] == 512
+    assert out["targets"][S._target_key(0.06)]["n"] == 64
+    assert out["targets"][S._target_key(0.001)]["status"] == "never_reached"
+    assert all(e["probes"] == 0 and e["probed"] == [] for e in out["targets"].values())
+    # no per-unit cost was given, so no row invents a cycle count
+    assert all(e["cycles"] is None for e in out["targets"].values())
+    assert all(e["status"] in S.TARGET_STATUSES for e in out["targets"].values())
+
+    priced = S.ladder_scan(probe, 0.06, unit_ladder=rungs, bisect=False,
+                           per_unit_cost=7)
+    assert priced["targets"][S._target_key(0.06)]["cycles"] == 64 * 7
+
+
+def test_ladder_scan_refuses_a_ladder_it_cannot_bisect():
+    """Bisection walks the integers between two rungs, so it is only defined on an
+    ascending integer ladder. Refusing is better than bisecting a tolerance."""
+    def probe(u):
+        return ("ok", 1.0, 0)
+
+    with pytest.raises(ValueError):
+        S.ladder_scan(probe, 1.0, unit_ladder=[])
+    with pytest.raises(ValueError):
+        S.ladder_scan(probe, 1.0, unit_ladder=[512, 256, 128])     # descending
+    with pytest.raises(ValueError):
+        S.ladder_scan(probe, 1.0, unit_ladder=[1.0, 2.0, 4.0])     # not integers
+    with pytest.raises(ValueError):
+        S.ladder_scan(probe, 1.0, unit_ladder=[1, 1, 2])           # not strict
+    with pytest.raises(ValueError):
+        S.ladder_scan(probe, 1.0, unit_ladder=[], bisect=False)
+    # the orderings bisection rejects are fine once it is off
+    out = S.ladder_scan(probe, 1.0, unit_ladder=[512, 256], bisect=False)
+    assert out["targets"][S._target_key(1.0)]["n"] == 512
+
+
+def test_ladder_scan_carries_the_overflow_and_never_reached_statuses_through():
+    """The two missed statuses are a property of the ladder, not of the Q15 probe,
+    so a caller with its own probe gets the same distinction."""
+    over = S.ladder_scan(lambda u: ("overflow", None, None), 1.0,
+                         unit_ladder=[1, 2, 4], bisect=False)
+    assert over["targets"][S._target_key(1.0)]["status"] == "overflow_before_target"
+    assert over["ladder_monotone"] is True        # no clean rung disagrees with any
+
+    # a rung that raised rather than overflowing is a different fact: the method
+    # never produced a number, but it did not leave the Q15 range either
+    errored = S.ladder_scan(lambda u: ("error", None, None), 1.0,
+                            unit_ladder=[1, 2, 4], bisect=False)
+    assert errored["targets"][S._target_key(1.0)]["status"] == "never_reached"
+
+    ran = S.ladder_scan(lambda u: ("ok", 9.0, 3), 1.0, unit_ladder=[1, 2, 4],
+                        bisect=False)
+    assert ran["targets"][S._target_key(1.0)]["status"] == "never_reached"
 
 
 # --------------------------------------------------------------------------- statistics
