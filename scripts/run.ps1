@@ -25,6 +25,7 @@ param(
     [string]$SidetrackTracks = "both",
     [string]$LaneSchedule = "E",
     [int]$LaneMaxSeconds = 180,
+    [int]$LaneMaxCandidates = 0,
     [int]$EnumPerCycle = 500,
     [string]$SearchPolicy = "empty",
     [int]$PolicyBlockCycles = 100,
@@ -88,6 +89,7 @@ $envFlags = @(
     "-e", "RK_SIDETRACK_TRACKS=$SidetrackTracks",
     "-e", "RK_LANE_SCHEDULE=$LaneSchedule",
     "-e", "RK_LANE_MAX_SECONDS=$LaneMaxSeconds",
+    "-e", "RK_LANE_MAX_CANDIDATES=$LaneMaxCandidates",
     "-e", "RK_ENUM_PER_CYCLE=$EnumPerCycle",
     "-e", "RK_SEARCH_POLICY=$SearchPolicy",
     "-e", "RK_POLICY_BLOCK_CYCLES=$PolicyBlockCycles",
@@ -102,7 +104,7 @@ $scratch = "/scratch:size={0}g" -f $ScratchGB
 Write-Host "resources: cpus=$Cpus memory=$mem pids-limit=$PidsLimit cpu-shares=$CpuShares tmpfs=$scratch"
 Write-Host "limits: max_minutes=$MaxMinutes max_cycles=$MaxCycles eval_budget=$EvalBudget enum_per_cycle=$EnumPerCycle llm_every=$LlmEveryCycles cycles codex_cap=$CodexUsageCap%"
 Write-Host "search policy: $SearchPolicy (rotate blocks every $PolicyBlockCycles cycles; empty = the shipped behaviour)"
-Write-Host "lanes: schedule=$LaneSchedule budget=${LaneMaxSeconds}s $(if ($LaneSchedule -eq "E") { "(every cycle explicit, the shipped behaviour)" } else { "(the rotation is ARMED)" })"
+Write-Host "lanes: schedule=$LaneSchedule budget=${LaneMaxSeconds}s candidates=$(if ($LaneMaxCandidates -gt 0) { "$LaneMaxCandidates max" } else { "uncapped, the budget binds" }) $(if ($LaneSchedule -eq "E") { "(every cycle explicit, the shipped behaviour)" } else { "(the rotation is ARMED)" })"
 Write-Host "side tracks: every=$(if ($SidetrackEvery -gt 0) { "$SidetrackEvery cycles" } else { "off" }) budget=${SidetrackMaxSeconds}s tracks=$SidetrackTracks"
 
 # on-failure: a wrongful kill (nonzero exit) self-heals; a graceful STOP exit (0) or an explicit

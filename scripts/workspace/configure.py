@@ -47,6 +47,8 @@ SCHEMA: dict[str, tuple] = {
                                    "which method class each cycle searches, one letter per cycle, repeating: E explicit, A adaptive, I implicit. 'E' is one explicit search every cycle, which is what the run has always done. 'EAI' gives the three classes equal turns. Rejected whole if it holds any other letter, because a typo must not silently become a schedule"),
     "run.lane_max_seconds":       (180, int, (30, 420), "container",
                                    "budget for one adaptive or implicit lane cycle; it gates starting a candidate, so a cycle can overrun by the length of the one already running. Clamped rather than rejected: a budget cannot arm anything, the schedule is what arms"),
+    "run.lane_max_candidates":    (0, int, (0, 100000), "container",
+                                   "how many candidates one adaptive or implicit lane cycle may start; 0 means no cap and run.lane_max_seconds is the only bound. A positive value binds ahead of the budget, which is what kept the adaptive lane to 16 s of a 180 s budget before this key existed. It also bounds how fast the lane archive grows: a lane record is about 18 KB of jsonl on disk"),
     "run.enum_per_cycle":         (500, int, (1, 100000), "container", "enumerated candidates verified per cycle (phases 0-1)"),
     "run.auto_stop_minutes":      (0, int, (0, 1000000), "container", "stop the runner after this many minutes of wall clock (0 = never); it exits at the next cycle boundary"),
     "run.auto_stop_cycles":       (0, int, (0, 1000000), "container", "stop the runner after this many cycles in this process (0 = never)"),

@@ -416,9 +416,8 @@ _MEASURED_NOT_INTENDED = (
     "split is never substituted for a measurement")
 
 _NOT_A_PAGE_SOURCE = (
-    "the traceability rule lists key_findings.json, validation/results.json, "
-    "benchmark/results.json and the side-track ledger; this artifact is not on that "
-    "list")
+    "the traceability rule lists key_findings.json, validation/results.json, benchmark/results.json, the side-track ledger with its artifacts, and each lane's elites.json; this artifact is "
+    "not on that list, and the lane split it records is internal by CLAUDE.md rule 10")
 
 
 def _empty_lane() -> dict:

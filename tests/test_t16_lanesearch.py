@@ -476,7 +476,8 @@ def test_a_record_says_in_a_field_what_it_is_not(lane):
     rec = _one(lane)
     for word in ("not comparable", "rk-work/archive/", "float64", "verifier.py"):
         assert word in rec["not_comparable"]
-    assert "not on that list" in rec["not_a_page_source"]
+    assert "elites.json" in rec["not_a_page_source"]
+    assert "not the per-day records" in rec["not_a_page_source"]
     assert rec["cost_basis"] in LS.COST_BASES
 
 
@@ -601,11 +602,24 @@ _LANE_DRIVERS = {"runner.py": _LANE_READERS | {"step"}}
 _LANE_CALLERS = {**_LANE_VIEWERS, **_LANE_DRIVERS}
 
 
-def test_only_the_cycle_loop_runs_the_lane_search():
-    """Who may call this module, and which of its functions.
+# An import is what grants access, so an import is what the gate keys on. A bare
+# substring is not: `lanesearch_code_hash` is a field name that travels in the elites
+# document's _meta, so a page that renders that document says the word without being
+# able to reach the module. Keying on the substring made sitegen.py look like a caller
+# for quoting a key name.
+_IMPORT_RE = re.compile(
+    r"from\s+rk_harness\s+import\s+(?:[^\n]*,\s*)?lanesearch\b"
+    r"|from\s+rk_harness\.lanesearch\s+import\b"
+    r"|import\s+rk_harness\.lanesearch\b")
 
-    Before B9 nothing in the package could name it. Now the runner drives it and the
-    watcher reports it, and every other module in the package still cannot mention it.
+
+def test_only_the_cycle_loop_runs_the_lane_search():
+    """Who may reach this module, and which of its functions they may call.
+
+    A file counts as reaching it if it imports it or names one of its functions. Saying
+    the word in a string does not count, and that distinction is the point: the elites
+    document carries a `lanesearch_code_hash` field, so any page that renders it quotes
+    the name while having no way to call anything.
     """
     pkg = HARNESS_DIR / "rk_harness"
     used: dict[str, set[str]] = {}
@@ -613,16 +627,40 @@ def test_only_the_cycle_loop_runs_the_lane_search():
         if path.name == "lanesearch.py":
             continue
         text = path.read_text(encoding="utf-8")
-        if "lanesearch" not in text:
+        calls = set(re.findall(r"lanesearch\.(\w+)", text))
+        if not calls and not _IMPORT_RE.search(text):
             continue
-        used[path.name] = set(re.findall(r"lanesearch\.(\w+)", text))
+        used[path.name] = calls
 
     unexpected = sorted(set(used) - set(_LANE_CALLERS))
-    assert unexpected == [], f"lanesearch is referenced by {unexpected}"
+    assert unexpected == [], f"lanesearch is reached by {unexpected}"
 
     for name in sorted(used):
         beyond = sorted(used[name] - _LANE_CALLERS[name])
         assert beyond == [], f"{name} calls {beyond}, which is past what it is allowed"
+
+
+def test_every_caller_reaches_the_module_by_its_qualified_name():
+    """`from rk_harness.lanesearch import step` would leave a bare `step(...)` in a file
+    and the call scan above would see nothing. Nobody writes it that way today; this
+    keeps it so, because the qualified name is what makes the call surface visible to
+    the gate at all.
+    """
+    pkg = HARNESS_DIR / "rk_harness"
+    for path in sorted(pkg.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        assert "from rk_harness.lanesearch import" not in text, path.name
+
+
+def test_naming_the_module_in_a_string_is_not_reaching_it():
+    """The regression that produced this shape. sitegen renders the elites document and
+    so contains the field name, and it must not be a caller for that."""
+    field = "lanesearch" + "_code_hash"
+    assert not _IMPORT_RE.search(f'meta.get("{field}")')
+    assert re.findall(r"lanesearch\.(\w+)", f'meta.get("{field}")') == []
+    assert _IMPORT_RE.search("from rk_harness import lanesearch")
+    assert _IMPORT_RE.search("from rk_harness import sidetrack, lanesearch")
+    assert _IMPORT_RE.search("import rk_harness.lanesearch")
 
 
 def test_a_viewer_may_not_run_a_search_even_now_that_the_runner_can():

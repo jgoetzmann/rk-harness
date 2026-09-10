@@ -36,6 +36,7 @@ def _env(monkeypatch, tmp_path, schedule=None):
     monkeypatch.setenv("RK_LLM", "off")
     monkeypatch.setenv("RK_CLOCK", CLOCK)
     monkeypatch.delenv("RK_GIT_COMMIT", raising=False)
+    monkeypatch.delenv("RK_LANE_MAX_CANDIDATES", raising=False)
     if schedule is None:
         monkeypatch.delenv("RK_LANE_SCHEDULE", raising=False)
     else:
@@ -111,8 +112,10 @@ def test_thirds_give_the_three_classes_equal_turns(monkeypatch, tmp_path):
 def _stub_step(monkeypatch, records=2, raises=None, capture=None):
     def fake_step(lane, seed=0, budget_seconds=0.0, cycle=0, **kw):
         if capture is not None:
+            # max_candidates is read out of kw rather than named in the signature, so a
+            # call that stopped passing it records None instead of a default that hides it.
             capture.append({"lane": lane, "seed": seed, "budget": budget_seconds,
-                            "cycle": cycle})
+                            "cycle": cycle, "max_candidates": kw.get("max_candidates")})
         if raises is not None:
             raise raises
         return [{"lane": lane, "index": i} for i in range(records)]
@@ -125,7 +128,8 @@ def test_a_lane_cycle_measures_its_lane_and_appends_nothing_scored(monkeypatch, 
     _stub_step(monkeypatch, records=3, capture=seen)
     out = runner._run_lane_cycle(_state(), 11, _arch(), "adaptive", "EAI", 0.0)
     assert seen == [{"lane": "adaptive", "seed": 11, "budget": lanes.lane_max_seconds(),
-                     "cycle": 11}]
+                     "cycle": 11,
+                     "max_candidates": runner.LANE_UNCAPPED_CANDIDATES}]
     assert out.cycle_id == 11
     assert not (work / "archive").exists(), "a lane cycle wrote to the scored archive"
     done = [e for e in _events(work) if e["kind"] == "cycle_done"]
@@ -174,6 +178,74 @@ def test_the_lane_budget_comes_from_config_and_is_clamped(monkeypatch, tmp_path)
     assert runner._lane_budget_seconds() == lanes.LANE_MAX_SECONDS_CEILING
     monkeypatch.setenv("RK_LANE_MAX_SECONDS", "rubbish")
     assert runner._lane_budget_seconds() == lanes.LANE_MAX_SECONDS_DEFAULT
+
+
+# --------------------------------------------------------------------------- what bounds a cycle
+#
+# The budget is meant to be the bound. It was not: lanesearch.step's own default of 32
+# candidates bound first, so over 200 measured cycles the adaptive lane spent 15.6 s of
+# the 180 s it was given and handed the rest back. These pin the argument that fixes it.
+
+def test_the_shipped_cap_is_no_cap_and_the_budget_is_what_bounds(monkeypatch, tmp_path):
+    """0 is the default and means the clock decides. It still puts a number in the call,
+    so a candidate that somehow cost no time could not spin, and that number is far above
+    anything a bounded cycle can reach: the ceiling budget over the cheapest measured
+    candidate, 420 s / 0.49 s for an adaptive one, is under 900."""
+    _env(monkeypatch, tmp_path, schedule="EAI")
+    assert runner._lane_max_candidates() == runner.LANE_UNCAPPED_CANDIDATES
+    monkeypatch.setenv("RK_LANE_MAX_CANDIDATES", "0")
+    assert runner._lane_max_candidates() == runner.LANE_UNCAPPED_CANDIDATES
+    assert runner.LANE_UNCAPPED_CANDIDATES > 100 * (lanes.LANE_MAX_SECONDS_CEILING / 0.49)
+
+
+def test_a_positive_cap_is_passed_through_as_given(monkeypatch, tmp_path):
+    """The key stays useful for holding a lane down deliberately, so a set value is
+    neither clamped up to the uncapped number nor rounded."""
+    _env(monkeypatch, tmp_path, schedule="EAI")
+    for raw, want in (("1", 1), ("8", 8), ("32", 32), ("4000", 4000)):
+        monkeypatch.setenv("RK_LANE_MAX_CANDIDATES", raw)
+        assert runner._lane_max_candidates() == want
+
+
+def test_an_unreadable_cap_falls_back_rather_than_raising(monkeypatch, tmp_path):
+    """A cap cannot arm anything on its own, following lanes.lane_max_seconds: an
+    unreadable one means 'let the budget bind', never 'end the cycle'. The schedule is
+    the thing that arms and that one is rejected whole."""
+    _env(monkeypatch, tmp_path, schedule="EAI")
+    for raw in ("rubbish", "-1", "-32", "32.7", "", "  "):
+        monkeypatch.setenv("RK_LANE_MAX_CANDIDATES", raw)
+        assert runner._lane_max_candidates() == runner.LANE_UNCAPPED_CANDIDATES, raw
+
+
+def test_the_cap_reaches_lanesearch_step(monkeypatch, tmp_path):
+    """The failure this replaces was invisible one level up: the runner read no cap and
+    passed none, so lanesearch.step's own default decided how long a lane cycle ran."""
+    _env(monkeypatch, tmp_path, schedule="EAI")
+    seen = []
+    _stub_step(monkeypatch, capture=seen)
+    runner._run_lane_cycle(_state(), 11, _arch(), "implicit", "EAI", 0.0)
+    assert seen[-1]["max_candidates"] == runner.LANE_UNCAPPED_CANDIDATES
+
+    monkeypatch.setenv("RK_LANE_MAX_CANDIDATES", "5")
+    runner._run_lane_cycle(_state(), 12, _arch(), "implicit", "EAI", 0.0)
+    assert seen[-1]["max_candidates"] == 5
+    assert seen[-1]["budget"] == lanes.lane_max_seconds()
+
+
+def test_an_uncapped_lane_cycle_still_appends_nothing_scored(monkeypatch, tmp_path):
+    """More candidates per cycle changes how much the lane's own archive gets and
+    nothing else. A lane record is not a cell, however many of them a cycle measures."""
+    work = _env(monkeypatch, tmp_path, schedule="EAI")
+    seen = []
+    _stub_step(monkeypatch, records=40, capture=seen)
+    out = runner._run_lane_cycle(_state(stall_counter=7), 11, _arch(), "adaptive", "EAI", 0.0)
+    assert seen[-1]["max_candidates"] == runner.LANE_UNCAPPED_CANDIDATES
+    assert out.stall_counter == 7
+    assert not (work / "archive").exists(), "a lane cycle wrote to the scored archive"
+    done = [e for e in _events(work) if e["kind"] == "cycle_done"]
+    assert len(done) == 1
+    assert done[0]["lane_records"] == 40 and done[0]["accepted"] == 0
+    assert done[0]["stall_counter"] == 7 and done[0]["improved"] is False
 
 
 # --------------------------------------------------------------------------- the cycle log

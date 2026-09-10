@@ -1,5 +1,6 @@
 """Open-ended search for the adaptive and implicit lanes, into parallel UNPINNED
-archives. New module; nothing pinned is modified and nothing calls this yet.
+archives. Nothing pinned is modified; ``runner._run_lane_cycle`` calls ``step``
+once per adaptive or implicit cycle, under the lane time budget (D37, D38).
 
 WHY IT EXISTS. The explicit search has CMA-ES: a continuous space that never runs
 out, so a cycle can hand it any budget and get work back. The adaptive and
@@ -80,15 +81,25 @@ deliberately NOT added to ``sidetrack.SIDETRACK_FILES``: doing so would move
 either file is edited, for no reason at all.
 
 COST, measured on this host at the default work caps over all eight problems and
-all four targets: 0.54 s per adaptive candidate and 2.06 s per implicit candidate,
-once the reference solutions are warm. Warming them costs about 38 s in a fresh
+all four targets: 0.49 s per adaptive candidate and 1.77 s per implicit candidate,
+once the reference solutions are warm. Those are the figures the live run produced
+over its first 200 armed cycles and they replace the 0.54 and 2.06 measured in a
+fresh process before the lanes were wired; runner._lane_budget_seconds is set from
+them (D41). Warming them costs about 38 s in a fresh
 process, paid once by ``functools.lru_cache`` inside validation, and it is the
 dominant cost of a short firing.
 
-NOT A PUBLIC-PAGE SOURCE. The traceability rule lists key_findings.json,
-validation/results.json, benchmark/results.json and the side-track ledger with its
-artifacts. Neither lane archive is on that list. Adding one is a decision for the
-owner and not a side effect of this module.
+WHAT MAY BE PUBLISHED, and it is one file per lane. The traceability rule admits
+``rk-work/{lane}_archive/elites.json`` (D40). That document is capped at 32 entries,
+ranked by a total order that reads no clock, validated against ``lane-elites/1``, and
+it carries the ``rule`` it ranked by and a ``statement`` of what it ranked and over
+what. The per-day record files are NOT admitted and stay off, nor is
+``rk-work/validation/axes.json`` (D39): a daily file is a search log, and its
+per-candidate rows sit at the grain of a scored archive record while meaning
+something else, which is the comparison the section above exists to prevent.
+A number quoted out of an elites document is rendered with its metric
+(cycles-to-tolerance on the axis-T ladder), its arithmetic (float64) and the fact
+that nothing here is order-verified against the pinned checker.
 """
 from __future__ import annotations
 
@@ -168,9 +179,10 @@ NOT_COMPARABLE = (
     "here passes through verifier.py or holds an archive cell")
 
 NOT_A_PAGE_SOURCE = (
-    "the traceability rule lists key_findings.json, validation/results.json, "
-    "benchmark/results.json and the side-track ledger with its artifacts; this "
-    "archive is not on that list")
+    "the traceability rule admits this lane's elites.json and not the per-day records "
+    "behind it; nothing here is scored, order-verified, Q15 or comparable with a record "
+    "in rk-work/archive/, so a number quoted from the elites document is rendered with "
+    "its cycles-to-tolerance metric and its float64 arithmetic")
 
 # Cost bases, LOCAL to this module. validation_axes.COST_BASES names the four grades
 # that document uses; the adaptive lane needs a fifth, because its cycle number

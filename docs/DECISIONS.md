@@ -1077,7 +1077,7 @@ hub card each, with explicit leading, which is the structural claim. The time bu
 
 **What the lane archives may say on a page, which is still only that they exist.**
 `lanesearch`'s own records carry `NOT_A_PAGE_SOURCE`, and the traceability list in CLAUDE.md
-rule 11 does not name them. Arming does not change that: the class pages will flip their presence
+the traceability list in CLAUDE.md does not name them. Arming does not change that: the class pages will flip their presence
 line from "not written yet" to written, and will quote no number out of either archive. Whether
 `rk-work/validation/axes.json` joins the list is a separate question and still the owner's,
 because it is the one that would let a lane's PERFORMANCE be published.
@@ -1092,6 +1092,110 @@ a lane wrote is in the scored archive, so reverting loses no scored work and inv
 
 **Epoch impact.** None. This is where the run spends its time, not what it considers correct.
 `VERIFIER_HASH` is untouched and every archived score keeps its meaning.
+
+---
+
+## D39 - rk-work/validation/axes.json stays off the traceability list (2026-09-10)
+
+**Decision.** `rk-work/validation/axes.json` is not a permitted source for a number on a public
+page and stays off. This answers the question `docs/THIRDS-2026-09-09.md` section 5 left with the
+owner rather than deferring it again.
+
+**Why.** `rk-work/benchmark/results.json` already carries a matched-ACCURACY comparison across all
+three classes on the same eight application problems. It fixes the achieved error and reports the
+work each side spent to reach it, stating per row what it controls for and what it does not. That
+document is on the list already and its numbers are published already. Axis T asks the same
+question in a different shape, cycles to reach a tolerance rather than work at a fixed achieved
+error. Admitting a second source for a claim the site can already make lengthens a list whose
+value is its shortness: a reader checking a published number has to hold the whole list in their
+head, and every entry costs everyone who reads one.
+
+**The alternative this rejects.** "Admit it, the machinery is written." The loader, the presence
+panel and the glossary entries for axis T are in place, so admission looks free. It is not.
+Admitting the document means writing it, and its writer, `validation_axes.py`, sits inside
+`LANESEARCH_FILES`. Editing that file moves `lanesearch.code_hash()` and re-opens every measured
+lane candidate, which is a real bill for a document that has no rows in the work directory today.
+
+**Evidence.** `rk_harness/benchmark.py:45-58`, the three-class sections and their shared
+condition; `rk-work/benchmark/results.json`, key `matched_accuracy`;
+`rk_harness/lanesearch.py:141`, `validation_axes.py` inside `LANESEARCH_FILES`;
+`docs/THIRDS-2026-09-09.md:104-110`, the question as it was left; `rk-work/validation/` holds
+`results.json` and no `axes.json`.
+
+**Consequence.** The adaptive and implicit class pages carry ledger readings, the class definition
+and, under D40, ranked elites. No page states an axis-T number sourced from `axes.json`.
+`validation_axes.py` stays what it is, the cost model and the implicit probe that `lanesearch`
+measures through, rather than the writer of a published document.
+
+**What would reopen this.** A claim matched accuracy cannot support. Matched accuracy compares at
+an error every side reached, so a tolerance that one class reaches and another cannot has no
+matched row, and a question about that tolerance needs axis T. If such a claim is worth
+publishing, this entry is revisited and `axes.json` is where the number comes from.
+
+**Closes.** `docs/THIRDS-2026-09-09.md` section 5, owner question 1, answered as no.
+
+**Epoch impact.** None. No scored record is read or written, no digest moves, and `VERIFIER_HASH`
+is untouched. This decides what may be published, not what is measured.
+
+---
+
+## D40 - The lane elites documents join the traceability list, the per-day records do not (2026-09-10)
+
+**Decision.** `rk-work/adaptive_archive/elites.json` and `rk-work/implicit_archive/elites.json`
+are permitted sources for a number on a public page. `rk-work/{lane}_archive/YYYY-MM-DD.jsonl`
+stays off. A number taken from an elites document is rendered with its metric
+(cycles-to-tolerance on the axis-T ladder), its arithmetic (float64) and the fact that nothing in
+it is order-verified against the pinned checker, the way a side-track number carries its job's own
+`arithmetic` string (D24).
+
+**Why the elites and not the records behind them.** The elites document is bounded at
+`ELITE_CAP = 32`, ranked by a total order that reads no clock and samples nothing, validated
+against `lane-elites/1`, and it carries `rule` and `statement` fields saying exactly what it
+ranked and over what. It is 54.9 KB for adaptive and 45.3 KB for implicit. A per-day file is a
+search log: about 18 KB per record, 164.1 MB of adaptive records and 168.4 MB of implicit records
+on disk on 2026-09-10, and its per-candidate rows sit at the grain of a scored archive record
+while meaning something else. That is the comparison `not_comparable` exists to prevent, and the
+way to prevent it is to leave the log unquotable rather than to ask every page to be careful with
+it.
+
+**The alternative this rejects.** "Admit the lane archive whole, since the elites are derived from
+the records, and a list that admits a summary while refusing its input is inconsistent." The list
+is not a list of true files. It is a list of documents that can be quoted without misleading a
+reader, and a capped, ranked, self-describing document meets that where the 8,900-line input
+behind it does not.
+
+**What it cost.** `NOT_A_PAGE_SOURCE` is record content: `build_record` writes it into every
+record and `build_elites` into the elites `_meta`, so changing the publication contract changes
+what a record says. Rewriting it moves `lanesearch.code_hash()` off `6a5be0d8f26639ea` and
+re-opens every candidate measured under that digest, 8,928 adaptive and 8,958 implicit ledger
+lines when this was written, about 17,900. At the measured 0.49 s per adaptive candidate and
+1.77 s per implicit candidate that is roughly 1.2 hours of adaptive-lane seconds and 4.4 hours of
+implicit-lane seconds to stand where the run stands today, spread across the rotation.
+
+**Why that is the digest working rather than waste.** A record written under the old contract
+asserts on its face that no page may quote this lane at all. A record written under the new one
+does not. The two generations mean different things and should not be indistinguishable; the code
+hash is what tells them apart, and a contract sentence that rides in a field is exactly the record
+content the hash exists to cover. Nothing scored is touched, so the bill is paid in lane seconds.
+
+**Evidence.** `rk_harness/lanesearch.py:178-182`, `NOT_A_PAGE_SOURCE`; `:1026` and `:1272`, where
+it is written into a record and into `_meta`; `:229` `ELITE_CAP`; `:1161` `ELITE_RULE`; `:1230`
+`build_elites`; `rk_harness/sitegen.py` `_lane_elites_path` and `_load_lane_archive`, the loader
+that already reads the file; `rk-work/adaptive_archive/ledger.jsonl` and
+`rk-work/implicit_archive/ledger.jsonl`, 8,928 and 8,958 lines under `6a5be0d8f26639ea`; the
+CLAUDE.md Prose paragraph and `docs/LANESEARCH.md`.
+
+**Consequence.** A class page may quote a ranked elite: its median cycles at the elite target, how
+many problems it reached, its tableau. It may not quote a per-day record, and no loader for one
+exists. `NOT_A_PAGE_SOURCE` states the split now instead of a blanket refusal, so a record says
+which of the two documents it stands behind may be published.
+
+**Closes.** `docs/THIRDS-2026-09-09.md` section 5, the question it raised separately for the two
+lane archives, and `docs/LANESEARCH.md`'s "whether these numbers may ever be published".
+
+**Epoch impact.** None on the scored archive. `VERIFIER_HASH` is untouched, no scored record is
+read or written, and every archived score keeps its meaning. The lane digest does move, which
+re-opens lane candidates and nothing else.
 
 ---
 

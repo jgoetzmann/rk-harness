@@ -52,6 +52,7 @@ $runArgs = @{
     SidetrackTracks = [string](Cfg "run" "sidetrack_tracks" "both")
     LaneSchedule = [string](Cfg "run" "lane_schedule" "E")
     LaneMaxSeconds = [int](Cfg "run" "lane_max_seconds" 180)
+    LaneMaxCandidates = [int](Cfg "run" "lane_max_candidates" 0)
     EnumPerCycle = [int](Cfg "run" "enum_per_cycle" 500)
     SearchPolicy = [string](Cfg "run" "search_policy" "empty")
     PolicyBlockCycles = [int](Cfg "run" "policy_block_cycles" 100)

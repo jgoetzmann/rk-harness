@@ -1474,9 +1474,10 @@ _SCHEMA_DOC: dict = {
         "statement is derived from the numbers and reads correctly whichever way they "
         "fall, and every statement passes the banned-word and em-dash check"),
     "not_a_public_page_source": (
-        "the traceability rule lists key_findings.json, validation/results.json, "
-        "benchmark/results.json and the side-track ledger with its artifacts. This "
-        "document is not on that list, and adding it is an owner decision"),
+        "the traceability rule lists key_findings.json, validation/results.json, benchmark/results.json, the side-track ledger with its artifacts, and each lane's elites.json. This "
+        "document is not on that list: D39 declined it, because the matched-accuracy "
+        "table in benchmark/results.json already carries the comparison across the "
+        "three classes on the same application problems"),
 }
 
 

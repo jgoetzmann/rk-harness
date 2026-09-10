@@ -6,11 +6,12 @@ the only other caller and it may call the read-only surface only; the gate in
 `tests/test_t16_lanesearch.py` holds that line by name and by function, and asserts no
 viewer can reach `step` even now that the runner can.
 
-No page reads either archive. The records still carry `NOT_A_PAGE_SOURCE` and the
-traceability list in CLAUDE.md rule 11 still does not name them, so a class page reports
-that an archive exists and quotes no number out of it. This note says what is in the tree,
-what the two archives are and are not, and what would have to be decided before a number
-from one could be published.
+The traceability list in the traceability list in CLAUDE.md (the Prose section) names each lane's `elites.json` and nothing else
+here (D40), so a class page may quote a ranked elite, carrying its cycles-to-tolerance
+metric, its float64 arithmetic and the fact that nothing in it is order-verified, and may
+quote no number out of a per-day record file. Records and the elites `_meta` carry
+`NOT_A_PAGE_SOURCE`, which states that split. This note says what is in the tree and what
+the two archives are and are not.
 
 ## Why it exists
 
@@ -41,10 +42,11 @@ The incomparability rides on every record as `not_comparable` and on the elites 
 `_meta.not_comparable`, in a field rather than in a comment, because two archives that look
 alike and mean different things is how a published number goes wrong.
 
-Neither archive is on the traceability rule's list of public-number sources
-(key_findings.json, validation/results.json, benchmark/results.json, the side-track ledger
-with its artifacts). Every record says so in `not_a_page_source`. Adding one to that list is
-a deliberate decision for the owner.
+One document per lane is on the traceability rule's list of public-number sources: each
+lane's `elites.json`, beside key_findings.json, validation/results.json,
+benchmark/results.json and the side-track ledger with its artifacts (D40). The per-day
+record files are not, and neither is validation/axes.json (D39). Every record says which is
+which in `not_a_page_source`.
 
 ## The adaptive space
 
@@ -220,14 +222,14 @@ Not done here, and deliberately so.
 4. A page (batch 6) reads `elites.json` and renders an absent file as "no records under the
    current code hash" rather than as an empty table.
 
-## Two things to decide before arming
+## Archive growth, and what may be published
 
 **Archive growth.** A record is a few kilobytes. At 32 candidates a firing and 164 lane
 cycles a day that is roughly 5,000 records a day per lane. `MAX_CANDIDATES_PER_STEP` is the
 knob, and a rotation or compaction policy for the daily files is a decision nobody has made
 yet. The ledger stays small either way.
 
-**Whether these numbers may ever be published.** They are off the scored path, they are
-float64, and they carry two cost grades that are not assembly-verified. The module states
-that in a field on every record. Putting either archive on the traceability rule's list is a
-separate, deliberate act.
+**Whether these numbers may ever be published.** Decided in D40: each lane's `elites.json`
+may be quoted, the per-day files may not. The records are still off the scored path, still
+float64, and still carry two cost grades that are not assembly-verified, so a quoted elite
+carries its metric, its arithmetic and the absence of order verification with it.

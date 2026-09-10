@@ -233,6 +233,128 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
 
 
+LANE_HEADING = "Lane elites, ranked by cycles to tolerance"
+
+
+def _lane_section(html: str) -> str:
+    """The lane elites section on its own.
+
+    Assertions about this section have to be scoped to it: the class pages are long, and
+    a phrase satisfied by some other section would leave the property untested.
+    """
+    assert LANE_HEADING in html, "the lane elites section is missing"
+    return html.split(LANE_HEADING, 1)[1].split("<h2>", 1)[0]
+
+
+def _write_day_record(work: Path, lane: str, marker: int) -> Path:
+    """One per-day lane record: the search log that stayed off the traceability list.
+
+    One line per candidate, carrying the same kind of per-candidate numbers the elites
+    document ranks. No page may open it, so the fixture puts a marker in it and the
+    tests look for that marker everywhere.
+    """
+    path = work / f"{lane}_archive" / "2026-09-09.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"key": "d0d0d0d0d0d0d0d0", "lane": lane,
+                                "median_cycles_at_target": marker,
+                                "best_achieved_error": 1.0 / marker},
+                               sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _lane_entry(lane: str, key: str, median: float, cost_basis: str) -> dict:
+    """One elite entry, in the shape rk_harness.lanesearch writes it.
+
+    The two lanes carry different blocks: an implicit entry has a gamma and a stability
+    verdict, an adaptive entry has an embedded order and a controller. The page renders
+    a different set of shape columns for each, so the fixture has to differ too.
+    """
+    entry = {
+        "index": 239, "key": key, "shell": 0, "cost_basis": cost_basis,
+        "record_hash": "9084a2a56d8c5011", "results_digest": "1dbe713cd0470e51",
+        "cycle": 3001, "ts": "2026-09-09T23:14:53Z",
+        "score": {"median_cycles_at_target": median, "elite_target": 0.0009765625,
+                  "elite_target_key": "0.0009765625", "best_achieved_error": 2.04e-05,
+                  "problems_at_elite_target": 8, "reached_at_elite_target": 8,
+                  "targets_reached": 30, "targets_total": 32,
+                  "worst_status": "reached"},
+    }
+    if lane == "implicit":
+        entry["method"] = {"family": "sdirk2_dyadic_gamma", "gamma": "15/16",
+                           "a21": "3/4", "newton_iters": 2,
+                           "jacobian": "finite_difference", "order": 2, "stages": 2,
+                           "arithmetic": "float64"}
+        entry["stability"] = {"a_stable": True, "l_stable": False,
+                              "r_at_infinity": "-127/225"}
+    else:
+        entry["method"] = {"family": "embedded_pair_s4_dyadic", "order": 3,
+                           "order_hat": 2, "stages": 4, "fsal": False,
+                           "nonzero_d_terms": 4}
+        entry["controller"] = {"alpha": "1/4", "beta": "1/8", "safety": "7/8",
+                               "clamp_lo": "1/4", "clamp_hi": "2", "table_bits": 14}
+    return entry
+
+
+_LANE_BASIS = {"implicit": "design_estimate_div32",
+               "adaptive": "float_trajectory_q15_attempt_cost"}
+
+
+def _lane_elites_fixture(lane: str, entries=None, meta=None) -> dict:
+    """A lane elites document, schema lane-elites/1.
+
+    Two entries rather than the cap of thirty-two: how many the document keeps is its
+    own business, and what these tests arbitrate is what a page does with the entries it
+    is handed and with the fields that describe them.
+    """
+    basis = _LANE_BASIS[lane]
+    doc = {
+        "_meta": {
+            "lane": lane, "schema": "lane-elites/1", "elite_cap": 32,
+            "elite_target": 0.0009765625, "elite_target_key": "0.0009765625",
+            "n_elites": 2, "n_input": 64, "n_measured": 8896, "n_ranked": 64,
+            "generated_cycle": 3811, "generated_ts": "2026-09-10T12:29:13Z",
+            "lanesearch_code_hash": "6a5be0d8f26639ea", "cost_basis": basis,
+            "cost_bases": {basis: {
+                "grade": "a design estimate from the solver terms, not an "
+                         "assembly-verified count",
+                "direction": "estimate, unsigned",
+                "includes": "the stage work and the fixed Newton iterations",
+                "excludes": "derivative evaluations and every branch",
+                "source": "sdirk.estimate_sdirk2_cycles"}},
+            "not_a_page_source": "not on the traceability list",
+            "not_comparable": "a record here is not comparable with a scored record",
+        },
+        "elites": [_lane_entry(lane, "60b0436d36617396", 2292.0, basis),
+                   _lane_entry(lane, "7d0d9224e3df2c7b", 2358.5, basis)],
+        "rule": "lowest median cycles at the elite target across the problems where the "
+                "status is reached; ties broken by the count of targets reached, "
+                "highest leading, then by record_hash",
+        "statement": "The lane archive holds 8896 measured candidates under the current "
+                     "code hash, of which this document ranked 64. The leading "
+                     "candidate shows a median of 2292 cycles at the elite target.",
+    }
+    if entries is not None:
+        doc["elites"] = entries
+    if meta is not None:
+        doc["_meta"] = meta
+    return doc
+
+
+def _empty_lane_elites_fixture(lane: str) -> dict:
+    """The document a lane writes when nothing has been measured under its code hash.
+
+    This is the state that ships on the next restart: the traceability decision moves
+    lanesearch.code_hash(), so both lanes re-open every candidate and the document
+    describes zero of them until the lanes have re-enumerated.
+    """
+    doc = _lane_elites_fixture(lane)
+    doc["elites"] = []
+    doc["_meta"].update({"n_elites": 0, "n_input": 0, "n_measured": 0, "n_ranked": 0})
+    doc["statement"] = ("The lane archive holds 0 measured candidates under the current "
+                        "code hash, of which this document ranked 0.")
+    return doc
+
+
 # --------------------------------------------------------------------------------------
 # the class pages exist and are unconditional
 # --------------------------------------------------------------------------------------
@@ -416,7 +538,11 @@ def test_the_shipped_class_prose_passes_the_guard():
                  sitegen._IMPLICIT_CLASS, sitegen._IMPLICIT_OFF_ARCHIVE,
                  sitegen._ADAPTIVE_CLASS, sitegen._ADAPTIVE_OFF_ARCHIVE,
                  sitegen._NO_POINTS, sitegen._OFF_LIST_RULE, sitegen._NEVER_SAME_WORK,
-                 sitegen._NOT_THESE_WHERE):
+                 sitegen._NOT_THESE_WHERE, sitegen._LANE_ELITES_METRIC,
+                 sitegen._LANE_ELITES_UNSCORED, sitegen._LANE_ELITES_ABSENT,
+                 sitegen._LANE_ELITES_DAMAGED, sitegen._LANE_ELITES_EMPTY,
+                 sitegen._LANE_ELITES_REFILL, sitegen._LANE_COUNTS_ABSENT,
+                 sitegen._LANE_RANK_NOTE) + tuple(sitegen._LANE_ARITHMETIC.values()):
         check_banned(text)
         assert chr(0x2014) not in text and chr(0x2013) not in text
     for head, body in sitegen._NOT_THESE_NUMBERS:
@@ -557,9 +683,13 @@ def test_a_single_tolerance_rung_draws_marks_and_says_no_curve(monkeypatch, tmp_
 # --------------------------------------------------------------------------------------
 
 def test_off_list_documents_are_named_but_never_quoted(monkeypatch, tmp_path):
-    """axes.json, the lane archives and the shares document each say inside their own
-    schema that they are not a source for a published number. The pages name them and
-    report whether they exist; nothing else from them reaches a page."""
+    """axes.json, the per-day lane records and the shares document each say inside their
+    own schema that they are not a source for a published number. The pages name them
+    and report whether they exist; nothing else from them reaches a page.
+
+    The elites documents here carry no "elites" list, which is the damaged shape: a
+    document that does not read as a ranking publishes nothing, marker included.
+    """
     work = _env(monkeypatch, tmp_path)
     marker = 987654321
     _write_json(work / "validation" / "axes.json",
@@ -569,6 +699,8 @@ def test_off_list_documents_are_named_but_never_quoted(monkeypatch, tmp_path):
                 {"schema": "lane-elites/1", "n_measured": marker, "entries": []})
     _write_json(work / "adaptive_archive" / "elites.json",
                 {"schema": "lane-elites/1", "n_measured": marker, "entries": []})
+    for lane in ("implicit", "adaptive"):
+        _write_day_record(work, lane, marker)
     share = 0.777777777
     _write_json(work / "schedule" / "shares.json",
                 {"schema": "schedule-shares/1", "lanes": {"explicit": {"share": share}}})
@@ -869,3 +1001,302 @@ def test_the_matched_helpers_tolerate_rubbish(monkeypatch, tmp_path):
         assert isinstance(sitegen._matched_rows(bad, "adaptive"), list)
         assert isinstance(sitegen._three_class_text(bad, "per_class", "adaptive"), str)
         assert isinstance(sitegen._implicit_budget_table(bad), list)
+
+
+# --------------------------------------------------------------------------------------
+# the lane elites documents, published on the two class pages
+# --------------------------------------------------------------------------------------
+
+def test_a_lane_with_no_elites_document_names_it_and_still_states_the_metric(
+        monkeypatch, tmp_path):
+    """A fresh work directory has no elites document, and the section still has to say
+    what the ranking would measure and what it would not be.
+
+    Naming the missing document is the whole of the report: a reader who cannot see a
+    ranking should be able to tell whether the lane measured nothing or the page simply
+    did not look.
+    """
+    _env(monkeypatch, tmp_path)
+    for cls, html in (("implicit", render_implicit()), ("adaptive", render_adaptive())):
+        sec = _lane_section(html)
+        assert f"rk-work/{cls}_archive/elites.json has not been written" in sec, cls
+        assert "re-fills as the lane re-enumerates" in sec, cls
+        # the metric, the arithmetic and the two negatives, on every render
+        assert "cycles a candidate needs to reach it" in sec, cls
+        assert "float64" in sec and "order-verified" in sec, cls
+        assert "Nothing here is scored either" in sec, cls
+        # nothing that reads as a measurement
+        assert "candidates measured" not in sec, cls
+        assert "<table>" not in sec, cls
+        assert ">0<" not in sec, cls
+        check_banned(html)
+
+
+def test_the_state_that_ships_is_an_elites_document_that_ranks_nothing(
+        monkeypatch, tmp_path):
+    """The next restart moves lanesearch.code_hash(), so both documents describe zero
+    candidates measured under the current hash until the lanes re-enumerate.
+
+    That state has to render as words. A card reading zero, or an empty table, is read
+    as a measurement that came back empty, which is a different claim from not having
+    measured yet, and it is the claim a reader would carry away for the cycle or two
+    the lanes take to re-fill.
+    """
+    work = _env(monkeypatch, tmp_path)
+    for lane in ("implicit", "adaptive"):
+        _write_json(work / f"{lane}_archive" / "elites.json",
+                    _empty_lane_elites_fixture(lane))
+    for cls, html in (("implicit", render_implicit()), ("adaptive", render_adaptive())):
+        sec = _lane_section(html)
+        assert "lists no ranked candidate" in sec, cls
+        assert "would read as a measurement that came back empty" in sec, cls
+        assert "re-fills as the lane re-enumerates" in sec, cls
+        # the counts the document does carry are all zero, and none of them is printed
+        assert "candidates measured" not in sec, cls
+        assert "candidates ranked" not in sec, cls
+        assert "holds 0 measured candidates" not in sec, cls
+        assert "<table>" not in sec, cls
+        assert ">0<" not in sec, cls
+        # provenance is not a measurement, so the hash and the target still show
+        assert "6a5be0d8f26639ea" in sec, cls
+        assert "0.0009765625" in sec, cls
+        check_banned(html)
+
+
+def test_a_populated_lane_elites_document_publishes_its_ranking_and_its_own_rule(
+        monkeypatch, tmp_path):
+    """The document states the order it applied; the page renders that field rather than
+    restating it, so the two cannot drift apart.
+
+    Everything a reader needs to place these numbers is in the same section: the metric,
+    the arithmetic, the code hash they were measured under, how many candidates were
+    measured and ranked, and the cost basis each row was priced on.
+    """
+    work = _env(monkeypatch, tmp_path)
+    docs = {lane: _lane_elites_fixture(lane) for lane in ("implicit", "adaptive")}
+    for lane, doc in docs.items():
+        _write_json(work / f"{lane}_archive" / "elites.json", doc)
+    for cls, html in (("implicit", render_implicit()), ("adaptive", render_adaptive())):
+        sec = _lane_section(html)
+        doc = docs[cls]
+        assert doc["rule"] in sec, cls                     # verbatim, not paraphrased
+        assert doc["statement"] in sec, cls
+        assert "8896" in sec and "64" in sec, cls          # n_measured, n_ranked
+        assert "candidates measured" in sec and "candidates ranked" in sec, cls
+        assert "the document reports 2, and keeps at most 32" in sec, cls
+        assert "6a5be0d8f26639ea" in sec, cls              # lanesearch_code_hash
+        assert f"rk-work/{cls}_archive/elites.json" in sec, cls
+        assert "60b0436d36617396" in sec and "7d0d9224e3df2c7b" in sec, cls
+        assert "2292" in sec and "2358.5" in sec, cls
+        assert "8 of 8" in sec and "30 of 32" in sec, cls
+        assert _LANE_BASIS[cls] in sec, cls
+        assert "assembly-verified count" in sec, cls       # the document's own grade
+        check_banned(html)
+    imp, adp = _lane_section(render_implicit()), _lane_section(render_adaptive())
+    assert "15/16" in imp and "finite_difference" in imp   # gamma, jacobian policy
+    assert "embedded order" in adp and "7/8" in adp        # order_hat, controller safety
+    # the arithmetic sentence is the lane's own, because the two lanes differ
+    assert "no Q15 LU factorization" in imp
+    assert "the Q15 cost model prices an attempt" in adp
+
+
+def test_a_damaged_elites_document_is_reported_unreadable_and_never_half_rendered(
+        monkeypatch, tmp_path):
+    """Every shape a broken document can arrive in: unparseable, not a dict, no list of
+    entries, entries that are not dicts, no _meta, counts that came through as strings
+    or nulls.
+
+    None of these may raise, and none may put a coerced number on the page. A count
+    read out of a damaged document is indistinguishable, once rendered, from a measured
+    one, so a count that did not validate is reported absent in words instead.
+    """
+    work = _env(monkeypatch, tmp_path)
+    path = work / "implicit_archive" / "elites.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    unreadable = (
+        "{ not json at all",
+        json.dumps([1, 2, 3]),
+        json.dumps("a string"),
+        json.dumps({"_meta": {"lane": "implicit"}, "elites": "not a list"}),
+        json.dumps({"schema": "lane-elites/1", "n_measured": 987654321}),
+    )
+    for raw in unreadable:
+        path.write_text(raw, encoding="utf-8")
+        sec = _lane_section(render_implicit())
+        assert "does not read as the document this page expects" in sec, raw[:40]
+        assert "987654321" not in sec, raw[:40]
+        assert "<table>" not in sec, raw[:40]
+        check_banned(sec)
+    # a list of entries that are not entries: the page reports what it can render
+    _write_json(path, {"elites": ["a string", 7, None]})
+    sec = _lane_section(render_implicit())
+    assert "does not read as the document this page expects" not in sec
+    assert "lists no ranked candidate" in sec
+    # one usable entry, no _meta, and every count a string or a null
+    _write_json(path, {
+        "elites": [{"key": "abcdef0123456789", "cost_basis": None, "method": "not a dict",
+                    "score": {"median_cycles_at_target": None,
+                              "reached_at_elite_target": "8",
+                              "problems_at_elite_target": 8,
+                              "targets_reached": None, "targets_total": 32}}],
+        "rule": 5, "statement": None,
+        "_meta": {"n_measured": "8896", "n_ranked": None, "elite_cap": "32"}})
+    sec = _lane_section(render_implicit())
+    assert "abcdef0123456789" in sec
+    assert "does not state how many candidates were measured" in sec
+    assert "8896" not in sec                       # a string count is not a count
+    assert "entries listed" in sec
+    assert "n/a" in sec                            # the cells that did not validate
+    assert "Ranking rule, quoted from the document: 5" not in sec
+    assert "The document states no ranking rule" in sec
+    assert "not stamped in this document" in sec
+    check_banned(render_implicit())
+
+
+def test_a_lane_elites_document_lands_only_on_its_own_class_page(monkeypatch, tmp_path):
+    """A candidate ranked in the implicit lane is not an adaptive result. Publishing one
+    on the other class page would attribute a measurement to a class that never made
+    it, which is the same mistake the archive boundary exists to prevent."""
+    work = _env(monkeypatch, tmp_path)
+    imp_doc = _lane_elites_fixture("implicit")
+    imp_doc["elites"][0]["key"] = "aaaa1111aaaa1111"
+    adp_doc = _lane_elites_fixture("adaptive")
+    adp_doc["elites"][0]["key"] = "bbbb2222bbbb2222"
+    _write_json(work / "implicit_archive" / "elites.json", imp_doc)
+    _write_json(work / "adaptive_archive" / "elites.json", adp_doc)
+    imp = _lane_section(render_implicit())
+    adp = _lane_section(render_adaptive())
+    assert "aaaa1111aaaa1111" in imp and "aaaa1111aaaa1111" not in adp
+    assert "bbbb2222bbbb2222" in adp and "bbbb2222bbbb2222" not in imp
+    assert "gamma" in imp and "gamma" not in adp
+    assert "embedded order" in adp and "embedded order" not in imp
+    assert "rk-work/adaptive_archive/elites.json" not in imp
+    assert "rk-work/implicit_archive/elites.json" not in adp
+
+
+def test_no_number_from_a_per_day_lane_record_reaches_a_page(monkeypatch, tmp_path):
+    """The per-day records were kept off the traceability list when the elites document
+    was admitted to it.
+
+    They are a search log at one line per candidate, and their per-candidate numbers
+    invite comparison with a scored archive record, which is the comparison that must
+    never be made. The pages name the file and report that it exists; nothing opens it.
+    """
+    work = _env(monkeypatch, tmp_path)
+    marker = 987654321
+    for lane in ("implicit", "adaptive"):
+        _write_json(work / f"{lane}_archive" / "elites.json", _lane_elites_fixture(lane))
+        _write_day_record(work, lane, marker)
+    out = tmp_path / "docs"
+    build(_empty_arch(), out)
+    for page in sorted(out.rglob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        assert str(marker) not in html, page.name
+        assert "d0d0d0d0d0d0d0d0" not in html, page.name
+        assert "1.0125e-09" not in html, page.name
+    imp = (out / "implicit.html").read_text(encoding="utf-8")
+    assert "rk-work/implicit_archive/YYYY-MM-DD.jsonl" in imp
+    assert "ranked against nothing" in imp
+    # the elites document, on the same page, does publish its numbers
+    assert "2292" in _lane_section(imp)
+
+
+def test_the_off_list_rule_quotes_the_admitted_documents(monkeypatch, tmp_path):
+    """The panel's closing sentence quotes the traceability rule, and the rule now names
+    the two lane elites documents. If the quote and CLAUDE.md disagree, the page is
+    telling a reader something about the project's own rules that is not true."""
+    _env(monkeypatch, tmp_path)
+    assert "adaptive_archive/elites.json" in sitegen._OFF_LIST_RULE
+    assert "implicit_archive/elites.json" in sitegen._OFF_LIST_RULE
+    for html in (render_implicit(), render_adaptive()):
+        panel = html.split("Further evidence, not published here", 1)[1]
+        assert "the side-track ledger with its artifacts" in panel
+        # the elites documents are no longer listed as off-list rows
+        assert "elites.json</span>" not in panel
+        assert "YYYY-MM-DD.jsonl" in panel
+        assert "rk-work/validation/axes.json" in panel
+        assert "rk-work/schedule/shares.json" in panel
+
+
+def test_the_lane_elites_section_is_deterministic_across_two_renders(
+        monkeypatch, tmp_path):
+    """Same document, same bytes. The section reads a stored timestamp and converts it
+    for display, which is a pure function of the file; nothing here reads a clock."""
+    work = _env(monkeypatch, tmp_path)
+    for lane in ("implicit", "adaptive"):
+        _write_json(work / f"{lane}_archive" / "elites.json", _lane_elites_fixture(lane))
+        _write_day_record(work, lane, 987654321)
+    assert render_implicit() == render_implicit()
+    assert render_adaptive() == render_adaptive()
+    assert (sitegen._lane_elites_section("implicit")
+            == sitegen._lane_elites_section("implicit"))
+    d1, d2 = tmp_path / "d1", tmp_path / "d2"
+    build(_empty_arch(), d1)
+    build(_empty_arch(), d2)
+    assert _snapshot(d1) == _snapshot(d2)
+
+
+def test_lane_prose_carrying_every_banned_word_still_publishes(monkeypatch, tmp_path):
+    """The rule and the statement are written by rk_harness.lanesearch, not here.
+
+    One unlucky word in a document this module does not own would fail check_banned on
+    every cycle and publish nothing until somebody noticed. Every string that came out
+    of the document goes through the vocabulary pass first, so the reader still gets
+    the message and the site still builds.
+    """
+    work = _env(monkeypatch, tmp_path)
+    words = " ".join(sitegen.BANNED_WORDS)
+    for lane in ("implicit", "adaptive"):
+        doc = _lane_elites_fixture(lane)
+        doc["rule"] = ("the first entry beats every other, which proves it is "
+                       "state-of-the-art")
+        doc["statement"] = f"A novel breakthrough. {words}. This outperforms the rest."
+        basis = "best-ever design estimate"
+        doc["_meta"]["cost_basis"] = basis
+        doc["_meta"]["cost_bases"] = {basis: {"grade": words, "source": "the first pass"}}
+        for e in doc["elites"]:
+            e["cost_basis"] = basis
+            if lane == "implicit":
+                e["method"]["jacobian"] = "first order difference"
+            else:
+                e["controller"]["safety"] = "novel"
+        _write_json(work / f"{lane}_archive" / "elites.json", doc)
+    out = tmp_path / "docs"
+    build(_empty_arch(), out)                       # build() checks before it writes
+    for name in CLASS_PAGES:
+        check_banned((out / name).read_text(encoding="utf-8"))
+    imp = _lane_section((out / "implicit.html").read_text(encoding="utf-8"))
+    # softened, not dropped
+    assert ("the earliest entry does better than every other, which shows it is leading"
+            in imp)
+    assert "A new advance" in imp
+    assert "record design estimate" in imp          # the cost basis name, softened
+    assert "earliest order difference" in imp       # a value inside a shape column
+    adp = _lane_section((out / "adaptive.html").read_text(encoding="utf-8"))
+    assert "<td>new</td>" in adp                    # the controller safety value
+
+
+def test_the_lane_elites_helpers_tolerate_rubbish(monkeypatch, tmp_path):
+    """The renderer is handed whatever the document holds. Every helper has to return a
+    value for anything, because one exception here takes the whole site build with it."""
+    _env(monkeypatch, tmp_path)
+    assert sitegen._lane_elites_view("explicit")["state"] == "absent"
+    assert sitegen._lane_elites_view("implicit")["state"] == "absent"
+    for bad in (None, {}, "text", 7, [], {"n": "8"}, {"n": None}, {"n": True},
+                {"n": -1}, {"n": 2.0}):
+        assert sitegen._lane_int(bad, "n") is None
+    assert sitegen._lane_int({"n": 0}, "n") == 0
+    for bad in (None, {}, {"score": None}, {"score": {"a": "1", "b": 2}},
+                {"score": {"a": 1}}):
+        assert sitegen._lane_reached(bad, "a", "b") == "n/a"
+    assert sitegen._lane_reached({"score": {"a": 1, "b": 2}}, "a", "b") == "1 of 2"
+    assert sitegen._lane_field({"method": None}, "method", "gamma") is None
+    assert sitegen._lane_field({}, "method", "gamma") is None
+    assert sitegen._lane_cost_bases({}, []) == ""
+    assert sitegen._lane_cost_bases(None, [{"cost_basis": 7}]) == ""
+    assert "names this cost basis and does" in sitegen._lane_cost_bases(
+        {"cost_bases": "not a dict"}, [{"cost_basis": "x"}])
+    for cls in ("implicit", "adaptive"):
+        table = sitegen._lane_elites_table(cls, [{}, {"score": "no"}])
+        assert "n/a" in table
+        check_banned(table)

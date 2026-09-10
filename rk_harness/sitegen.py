@@ -940,16 +940,20 @@ def _epoch_panel(data: dict | None = None) -> str:
 # ----------------------------------------------------------------------------
 
 # Some documents describe a method class in detail and still may not put a number on a
-# public page. The traceability rule names four sources, and the two-axis document, the
-# lane archives and the shares document each repeat the same sentence inside their own
-# schema, saying the document is not on that list. So a class page names such a
-# document, says whether it exists yet, and publishes none of its numbers.
+# public page. The two-axis document, the per-day lane records and the shares document
+# each repeat the same sentence inside their own schema, saying the document is not on
+# the traceability list. So a class page names such a document, says whether it exists
+# yet, and publishes none of its numbers. The lane elites documents were admitted to the
+# list and are published on the class pages instead; the per-day records beside them
+# were not, and stay here.
 _OFF_LIST_RULE = (
     "The traceability rule lists key_findings.json, validation/results.json, "
-    "benchmark/results.json and the side-track ledger with its artifacts. Each document "
-    "named above sits outside that list and says so in its own schema, so this page "
-    "names it and reports whether it exists without publishing a number from it. "
-    "Admitting one to the list is a decision for the owner, not for the page generator.")
+    "benchmark/results.json, the side-track ledger with its artifacts, and the two lane "
+    "elites documents, adaptive_archive/elites.json and implicit_archive/elites.json. "
+    "Each document named above sits outside that list and says so in its own schema, so "
+    "this page names it and reports whether it exists without publishing a number from "
+    "it. Admitting one to the list is a decision for the owner, not for the page "
+    "generator.")
 
 
 def _offlist_panel(rows) -> str:
@@ -2649,15 +2653,42 @@ def _load_validation_axes() -> dict | None:
     return _load_json_or_none(work_dir() / "validation" / "axes.json")
 
 
-def _load_lane_archive(cls: str) -> dict | None:
-    """One class's unpinned lane archive, or None.
+def _lane_elites_path(cls: str) -> Path:
+    """Where one lane writes its ranked elites."""
+    return work_dir() / f"{cls}_archive" / "elites.json"
 
-    Same rule as the axes document: presence only. A lane record is not comparable with
-    an archive record, and the lane records say so themselves.
+
+def _load_lane_archive(cls: str) -> dict | None:
+    """One lane's elites document, or None when it is missing or does not parse.
+
+    Unlike the axes and shares documents beside it, this one is a page source: it is
+    bounded by its own cap, ordered by a total order it states in its own field, and it
+    carries the sentence saying what it ranked and over what. The per-day lane records
+    in the same directory stay off every page.
     """
     if cls not in LANE_CLASSES:
         return None
-    return _load_json_or_none(work_dir() / f"{cls}_archive" / "elites.json")
+    return _load_json_or_none(_lane_elites_path(cls))
+
+
+_LANE_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
+
+
+def _lane_records_present(cls: str) -> bool:
+    """Whether a lane has written any per-day search log. Presence only, never opened.
+
+    These are the records that stayed off the traceability list when the lane elites
+    document was admitted to it: one line per candidate the lane enumerated, ranked
+    against nothing, and their per-candidate numbers would invite the comparison with a
+    scored archive record that must never be made.
+    """
+    if cls not in LANE_CLASSES:
+        return False
+    try:
+        names = sorted(p.name for p in (work_dir() / f"{cls}_archive").iterdir())
+    except OSError:
+        return False
+    return any(_LANE_DAY_RE.match(n) for n in names)
 
 
 def _load_shares() -> dict | None:
@@ -3118,6 +3149,346 @@ def _workprec_chart(rows, aria: str) -> str:
 
 
 # ----------------------------------------------------------------------------
+# lane elites: the one lane document a page may publish numbers from
+# ----------------------------------------------------------------------------
+
+# rk-work/{lane}_archive/elites.json is on the traceability list. The per-day lane
+# records in the same directory are not, and no page reads them: they are a search log,
+# and their per-candidate numbers invite exactly the comparison with a scored archive
+# record that must never be made. The elites document is bounded by its own cap, ordered
+# by a total order it states in its own "rule" field, and it carries the sentence saying
+# what it ranked and over what, so the page renders that field rather than restating it
+# and the two cannot drift apart.
+
+_LANE_ELITES_METRIC = (
+    "The lane ranks its own candidates on a different question from the one the scored "
+    "archive asks. The archive fixes a cycle budget and measures the error a method "
+    "reaches inside it. The lane fixes an accuracy target and measures the modelled "
+    "cycles a candidate needs to reach it. Those targets are a fixed ladder, the one "
+    "the run calls axis T, and the problems are the validation set. The two are "
+    "opposite questions, and a number from one does not convert into a number from "
+    "the other.")
+
+_LANE_ELITES_UNSCORED = (
+    "Nothing in this ranking is order-verified: the pinned order-condition checker "
+    "never saw these coefficients. Nothing here is scored either. No candidate holds an "
+    "archive cell, displaces an elite, or moves a hypothesis verdict, and the order is "
+    "internal to the lane.")
+
+# One sentence per lane about the arithmetic behind its cycle number, because the two
+# lanes differ and a page-level claim about arithmetic would be false on one of them.
+_LANE_ARITHMETIC: dict[str, str] = {
+    "implicit": (
+        "Every run behind this ranking is float64. There is no Q15 counterpart to show: "
+        "fixedpoint.py has no reciprocal, so there is no Q15 LU factorization and no Q15 "
+        "SDIRK run exists at all. The cycles are modelled, each row states the cost "
+        "basis it was priced on, and the document's own account of that basis is below."),
+    "adaptive": (
+        "Every run behind this ranking is float64. The cycle number is a mixed quantity "
+        "and the document labels it as one: the Q15 cost model prices an attempt, while "
+        "the attempt count comes from the float64 controller, because the Q15 adaptive "
+        "solver is wired to one fixed pair and cannot run a candidate pair. Each row "
+        "states the cost basis it was priced on and the document's own account of that "
+        "basis is below."),
+}
+
+_LANE_ELITES_ABSENT = (
+    "{path} has not been written in this work directory, so this section carries no "
+    "ranking. The lane search writes the document at the end of a cycle; until it "
+    "exists there is nothing here to rank, and nothing is inferred in its place.")
+
+_LANE_ELITES_DAMAGED = (
+    "{path} exists but does not read as the document this page expects, so nothing from "
+    "it is stated here. A file that did not parse, or that carries no list of ranked "
+    "entries, is reported as unreadable rather than rendered as a partial ranking.")
+
+_LANE_ELITES_EMPTY = (
+    "{path} is written and lists no ranked candidate, so this section shows no count "
+    "and no table. A zero in a card would read as a measurement that came back empty, "
+    "which is a different claim from having measured nothing yet.")
+
+_LANE_ELITES_REFILL = (
+    "This is where a fresh work directory starts, and it is where the lane sits for a "
+    "cycle or two after the lane search code changes: a candidate counts as measured "
+    "only under the code hash that measured it, so an edit re-opens the lane and the "
+    "ranking re-fills as the lane re-enumerates. Nothing is carried forward from an "
+    "earlier hash.")
+
+_LANE_COUNTS_ABSENT = (
+    "The document does not state how many candidates were measured or how many it "
+    "ranked, so those counts are left unstated here rather than guessed from the rows "
+    "it lists.")
+
+_LANE_RANK_NOTE = (
+    "Rank is the position the document gives under the rule above. Each row carries the "
+    "shape of the candidate, the median modelled cycles it needed at the elite target, "
+    "how many problems it reached that target on, and the cost basis its cycles were "
+    "priced on.")
+
+# The shape columns each lane's page shows, as (label, (group, key)) pairs read out of
+# an entry's nested blocks. Held as data so both pages render one table renderer and a
+# lane cannot quietly grow a column the other lane's tests never see.
+_LANE_SHAPE_COLS: dict[str, tuple[tuple[str, tuple[str, str]], ...]] = {
+    "implicit": (
+        ("gamma", ("method", "gamma")),
+        ("a21", ("method", "a21")),
+        ("newton iterations", ("method", "newton_iters")),
+        ("jacobian", ("method", "jacobian")),
+        ("A-stable", ("stability", "a_stable")),
+    ),
+    "adaptive": (
+        ("order", ("method", "order")),
+        ("embedded order", ("method", "order_hat")),
+        ("stages", ("method", "stages")),
+        ("safety", ("controller", "safety")),
+        ("alpha", ("controller", "alpha")),
+        ("beta", ("controller", "beta")),
+    ),
+}
+
+
+def _lane_int(node, key):
+    """One non-negative integer out of a document node, or None for anything else.
+
+    A string, a null or a float is what a damaged document puts where a count belongs.
+    A count that did not validate is reported as absent in words rather than coerced,
+    because a coerced count is indistinguishable on the page from a measured one.
+    """
+    if not isinstance(node, dict):
+        return None
+    v = node.get(key)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        return None
+    return v
+
+
+def _lane_elites_view(cls: str) -> dict:
+    """One lane's elites document reduced to what a page may render, plus its state.
+
+    The state is one of absent (no file), damaged (a file that does not parse or that
+    carries no list of entries), empty (a document that ranks nothing) and ranked. Each
+    renders as its own words; none of them renders as a zero.
+    """
+    view = {"state": "absent", "meta": {}, "rows": [], "rule": "", "statement": ""}
+    if cls not in LANE_CLASSES:
+        return view
+    if not _lane_elites_path(cls).exists():
+        return view
+    doc = _load_lane_archive(cls)
+    if doc is None:
+        view["state"] = "damaged"
+        return view
+    raw = doc.get("elites")
+    if not isinstance(raw, list):
+        view["state"] = "damaged"
+        return view
+    rows = [e for e in raw if isinstance(e, dict)]
+    meta = doc.get("_meta")
+    view["meta"] = meta if isinstance(meta, dict) else {}
+    view["rows"] = rows
+    # Text only. A rule or a statement that came through as a number is not a sentence,
+    # and rendering str() of it would put "5." on the page where the order should be.
+    rule, statement = doc.get("rule"), doc.get("statement")
+    view["rule"] = rule.strip() if isinstance(rule, str) else ""
+    view["statement"] = statement.strip() if isinstance(statement, str) else ""
+    view["state"] = "ranked" if rows else "empty"
+    return view
+
+
+def _lane_field(entry, group: str, key: str):
+    node = entry.get(group) if isinstance(entry, dict) else None
+    return node.get(key) if isinstance(node, dict) else None
+
+
+def _lane_reached(entry, num_key: str, den_key: str) -> str:
+    """"r of n" for a pair of counts, or "n/a" when either half did not validate."""
+    score = entry.get("score") if isinstance(entry, dict) else None
+    r = _lane_int(score, num_key)
+    n = _lane_int(score, den_key)
+    if r is None or n is None:
+        return "n/a"
+    return f"{r} of {n}"
+
+
+def _lane_dl(rows) -> str:
+    return ('<dl class="meta">\n'
+            + "\n".join(f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in rows) + "\n</dl>")
+
+
+def _lane_elites_table(cls: str, rows) -> str:
+    """The ranked entries, in the order the document ranked them.
+
+    Every value comes out of the document, so every cell goes through _st_cell, which
+    routes text through the vocabulary pass. Rank is the row's position in the list and
+    is generated here, not read.
+    """
+    cols = _LANE_SHAPE_COLS.get(cls, ())
+    head = ('<tr><th class="num">rank</th><th>candidate</th>'
+            + "".join(f"<th>{_esc(label)}</th>" for label, _p in cols)
+            + '<th class="num">median cycles at target</th>'
+            '<th class="num">problems at target</th>'
+            '<th class="num">targets reached</th><th>cost basis</th></tr>')
+    body = []
+    for i, e in enumerate(rows, start=1):
+        shape = "".join(f"<td>{_st_cell(_lane_field(e, g, k))}</td>"
+                        for _label, (g, k) in cols)
+        key = str(e.get("key") or "")[:16]
+        score = e.get("score") if isinstance(e.get("score"), dict) else {}
+        at_target = _lane_reached(e, "reached_at_elite_target",
+                                  "problems_at_elite_target")
+        reached = _lane_reached(e, "targets_reached", "targets_total")
+        body.append(
+            f'<tr><td class="num">{i}</td>'
+            f'<td class="hash">{_soft(key) if key else "n/a"}</td>'
+            + shape
+            + f'<td class="num">{_st_cell(score.get("median_cycles_at_target"))}</td>'
+            f'<td class="num">{_esc(at_target)}</td>'
+            f'<td class="num">{_esc(reached)}</td>'
+            f'<td>{_st_cell(e.get("cost_basis"))}</td></tr>')
+    return ('<div class="scroll"><table>\n' + head + "\n"
+            + "\n".join(body) + "\n</table></div>")
+
+
+def _lane_cost_bases(meta, rows) -> str:
+    """The document's own account of every cost basis the rendered rows were priced on.
+
+    Names come from the rows and from the document's default, sorted, so the block is a
+    function of what is on the page. A basis the document names and does not describe
+    says that, rather than leaving the reader to assume a grade.
+    """
+    names = {str(e.get("cost_basis")) for e in rows
+             if isinstance(e.get("cost_basis"), str) and e.get("cost_basis")}
+    default = meta.get("cost_basis") if isinstance(meta, dict) else None
+    if isinstance(default, str) and default:
+        names.add(default)
+    if not names:
+        return ""
+    bases = meta.get("cost_bases") if isinstance(meta, dict) else None
+    body = []
+    for name in sorted(names):
+        node = bases.get(name) if isinstance(bases, dict) else None
+        body.append(f'<h3 class="mono">{_soft(name)}</h3>')
+        if isinstance(node, dict) and node:
+            body.append('<dl class="meta">\n' + "\n".join(
+                f"<dt>{_soft(k)}</dt><dd>{_st_cell(node[k])}</dd>"
+                for k in sorted(node)) + "\n</dl>")
+        else:
+            body.append('<p class="note">The document names this cost basis and does '
+                        "not describe it, so nothing is stated here about what it "
+                        "prices and what it leaves out.</p>")
+    return ('<details class="fold"><summary>How this lane prices a cycle</summary>'
+            "<div>" + "\n".join(body) + "</div></details>")
+
+
+def _lane_elites_section(cls: str) -> list[str]:
+    """One lane's ranked elites, rendered honestly in every state the document can be in.
+
+    The metric, the arithmetic and the two negatives are stated on every render, because
+    they are properties of how the lane measures rather than of what the document
+    happens to hold today, and a reader who lands on this section should not have to go
+    looking for any of them.
+    """
+    view = _lane_elites_view(cls)
+    rel = f"rk-work/{cls}_archive/elites.json"
+    parts = ["<h2>Lane elites, ranked by cycles to tolerance</h2>",
+             "<p>" + _esc(_LANE_ELITES_METRIC) + " The measurement is defined in the "
+             + _gloss("cycles-to-tolerance", "glossary") + ".</p>"]
+    arithmetic = _LANE_ARITHMETIC.get(cls, "")
+    if arithmetic:
+        parts.append(f'<p class="note">{_esc(arithmetic)}</p>')
+    parts.append(f'<p class="note">{_esc(_LANE_ELITES_UNSCORED)}</p>')
+
+    state = view["state"]
+    if state in ("absent", "damaged"):
+        text = _LANE_ELITES_ABSENT if state == "absent" else _LANE_ELITES_DAMAGED
+        parts.append(f"<p>{_esc(text.format(path=rel))}</p>")
+        if state == "absent":
+            parts.append(f'<p class="note">{_esc(_LANE_ELITES_REFILL)}</p>')
+        return parts
+
+    meta = view["meta"]
+    rows = view["rows"]
+    dl_rows: list[tuple[str, str]] = [
+        ("source", f'<span class="mono">{_esc(rel)}</span>')]
+    target_key = meta.get("elite_target_key")
+    target = meta.get("elite_target")
+    tail = " final-state error, the accuracy this ranking is taken at"
+    if isinstance(target_key, str) and target_key.strip():
+        dl_rows.append(("elite target", _soft(target_key.strip()) + _esc(tail)))
+    elif isinstance(target, (int, float)) and not isinstance(target, bool):
+        dl_rows.append(("elite target", _num(target) + _esc(tail)))
+    code_hash = meta.get("lanesearch_code_hash")
+    if isinstance(code_hash, str) and code_hash.strip():
+        dl_rows.append(("lane search code hash",
+                        f'<span class="hash">{_soft(code_hash.strip())}</span>'))
+    else:
+        dl_rows.append(("lane search code hash",
+                        _esc("not stamped in this document, so the code these were "
+                             "measured under is not stated here")))
+    # A cycle number of 0 is the default build_elites uses when it ranked nothing, and
+    # no real cycle is 0. Printing it would put a bare zero in the one section whose
+    # own prose argues against bare zeros.
+    gen_cycle = _lane_int(meta, "generated_cycle")
+    if gen_cycle is not None and gen_cycle <= 0:
+        gen_cycle = None
+    gen_ts = meta.get("generated_ts")
+    if gen_cycle is not None and isinstance(gen_ts, str) and gen_ts.strip():
+        dl_rows.append(("document written",
+                        f"cycle {_num(gen_cycle)}, {_esc(_ct(gen_ts))}"))
+    elif gen_cycle is not None:
+        dl_rows.append(("document written", f"cycle {_num(gen_cycle)}"))
+
+    if view["rule"]:
+        rule = view["rule"]
+        stop = "" if rule.endswith((".", "!", "?")) else "."
+        parts.append('<p class="note">Ranking rule, quoted from the document: '
+                     + _soft(rule) + stop + "</p>")
+    else:
+        parts.append('<p class="note">The document states no ranking rule, so the order '
+                     "of the entries below is the order it wrote them in and this page "
+                     "does not say what that order means.</p>")
+
+    if state == "empty":
+        parts.append(f"<p>{_esc(_LANE_ELITES_EMPTY.format(path=rel))}</p>")
+        parts.append(f'<p class="note">{_esc(_LANE_ELITES_REFILL)}</p>')
+        parts.append(_lane_dl(dl_rows))
+        return parts
+
+    if view["statement"]:
+        parts.append("<p>" + _soft(view["statement"]) + "</p>")
+    n_measured = _lane_int(meta, "n_measured")
+    n_ranked = _lane_int(meta, "n_ranked")
+    n_elites = _lane_int(meta, "n_elites")
+    cap = _lane_int(meta, "elite_cap")
+    if n_elites is not None and cap is not None:
+        listed = f"the document reports {n_elites}, and keeps at most {cap}"
+    elif n_elites is not None:
+        listed = f"the document reports {n_elites}"
+    elif cap is not None:
+        listed = f"the document keeps at most {cap}"
+    else:
+        listed = "rows in the table below"
+    cards = []
+    if n_measured is not None:
+        cards.append(("candidates measured", _num(n_measured),
+                      "under the lane search code hash below"))
+    if n_ranked is not None:
+        cards.append(("candidates ranked", _num(n_ranked),
+                      "the subset this document put in order"))
+    cards.append(("entries listed", str(len(rows)), listed))
+    parts.append(_cards(cards))
+    if n_measured is None or n_ranked is None:
+        parts.append(f'<p class="note">{_esc(_LANE_COUNTS_ABSENT)}</p>')
+    parts.append(_lane_dl(dl_rows))
+    parts.append(f"<p>{_esc(_LANE_RANK_NOTE)}</p>")
+    parts.append(_lane_elites_table(cls, rows))
+    bases = _lane_cost_bases(meta, rows)
+    if bases:
+        parts.append(bases)
+    return parts
+
+
+# ----------------------------------------------------------------------------
 # the implicit class
 # ----------------------------------------------------------------------------
 
@@ -3231,15 +3602,16 @@ def render_implicit(sidetrack: dict | None = None, validation: dict | None = Non
 
     parts.extend(_matched_section(benchmark, "implicit", ("stiff",)))
     parts.extend(_implicit_budget_table(benchmark))
+    parts.extend(_lane_elites_section("implicit"))
 
     parts.append("<h2>Further evidence, not published here</h2>")
     parts.append(_offlist_panel([
         ("rk-work/validation/axes.json", _load_validation_axes() is not None,
          "the cycles-to-tolerance rows for this class, next to the explicit class on "
          "the same accuracy targets"),
-        ("rk-work/implicit_archive/elites.json", _load_lane_archive("implicit") is not None,
-         "the unpinned lane archive: candidate SDIRK parameter sets ranked among "
-         "themselves"),
+        ("rk-work/implicit_archive/YYYY-MM-DD.jsonl", _lane_records_present("implicit"),
+         "the lane's per-day search log: one line per candidate the lane enumerated, "
+         "ranked against nothing"),
         ("rk-work/schedule/shares.json", _load_shares() is not None,
          "the per-cycle lane log summarised per method class"),
     ]))
@@ -3385,15 +3757,16 @@ def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None
         parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
 
     parts.extend(_matched_section(benchmark, "adaptive", ("adaptive_pair",)))
+    parts.extend(_lane_elites_section("adaptive"))
 
     parts.append("<h2>Further evidence, not published here</h2>")
     parts.append(_offlist_panel([
         ("rk-work/validation/axes.json", _load_validation_axes() is not None,
          "the cycles-to-tolerance rows for this class, and the measured floor of the "
          "Q15 error estimate that bounds how tight a tolerance can mean anything"),
-        ("rk-work/adaptive_archive/elites.json", _load_lane_archive("adaptive") is not None,
-         "the unpinned lane archive: candidate pairs and controller gains ranked among "
-         "themselves"),
+        ("rk-work/adaptive_archive/YYYY-MM-DD.jsonl", _lane_records_present("adaptive"),
+         "the lane's per-day search log: one line per candidate the lane enumerated, "
+         "ranked against nothing"),
         ("rk-work/schedule/shares.json", _load_shares() is not None,
          "the per-cycle lane log summarised per method class"),
     ]))

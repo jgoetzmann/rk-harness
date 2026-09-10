@@ -978,6 +978,35 @@ def _lane_budget_seconds() -> float:
     return lanes.lane_max_seconds()
 
 
+# What "no cap" hands lanesearch.step. Not the argument dropped and not an infinity: the
+# loop should always be counting something, so a candidate that somehow costs no time
+# still cannot spin. The most a bounded cycle can start is the ceiling budget over the
+# cheapest measured candidate, 420 s (lanes.LANE_MAX_SECONDS_CEILING) over about 0.49 s
+# for an adaptive one, which is under 900. This sits two orders above that, so it cannot
+# bind, and a runaway is still impossible.
+LANE_UNCAPPED_CANDIDATES = 100_000
+
+
+def _lane_max_candidates() -> int:
+    """How many candidates a lane cycle may START.
+
+    RK_LANE_MAX_CANDIDATES (config.json run.lane_max_candidates). 0, the default, means
+    the time budget is the only bound and LANE_UNCAPPED_CANDIDATES goes into the call. A
+    positive value binds ahead of the budget, which is what lanesearch's own default of
+    32 did: the adaptive lane spent 15.6 s of a 180 s budget and handed the rest back.
+
+    A value that is not a positive integer falls back rather than raising, following
+    lanes.lane_max_seconds and for the same reason: a cap cannot arm anything on its
+    own, so the nearest useful answer beats ending a cycle over it.
+    """
+    raw = os.environ.get("RK_LANE_MAX_CANDIDATES")
+    try:
+        v = int(raw) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        return LANE_UNCAPPED_CANDIDATES
+    return v if v > 0 else LANE_UNCAPPED_CANDIDATES
+
+
 def _record_cycle(new_cycle_id: int, lane: str, schedule: str, seconds: float,
                   productive: float | None, *, records_appended: int = 0,
                   lane_records: int = 0, points: int = 0) -> None:
@@ -1023,17 +1052,24 @@ def _run_lane_cycle(state: RunState, new_cycle_id: int, arch, lane: str,
     build below, so a lane cycle publishes its own class page in the same cycle it
     measured, exactly as an explicit cycle publishes the archive.
 
+    The time budget is what bounds this cycle. max_candidates is passed on every call
+    rather than left to lanesearch.step's own default, because that default is 32 and
+    32 bound long before the budget did: over 200 measured cycles the adaptive lane
+    spent 15.6 s of the 180 s it was given and handed the rest back.
+
     stall_counter is passed through untouched. It counts cycles since the explicit
     search last improved a cell, so a lane cycle neither advances it (the explicit
     search did not fail, it did not run) nor clears it (nothing improved).
     """
     log_event("lane_cycle_start", cycle_id=new_cycle_id, lane=lane, schedule=schedule)
     budget = _lane_budget_seconds()
+    max_candidates = _lane_max_candidates()
     lane_started = time.monotonic()
     records: list = []
     try:
         records = lanesearch.step(lane, seed=new_cycle_id, budget_seconds=budget,
-                                  cycle=new_cycle_id, log=log_event)
+                                  cycle=new_cycle_id, log=log_event,
+                                  max_candidates=max_candidates)
     except Exception as e:  # noqa: BLE001 - a lane must not be able to end the run
         log_event("lane_cycle_failed", cycle_id=new_cycle_id, lane=lane,
                   error=repr(e)[:300])

@@ -834,6 +834,7 @@ RK_ENV_MAP: dict[str, tuple[str, str]] = {
     "RK_SIDETRACK_TRACKS": ("run", "sidetrack_tracks"),
     "RK_LANE_SCHEDULE": ("run", "lane_schedule"),
     "RK_LANE_MAX_SECONDS": ("run", "lane_max_seconds"),
+    "RK_LANE_MAX_CANDIDATES": ("run", "lane_max_candidates"),
     "RK_ENUM_PER_CYCLE": ("run", "enum_per_cycle"),
     "RK_SEARCH_POLICY": ("run", "search_policy"),
     "RK_POLICY_BLOCK_CYCLES": ("run", "policy_block_cycles"),
