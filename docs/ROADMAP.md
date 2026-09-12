@@ -35,23 +35,28 @@ implicit work advanced only when a human-driven session ran a prototype by hand.
 `rk_harness/sidetrack.py` now measures off-archive points on a cadence set by
 `run.sidetrack_every_cycles`, balancing the two tracks against each other, and appends the results
 to `rk-work/sidetrack/`. It is unpinned by construction (not in `VERIFIER_FILES`, canary-tested),
-it cannot write anything scored, and it ships disabled. Five jobs, 40 points, each closing a
-question EPOCH2-DESIGN or EPOCH3-DESIGN leaves open. Full plan, job catalogue, invariants and
-acceptance criteria: `docs/SIDETRACK-AUTOMATION.md`.
+it cannot write anything scored, and it ships disabled. The jobs close questions EPOCH2-DESIGN
+and EPOCH3-DESIGN leave open; the current job and point counts are on the findings site's
+methodology page (`methodology.html#ledger`), which reads them from the ledger. Full plan, job
+catalogue, invariants and acceptance criteria: `docs/SIDETRACK-AUTOMATION.md`. The
+`sidetrack.html` page it specifies (D8, and acceptance items A4.1 to A4.6) was retired in D41:
+the ledger's rules are now on `methodology.html#ledger` and its readings on the class pages.
 
 The progress loop is public (owner, 2026-09-02): both sites surface it. The overview
-carries a research-tracks page (the three tracks, current milestones, orchestrator state);
-the findings site carries an epoch-status panel on its index (epoch, active or frozen,
-last progress event, saturation counter), rendered from the state files on disk so it
-stays deterministic and refreshes every cycle.
+introduces the three method classes on its index (`index.html#classes`) and describes how the
+cycle loop rotates them (`architecture.html#lanes`). The findings site carries an epoch-status
+panel on its index (epoch, active or frozen, last progress event, saturation counter),
+rendered from the state files on disk so it stays deterministic and refreshes every cycle,
+and one page per class (`explicit.html`, `implicit.html`, `adaptive.html`).
 
 ## Epoch 1: explicit fixed-step (current; reopened)
 
 The running search over explicit fixed-step tableaus at a 65,536-cycle budget under Q15
 floor arithmetic. Its scientific yield is documented on the sites: the floor-bias
 mechanism, the anchor reversal, the rc_thermal quantization floor, the phase-0 closed
-result, and 13/14 grid cells with discovered methods ahead of every cheaper-or-equal
-classical anchor.
+result, and the grid cells where a discovered method is ahead of every cheaper-or-equal
+classical anchor (the count is on the overview's key findings page, from
+`key_findings.json`).
 
 **Freeze rule (implemented in `rk_harness/saturation.py`, executed by the watchdog):**
 progress means a first record in an empty archive cell, an elite improving its cell, or a
@@ -131,7 +136,7 @@ would be a finding.
 Assembled from frozen epochs; drafting starts once epoch 1 freezes. Skeleton: motivation
 (fixed-point integrators on tiny MCUs); related work (RK searches, fixed-point ODE
 literature, library implementations); methodology (the harness, verification, statistics);
-epoch 1 results (floor bias, anchor reversal, discovered methods with the 13/14 result and
+epoch 1 results (floor bias, anchor reversal, discovered methods with the per-cell result and
 its caveats); practical validation and library benchmarks; the trade-offs matrix;
 limitations and the winner's-curse discussion; future epochs. Every number traceable to a
 frozen archive plus a rerunnable script. Venue-neutral draft lives in the repo; the

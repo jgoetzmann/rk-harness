@@ -1199,6 +1199,74 @@ re-opens lane candidates and nothing else.
 
 ---
 
+## D41 - The findings site drops to seven tabs, and the build deletes the pages it retired (2026-09-11)
+
+**Decision.** The findings site has seven tabs in one nav row: overview (`index.html`),
+explicit, implicit, adaptive, validation, research log (`hypotheses.html`) and methodology. The
+header carries one link to the overview site, beside the tabs and styled apart from them. Seven
+pages are retired and their content merged:
+
+- `benchmark.html` and `falsification.html` into `validation.html`, as its `#speed` and
+  `#falsification` sections;
+- `literature.html` and `interpretation.html` into `hypotheses.html`, as `#literature` and
+  `#interpretation`, each showing its newest entries and naming the log file that holds the rest;
+- `costmodel.html`, `sidetrack.html` and `glossary.html` into `methodology.html`, as
+  `#costmodel`, `#ledger` and `#glossary`. Every glossary term keeps its anchor id, and `_gloss`
+  now links `methodology.html#<anchor>`.
+
+`_CONDITIONAL` is `{"validation.html"}`, and that page is written when any of
+`validation/results.json`, `benchmark/results.json` or `falsification.json` exists.
+
+**Why.** Owner request, 2026-09-11: no more than eight tabs, more graphs about the three classes,
+less clutter, and a link from the findings site to the overview. Fourteen tabs in three rows gave
+the reference pages the same weight as the results, and two of the retired pages, literature and
+interpretation, were model-written text with no charts at all.
+
+**Deletion.** GitHub Pages has no redirects and serves whatever sits in `docs/`, and `build()`
+never deleted anything, so a page dropped from the build stayed published, stale and unlinked.
+`build()` now deletes exactly the seven retired names from `out_dir`, plus any
+`cell-p*-s*-b*.html` for a cell the current archive does not hold. It does this after every page
+has passed the banned-word check and been written, so a failed build deletes nothing. Nothing
+else is ever deleted. The runner's `git add -A` in the findings checkout commits the deletions
+with the next cycle's pages.
+
+**Class pages.** explicit, implicit and adaptive share one layout: a short lead, an "At a
+glance" list, a few key-number cards, one chart per question, and "Measured against real
+counterparts, at matched accuracy" as a chart with its table folded. implicit and adaptive
+add their lane elites and the "What these numbers are not" block, and fold their per-job
+side-track tables at the bottom. Three things left the class pages: the single-rung
+work-precision chart over `adaptive_results` and the library table, which matched accuracy
+replaces, and the explicit page's off-list panel, whose source `validation/axes.json` is not
+admitted (D39). The adaptive Q15 attempt-cost bar stacks the three priced parts (stage,
+estimate, controller) and prints the `total` that `benchmark/results.json`
+`adaptive_matched_tolerance` records for them. The branch allowance in that document is a
+count of conditional branches, not cycles, so the caption names it and the bar does not draw
+it.
+
+**What this supersedes.** The docstring of the t18 test
+`the_ledger_page_keeps_its_filename_and_its_provenance_role` called `sidetrack.html` a permanent
+URL that "changes role rather than being deleted". That no longer holds. The ledger's rules and
+its failed points moved to `methodology.html#ledger`, its readings were already on the class
+pages, and the test is retargeted to the new location. D41 also supersedes the `sidetrack.html`
+page in `SIDETRACK-AUTOMATION.md` D8 with its acceptance items A4.1 to A4.6, and the line in
+section 4 of `THIRDS-2026-09-09.md` that kept `sidetrack.html` as a provenance page. D8's rule
+that publication is derived from the ledger and never authored still holds, on
+`methodology.html#ledger` and the class pages. Both documents are records and stay as written.
+
+**Cost.** An outside link to a retired URL now returns 404. The overview site's links into the
+findings site are rewritten to the new URLs in the same change.
+
+**Evidence.** `rk_harness/sitegen.py`: `_NAV_ITEMS`, `_CONDITIONAL`, `_RETIRED`, `_prune`,
+`build`; `rk_harness/methodology.py`: `render_page(page, sections)`;
+`tests/test_t4_ledger_runner_site.py` and `tests/test_t18_class_pages.py` (the nav, conditional,
+prune and retired-link tests); `scripts/preflight.py` H1 (`explicit.html`), H4
+(`methodology.html`), K4 (`validation.html`).
+
+**Epoch impact.** None. No pinned file changes, no record is read or written differently, and
+every archived score keeps its meaning.
+
+---
+
 ## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
 
 **Decision.** `stats.txt` declares a staleness deadline on both paths, not only when a loop wrote

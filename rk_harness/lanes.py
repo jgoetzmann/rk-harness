@@ -1,17 +1,18 @@
-"""Lane scheduling and the realised time split (T16). New module; nothing imports it yet.
+"""Lane scheduling and the realised time split (T16). runner.py and saturation.py import it.
 
 Importing this module changes nothing. Every function here is either a pure
-function of its arguments or a reader of an environment variable that is unset in
-the live container, and every default resolves to what the machine does today.
+function of its arguments or a reader of an environment variable, and an unset
+variable resolves to explicit-only cycles, the container's behaviour before lanes.
 
 THE SPLIT AS DATA. There are three method classes and one schedule string. LANES
 names them in the order the sites lead with. The schedule is a string of letters,
 one letter per cycle, indexed by the cycle id the way ``runner._POLICY_ROTATION``
 is indexed by policy block (runner.py:80-92), and it is a string on purpose: a
 config value can carry it, so changing the split later is a config edit rather
-than a code change. ``"E"`` means every cycle is an explicit cycle, which is
-exactly the container's behaviour today, so an unset, empty or unreadable
-``RK_LANE_SCHEDULE`` leaves the machine where it is. ``"EAI"`` is thirds. The
+than a code change. ``"E"`` means every cycle is an explicit cycle, which is what
+an unset, empty or unreadable ``RK_LANE_SCHEDULE`` gives. ``"EAI"`` is thirds.
+``scripts/run.ps1`` passes the workspace's ``run.lane_schedule`` through as that
+variable. The
 70/15/15 the roadmap has described since 2026-09-02 is ``LEGACY_70_15_15``.
 
 INTENDED IS NOT REALISED, AND THEY ARE KEPT APART HERE. The survey behind this
@@ -49,8 +50,8 @@ literal "A" means adaptive in one and explicit in the other.
 value can set both splits and they cannot drift apart.
 
 The artifact is not a legal source for a public-page number. The traceability rule
-lists key_findings.json, validation/results.json, benchmark/results.json and the
-side-track ledger; adding shares.json to that list is a deliberate decision for the
+lists key_findings.json, validation/results.json, benchmark/results.json, the
+side-track ledger and the two lane elites documents; adding shares.json to that list is a deliberate decision for the
 owner, not something this module can take by writing a file.
 """
 from __future__ import annotations

@@ -37,10 +37,11 @@ from rk_harness import runner as runner_mod
 from rk_harness import search as search_mod
 from rk_harness.directive import fallback_directive
 from rk_harness.verifier_hash import compute_verifier_hash
+from rk_harness import methodology as methodology_mod
+from rk_harness import sitegen as sg
 from rk_harness.sitegen import (
-    BANNED_WORDS, BANNER, AVR_NOTE, BannedWordError, build, render_index, render_cell,
-    render_hypotheses, render_costmodel, render_falsification, render_glossary,
-    render_literature, render_interpretation, render_validation, render_benchmark,
+    BANNED_WORDS, BANNER, AVR_NOTE, OVERVIEW_URL, BannedWordError, build, render_index,
+    render_cell, render_hypotheses, render_validation,
     render_explicit, render_implicit, render_adaptive,
     check_banned, epoch_status_data,
 )
@@ -1065,7 +1066,8 @@ def test_E3_every_elite_gets_a_cell_page(monkeypatch, tmp_path):
             assert rec.tableau_hash in html
             assert rec.verifier_hash in html
             assert rec.tier in html
-    expected = {"index.html", "hypotheses.html", "costmodel.html", "falsification.html",
+    expected = {"index.html", "explicit.html", "implicit.html", "adaptive.html",
+                "hypotheses.html", "methodology.html",
                 "cell-p4-s4-b2.html", "cell-p3-s3-b1.html", "cell-p2-s2-b0.html"}
     assert expected <= {p.name for p in out.iterdir()}
 
@@ -1154,19 +1156,24 @@ def test_B61_every_page_has_provenance_title_doctype_and_no_javascript(monkeypat
         assert "javascript:" not in html.lower(), f.name
 
 
-def test_B61_costmodel_page_has_the_anchor_numbers_and_avr_note(monkeypatch, tmp_path):
+def test_B61_costmodel_section_has_the_anchor_numbers_and_avr_note(monkeypatch, tmp_path):
+    """The cost model moved from costmodel.html into methodology.html#costmodel."""
     _work, arch = _site_archive(monkeypatch, tmp_path)
     out = tmp_path / "docs"
     build(arch, out)
-    cm = (out / "costmodel.html").read_text(encoding="utf-8")
+    assert not (out / "costmodel.html").exists()
+    cm = (out / "methodology.html").read_text(encoding="utf-8")
+    assert '<h2 id="costmodel">Cost model</h2>' in cm
+    section = cm.split('<h2 id="costmodel">', 1)[1].split("<h2 ", 1)[0]
     for n in ("33", "85", "36", "64", "66", "170", "72", "128", "132", "340", "144", "256"):
-        assert n in cm, n
-    assert AVR_NOTE in cm
-    assert "rk4" in cm and "rk38" in cm
+        assert n in section, n
+    assert AVR_NOTE in section and "avr_approx" in section
+    assert "rk4" in section and "rk38" in section
     for name in ("euler", "midpoint", "heun2", "ralston2", "heun3", "kutta3"):
-        assert name in cm, name
+        assert name in section, name
     assert BANNER in cm
-    direct = render_costmodel()
+    assert 'class="caption"' not in cm          # the undefined class is gone
+    direct = sg._costmodel_section()
     assert AVR_NOTE in direct and "33" in direct and "64" in direct
     check_banned(direct)
 
@@ -1203,6 +1210,51 @@ def test_B61_cell_pages_carry_phase_label_tier_hashes_and_fractions(monkeypatch,
     assert heun2_rec.tableau_hash in h2_page
 
 
+def test_a_seeded_classical_tableau_is_not_labelled_a_search_result():
+    """Two archive cells are held by tableaus seeded before the search ran.
+
+    Labelling those "search result" told the reader the search had found euler and rk38,
+    and contradicted the overview site, which counts them as classical. The rule reads the
+    record: no directive and cycle 0. heun2 carries no directive either but was archived
+    in cycle 3, so the cycle half of the test is load-bearing rather than decorative.
+    """
+    c = _classical_8()
+    seeded = _rec(c["euler"], _sv(5, 5, 0.32, 0.33, 1.0), "unreplicated", 0, None)
+    searched = _site_records()[2]               # heun2: no directive, cycle 3
+    enumerated = _site_records()[0]             # rk4: D-E000001
+
+    assert sg._is_seeded(seeded)
+    assert not sg._is_seeded(searched) and not sg._is_seeded(enumerated)
+    assert sg._phase_label(seeded) == "seeded classical baseline"
+    assert sg._phase_label(searched) == "search result"
+    assert sg._phase_label(enumerated) == sg._EXHAUSTIVE_LABEL
+
+    page = render_cell(1, 1, 0, seeded)
+    assert "seeded classical baseline" in page
+    assert "search result" not in page
+    check_banned(page)
+
+
+def test_the_explicit_cards_and_elite_table_count_seeded_cells_apart(monkeypatch, tmp_path):
+    """A seeded cell is occupied but it is not a thing the search found, so the coverage
+    note and the elite table both say how many of the occupied cells each process holds.
+    With no seeded record in the archive neither says anything about seeding."""
+    _setup_env(monkeypatch, tmp_path)
+    c = _classical_8()
+    for r in _site_records():
+        append(r)
+    append(_rec(c["euler"], _sv(5, 5, 0.32, 0.33, 1.0), "unreplicated", 0, None))
+    arch = replay()
+    html = render_explicit(arch)
+    assert "4 cells hold an elite, 3 found by the search and 1 seeded classical" in html
+    assert ("1 of these rows is a seeded classical baseline rather than a search result"
+            in html)
+
+    plain = render_explicit(_site_archive(monkeypatch, tmp_path / "plain")[1])
+    assert "seeded classical" not in plain
+    assert "of these rows is a seeded" not in plain
+
+
 def test_B61_render_cell_direct():
     rec = _site_records()[0]
     html = render_cell(4, 4, 2, rec)
@@ -1237,10 +1289,14 @@ def test_B61_render_hypotheses_shows_ids_and_verdicts():
     check_banned(empty)
 
 
-def test_B61_render_falsification_and_index_on_empty_inputs():
-    html = render_falsification(None)
+def test_B61_render_validation_and_index_on_empty_inputs():
+    html = render_validation(None)
     assert html.lower().lstrip().startswith("<!doctype html>")
     assert BANNER in html and "<title>" in html.lower()
+    # both merged sections keep their anchors and say in words that the source is absent
+    assert '<h2 id="speed">' in html and '<h2 id="falsification">' in html
+    assert "rk-work/benchmark/results.json has not been written" in html
+    assert "rk-work/falsification.json has not been written" in html
     check_banned(html)
     idx = render_index(_empty_arch())
     assert idx.lower().lstrip().startswith("<!doctype html>")
@@ -1249,54 +1305,79 @@ def test_B61_render_falsification_and_index_on_empty_inputs():
     check_banned(idx)
 
 
-def test_B61_render_glossary_defines_terms_with_anchors():
-    html = render_glossary()
+_GLOSSARY_ANCHORS = ("q15", "lsb", "floor-rounding", "tableau", "stage", "cycle-budget",
+                     "cost-bucket", "map-elites", "elite", "tiers", "held-out-set",
+                     "anchor-methods", "cohens-d", "csd-weight", "dyadic-rational",
+                     "order", "directive", "hypothesis-ledger", "verifier-hash")
+
+
+def test_B61_glossary_section_defines_terms_with_anchors():
+    """The glossary moved from glossary.html into methodology.html#glossary, every term
+    keeping its anchor id so the deep links resolve at the new address."""
+    section = sg._glossary_section()
+    for anchor in _GLOSSARY_ANCHORS:
+        assert f'id="{anchor}"' in section, anchor
+    for anchor, _term, _paras in sg._GLOSSARY:     # every term, not only the pinned few
+        assert f'<dt id="{anchor}">' in section, anchor
+    for tier in TIERS:
+        assert tier in section                    # the actual tier strings are defined
+    check_banned(section)
+    assert sg._glossary_section() == sg._glossary_section()  # deterministic
+    html = methodology_mod.render_page(sg._page, sg._methodology_sections(None))
     assert html.lower().lstrip().startswith("<!doctype html>")
     assert BANNER in html and "<title>" in html.lower()
     assert "<script" not in html.lower()
-    for anchor in ("q15", "lsb", "floor-rounding", "tableau", "stage", "cycle-budget",
-                   "cost-bucket", "map-elites", "elite", "tiers", "held-out-set",
-                   "anchor-methods", "cohens-d", "csd-weight", "dyadic-rational",
-                   "order", "directive", "hypothesis-ledger", "verifier-hash"):
-        assert f'id="{anchor}"' in html, anchor
-    for tier in TIERS:
-        assert tier in html                       # the actual tier strings are defined
+    assert '<h2 id="glossary">Glossary</h2>' in html
     check_banned(html)
-    assert render_glossary() == render_glossary()  # deterministic
 
 
-def test_B61_build_writes_glossary_and_index_deep_links_it(monkeypatch, tmp_path):
+def test_B61_build_writes_the_glossary_into_methodology_and_the_index_deep_links_it(
+        monkeypatch, tmp_path):
     _work, arch = _site_archive(monkeypatch, tmp_path)
     out = tmp_path / "docs"
     build(arch, out)
-    gl = out / "glossary.html"
-    assert gl.is_file()
-    check_banned(gl.read_text(encoding="utf-8"))
+    assert not (out / "glossary.html").exists()
+    meth = (out / "methodology.html").read_text(encoding="utf-8")
+    check_banned(meth)
+    for anchor in _GLOSSARY_ANCHORS:
+        assert f'id="{anchor}"' in meth, anchor
     index = (out / "index.html").read_text(encoding="utf-8")
-    assert 'href="glossary.html"' in index
-    assert "glossary.html#" in index              # explanations deep-link into the glossary
+    # the hub deep-links the glossary from a term in its own table, not from a
+    # sentence about the page (the note that said so is gone)
+    assert 'href="methodology.html#' in index
+    assert "Terms link to the" not in index
+    assert 'href="methodology.html#q15"' in index  # explanations deep-link into the glossary
+    # every _gloss link anywhere on the site resolves to an id on methodology.html
+    ids = set(re.findall(r'id="([^"]+)"', meth))
+    for page in sorted(out.glob("*.html")):
+        for anchor in re.findall(r'href="methodology\.html#([^"]+)"',
+                                 page.read_text(encoding="utf-8")):
+            assert anchor in ids, (page.name, anchor)
+
+
+SIX_TABS = ["index.html", "explicit.html", "implicit.html", "adaptive.html",
+            "hypotheses.html", "methodology.html"]
+SEVEN_TABS = ["index.html", "explicit.html", "implicit.html", "adaptive.html",
+              "validation.html", "hypotheses.html", "methodology.html"]
 
 
 def _nav_hrefs(html: str) -> list[str]:
-    """Every nav link across all three tiers, in reading order.
+    """Every nav link, in reading order.
 
-    The nav is three rows: the overview and the three method classes, then the evidence
-    that spans classes, then the record and the reference. Tests assert the whole
-    ordered list so a page can neither vanish nor change tier unnoticed."""
+    The nav is one row of at most seven tabs. Tests assert the whole ordered list so a
+    page can neither vanish nor move unnoticed; the regex still reads every nav row, so
+    a second row would show up here as extra entries."""
     rows = re.findall(r'<nav class="tabs[^"]*">(.*?)</nav>', html, re.S)
     assert rows, "no nav found"
     return [h for row in rows for h in re.findall(r'href="([^"]+)"', row)]
 
 
 def test_B61_nav_lists_every_page_in_order():
-    # Without a validation results file, the validation tab is absent everywhere. The
-    # three class entries are unconditional and lead the nav in a fixed order.
-    html = render_costmodel()
-    assert _nav_hrefs(html) == [
-        "index.html", "explicit.html", "implicit.html", "adaptive.html",
-        "hypotheses.html", "falsification.html",
-        "methodology.html", "costmodel.html", "literature.html",
-        "interpretation.html", "glossary.html"]
+    # With no evidence file the validation tab is absent everywhere. The three class
+    # entries are unconditional and lead the nav in a fixed order.
+    html = render_index(_empty_arch())
+    assert _nav_hrefs(html) == SIX_TABS
+    assert _nav_hrefs(sg.render_hypotheses([])) == SIX_TABS
 
 
 def test_B61_folds_kept_only_where_depth_remains(monkeypatch, tmp_path):
@@ -1304,28 +1385,29 @@ def test_B61_folds_kept_only_where_depth_remains(monkeypatch, tmp_path):
 
     A fold survives only where it carries multi-paragraph interpretive depth: the
     archive-grid structure (the explicit class page), the score-metric definitions (cell
-    pages), the hypothesis grammar, and the falsification protocol.
+    pages), the hypothesis grammar, and the falsification protocol (now on validation).
     """
-    _work, arch = _site_archive(monkeypatch, tmp_path)
+    work, arch = _site_archive(monkeypatch, tmp_path)
     append_hypothesis(_hyp())
     arch = replay()
+    (work / "falsification.json").write_text(json.dumps({"verdict": "mixed"}),
+                                             encoding="utf-8")
     out = tmp_path / "docs"
     build(arch, out)
     keeps = {"explicit.html": 1, "cell-p4-s4-b2.html": 1, "hypotheses.html": 1,
-             "falsification.html": 1}
+             "validation.html": 1}
     for name, n in keeps.items():
         html = (out / name).read_text(encoding="utf-8")
         assert html.count('<details class="explain">') == n, name
         assert "How to read this" in html, name
-    for name in ("index.html", "costmodel.html", "literature.html",
-                 "interpretation.html", "glossary.html"):
+    for name in ("index.html", "methodology.html"):
         html = (out / name).read_text(encoding="utf-8")
         assert '<details class="explain">' not in html, name
     # the load-bearing sentences moved into always-visible captions and notes
     expl = (out / "explicit.html").read_text(encoding="utf-8")
     assert "down-left is better" in expl           # scatter fold merged into its caption
     assert "overfitting to the visible search set" in expl    # table fold became a note
-    cm = (out / "costmodel.html").read_text(encoding="utf-8")
+    cm = (out / "methodology.html").read_text(encoding="utf-8")
     assert "swaps between the multiplier models" in cm        # anchor fold merged
     cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
     assert "held-out set" in cell                  # per-problem fold merged into caption
@@ -1356,7 +1438,8 @@ def test_rule10_no_findings_page_states_an_attention_split(monkeypatch, tmp_path
         m = triple.search(attrs.sub(" ", html))
         assert m is None, f"{page.name} carries the percentage-triple shape {m.group(0)!r}"
         assert "attention split" not in html.lower(), page.name
-    assert seen >= 14
+    # seven tabbed pages (validation is present here) plus the three cell pages
+    assert seen >= 10
 
 
 def test_B61_every_chart_opens_with_a_visible_caption(monkeypatch, tmp_path):
@@ -1389,11 +1472,13 @@ def test_B61_hypotheses_page_gives_each_distinct_predicate_one_row():
     assert html.count('<details class="led">') == 2
     m = re.search(r'<summary><span class="mono">H-001 <span class="rep">&times;2</span></span>'
                   r'<span class="badge badge-supported">supported</span>'
-                  r'<span class="pred" title="[^"]*">slow\.p3s4\.heldout[^<]*</span>'
+                  r'<span class="pred">slow\.p3s4\.heldout[^<]*</span>'
                   r'<span class="num">1\.6</span><span class="num">260</span>'
                   r'<span class="when">c9</span>', html)
     assert m is not None, "summary must carry id, repeat count, verdict, predicate, d, n, cycle"
-    assert html.count('<details class="repeats">') == 1      # only the repeated predicate
+    # the repeats are listed by id inside the row, not as a nested table of posings
+    assert '<details class="repeats">' not in html
+    assert '<dt>posed as</dt><dd class="mono">H-001, H-002</dd>' in html
     for hid in ("H-001", "H-002", "H-003"):
         assert hid in html                                   # no record is dropped
     assert "3 hypotheses over 2 distinct predicates" in html
@@ -1419,19 +1504,47 @@ def test_B61_stored_utc_timestamps_display_in_central_time():
 
 
 def test_B61_literature_and_interpretation_entries_fold_with_ct_dates():
+    """Both logs moved onto the research log (hypotheses.html): interpretation folds
+    with the newest entry open, literature folds closed."""
     digests = [{"ts": "2026-09-21T10:00:00Z", "cycle": 5, "topic": "fixed point drift",
                 "summary": "para one.\n\npara two.", "key_points": ["k1"],
                 "sources": [{"title": "paper", "url": "https://example.org/x"}]}]
-    lit = render_literature(digests)
-    assert '<details class="fold entry" open>' in lit
-    assert "fixed point drift" in lit and "2026-09-21 05:00 CT" in lit
-    assert "para two." in lit and "example.org" in lit
+    lit = render_hypotheses([], digests=digests)
+    lit_sec = lit.split('<h2 id="literature">', 1)[1]
+    assert '<details class="fold entry">' in lit_sec
+    assert '<details class="fold entry" open>' not in lit_sec
+    assert "fixed point drift" in lit_sec and "2026-09-21 05:00 CT" in lit_sec
+    assert "para two." in lit_sec and "example.org" in lit_sec
     check_banned(lit)
-    interp = render_interpretation([{"ts": "2026-09-21T10:01:00Z", "cycle": 6,
-                                     "text": "reading one.\n\nreading two."}])
-    assert '<details class="fold entry" open>' in interp
-    assert "cycle 6" in interp and "2026-09-21 05:01 CT" in interp and "reading two." in interp
+    interp = render_hypotheses([], interpretations=[{"ts": "2026-09-21T10:01:00Z", "cycle": 6,
+                                                     "text": "reading one.\n\nreading two."}])
+    interp_sec = interp.split('<h2 id="interpretation">', 1)[1].split('<h2 id="literature">')[0]
+    assert '<details class="fold entry" open>' in interp_sec
+    assert ("cycle 6" in interp_sec and "2026-09-21 05:01 CT" in interp_sec
+            and "reading two." in interp_sec)
+    # the model-written note is stated once for both logs
+    assert interp.count("Model-written text") == 1
     check_banned(interp)
+
+
+def test_D41_research_log_shows_the_newest_entries_and_points_at_the_rest():
+    interps = [{"ts": f"2026-09-{10 + i:02d}T10:00:00Z", "cycle": 100 + i,
+                "text": f"reading {i}."} for i in range(7)]
+    digests = [{"ts": f"2026-09-{10 + i:02d}T11:00:00Z", "cycle": 100 + i,
+                "topic": f"topic {i:02d}", "summary": "s."} for i in range(12)]
+    html = render_hypotheses([], digests=digests, interpretations=interps)
+    interp_sec = html.split('<h2 id="interpretation">', 1)[1].split('<h2 id="literature">')[0]
+    lit_sec = html.split('<h2 id="literature">', 1)[1]
+    assert interp_sec.count('<details class="fold entry"') == 5
+    assert "cycle 106</strong>" in interp_sec and "cycle 101</strong>" not in interp_sec
+    assert "2 older entries are not shown here" in interp_sec
+    assert "rk-work/interpretation/interpretations.jsonl" in interp_sec
+    assert lit_sec.count('<details class="fold entry"') == 10
+    assert "topic 11" in lit_sec and "topic 01" not in lit_sec
+    assert "2 older digests are not shown here" in lit_sec
+    assert "rk-work/literature/digests.jsonl" in lit_sec
+    assert html == render_hypotheses([], digests=digests, interpretations=interps)
+    check_banned(html)
 
 
 def test_B61_heatmap_rows_extend_to_occupied_stage_counts_outside_the_default_range():
@@ -1448,9 +1561,25 @@ def test_B61_heatmap_rows_extend_to_occupied_stage_counts_outside_the_default_ra
     assert 'href="cell-p1-s1-b0.html"' in svg      # with its linked, filled cell
     assert ">0.594<" in svg                        # cell label at 3 significant figures
     assert "0.594285" in svg                       # full-precision value in the tooltip
+    # the value wears the ink paired with its fill step rather than a haloed label, so
+    # it reads on a pale cell and a deep one in either theme
+    assert 'style="fill:var(--on-q' in svg and 'class="lbl"' not in svg
+    # one figure for the grids: a caption that holds in both themes, one source line
+    assert "further a cell's color is from the page background" in html
+    assert "deeper blue" not in html.lower()
+    assert html.count("Source: rk-work/archive, the elite in each cell") == 2  # scatter, grids
+    assert '<p class="ptitle">Order 1</p>' in html
+    # the explicit cards are about the explicit class: no telemetry, no research log
+    assert "last cycle id" not in html and '<div class="k">hypotheses</div>' not in html
     for s in (2, 3, 4, 5, 6):
         assert f">s={s}<" in svg                   # default rows still render
     assert "counts run 2 to 6" not in html         # the old fixed-range claim is gone
+    # the archive's own table expands the grids, so it folds under them rather
+    # than at the foot of the page beside the library comparison
+    order = [html.index(x) for x in ("<h2>Elite grids</h2>",
+                                     "Every elite in one table",
+                                     "at matched accuracy</h2>")]
+    assert order == sorted(order)
     check_banned(html)
 
 
@@ -1529,7 +1658,7 @@ def test_B61_sweep_chart_y_labels_thin_and_clear_on_extreme_error_spans():
     data = {"verdict": "proceed",
             "coefficient_fraction": {"rk4": {"m0plus_fast": 0.41}},
             "methods": {"rk4": {"crossover_h": 0.01, "sweep": sweep}}}
-    html = render_falsification(data)
+    html = render_validation(None, falsification=data)
     i = html.index("rk4: Q15 and float64 error against step size")
     svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i) + 6]
     # y tick labels are end-anchored in the left gutter; the span is 1e-17..1e0,
@@ -1545,12 +1674,81 @@ def test_B61_sweep_chart_y_labels_thin_and_clear_on_extreme_error_spans():
 
 def test_B61_index_and_cell_charts_pass_the_fit_audit(monkeypatch, tmp_path):
     """Chart-fit audit regression across the standing pages: the elite scatter's
-    axis-corner labels, heatmap cells and per-problem bars all keep 4px clearance."""
+    axis-corner labels, heatmap cells, per-problem bars, the anchor bars on the
+    methodology page and the verdict chart on the research log all keep 4px clearance."""
     work, arch = _site_archive(monkeypatch, tmp_path)
+    append_hypothesis(_hyp())
+    append_hypothesis(_hyp(id="H-048", predicate="fast.p2s2.heldout < fast.p2s3.heldout",
+                           verdict="inconclusive", n_samples=300, effect_size=0.1,
+                           resolved_cycle=9))
+    arch = replay()
     out = tmp_path / "docs"
     build(arch, out)
-    for name in ("index.html", "costmodel.html", "cell-p4-s4-b2.html"):
+    for name in ("index.html", "explicit.html", "implicit.html", "adaptive.html",
+                 "methodology.html", "hypotheses.html", "cell-p4-s4-b2.html"):
         _assert_chart_fit((out / name).read_text(encoding="utf-8"))
+    assert 'aria-label="Distinct predicates in each verdict group' in (
+        out / "hypotheses.html").read_text(encoding="utf-8")
+
+
+def test_F2_class_page_charts_fit_their_frames_on_extreme_inputs():
+    """The chart-fit audit on every class-page chart, with inputs chosen to break it: a
+    problem name wider than a panel, error spans of twenty decades, counts near a
+    billion, a cycle budget at the far end of its ladder, a bar that fills its frame."""
+    long = "a_problem_name_well_past_the_width_of_one_small_multiple_panel"
+    rows = [{"class": "implicit", "side": side, "solver": solver, "problem": prob,
+             "arithmetic": "float64", "target_error": 1e-3, "nfev": nfev,
+             "achieved_error": err, "status": "reached", "stiff": True}
+            for prob in (long, "b")
+            for side, solver, nfev, err in (("ours", "sdirk2_fd_jac", 3, 1e-17),
+                                            ("library", "Radau", 2_000_000, 0.9),
+                                            ("library", "BDF", 40, 1e-9))]
+    sweep = [({"key": long}, {"problem": long, "arithmetic": "float64", "points": [
+        {"tol": 1e-3, "n_fevals": 5, "achieved_error": 3e-2, "status": "ok"},
+        {"tol": 1e-12, "n_fevals": 9_000_000, "achieved_error": 1e-19, "status": "ok"}]})]
+    budget = {long: {"budget_cycles": 2 ** 21, "cost_grade": "design_estimate",
+                     "arithmetic": "float64", "ladder": [
+                         {"factor": "1/4", "analytic_cycles": 2 ** 19, "error": 1e-3,
+                          "status": "ok"},
+                         {"factor": "1/1", "analytic_cycles": 2 ** 21, "error": 1e-12,
+                          "status": "ok"},
+                         {"factor": "2/1", "analytic_cycles": 2 ** 22, "error": None,
+                          "status": "diverged"}]}}
+    gains = [({"summary": {"rejection_rate": r}},
+              {"params": {"alpha": [a, 256], "beta": [b, 256]}, "arithmetic": "float64"})
+             for a, b, r in ((255, 1, 0.5), (1, 255, 1e-5), (255, 255, 0.0),
+                             (1, 1, 0.123456))]
+    census = [({"key": long}, {"status": "ok", "arithmetic": "exact", "params": {},
+                               "counts": {"matrices": 987654321,
+                                          "order2_consistent": 987654321,
+                                          "order3_consistent": 1, "both_solvable": 0}})]
+    pac = {"stage": 9000, "estimate": 1, "controller": 1, "branch_allowance": 5000,
+           "total": 9002}
+    amt = [{"solver": "bs32_q15", "n_states": n, "per_attempt_cycles": pac,
+            "cost_grade": "g", "arithmetic": "q15"} for n in (2, 3, 4)]
+    jac = {"analytic": {"terms": {"newton_iterations": 50000, "lu_factor": 1,
+                                  "stage_base": 1}},
+           "finite_difference": {"terms": {"newton_iterations": 1,
+                                           "fd_jacobian_arith": 99999}}}
+    stab = [{"gamma": "1/1024", "gamma_float": 1 / 1024, "r_at_infinity_float": 1e6,
+             "a_stable": False},
+            {"gamma": "1023/1024", "gamma_float": 1023 / 1024,
+             "r_at_infinity_float": -1e-6, "a_stable": True}]
+    lane = [{"key": "k" * 16, "method": {"a21": a21, "gamma": "1/2", "jacobian": "analytic"},
+             "score": {"median_cycles_at_target": m, "best_achieved_error": e},
+             "controller": {}}
+            for a21, m, e in (("-1000", 1.5, 1e-15), ("1000000", 123456789.0, 0.5))]
+    charts = [sg._matched_chart(rows, "implicit"), sg._sweep_multiples(sweep),
+              sg._budget_chart(budget), sg._gain_map(gains), sg._census_chart(census),
+              sg._attempt_cost_chart({"adaptive_matched_tolerance": amt}),
+              sg._jacobian_chart([({"key": long}, {"problem": long, "cycles": jac})]),
+              sg._stability_chart([({}, {"rows": stab})]),
+              sg._lane_strip_chart(lane, "rk-work/implicit_archive/elites.json"),
+              sg._lane_scatter_chart(lane, "rk-work/adaptive_archive/elites.json")]
+    for chart in charts:
+        assert chart.startswith("<figure><figcaption>"), chart[:80]
+        _assert_chart_fit(chart)
+        check_banned(chart)
 
 
 def test_B61_interpretation_folds_superseded_same_cycle_drafts():
@@ -1560,7 +1758,7 @@ def test_B61_interpretation_folds_superseded_same_cycle_drafts():
         {"ts": "2026-09-21T10:01:00Z", "cycle": 6, "text": "draft reading."},
         {"ts": "2026-09-21T10:05:00Z", "cycle": 6, "text": "final reading."},
     ]
-    html = render_interpretation(entries)
+    html = render_hypotheses([], interpretations=entries)
     assert html.count('<details class="fold entry"') == 2   # one entry per cycle
     assert html.count("<summary><strong>cycle 6</strong>") == 1
     assert "2026-09-21 05:05 CT" in html                    # newest draft speaks for cycle 6
@@ -1571,20 +1769,28 @@ def test_B61_interpretation_folds_superseded_same_cycle_drafts():
     assert i_top < i_fold < i_draft                         # older draft folded below
     assert html.index("cycle 6</strong>") < html.index("cycle 5</strong>")
     assert html.count('<details class="fold entry" open>') == 1
-    assert render_interpretation(entries) == render_interpretation(entries)
+    assert (render_hypotheses([], interpretations=entries)
+            == render_hypotheses([], interpretations=entries))
     check_banned(html)
 
 
-def test_B61_falsification_page_reflects_falsification_json(monkeypatch, tmp_path):
+def test_B61_falsification_section_reflects_falsification_json(monkeypatch, tmp_path):
+    """falsification.html is retired; the experiment is validation.html#falsification,
+    and falsification.json alone is enough to put the validation tab on the site."""
     work, arch = _site_archive(monkeypatch, tmp_path)
     (work / "falsification.json").write_text(
         json.dumps({"verdict": "proceed", "problem": "damped_osc",
                     "coefficient_fraction": {"rk4": {"m0plus_fast": 0.41}}}), encoding="utf-8")
     out = tmp_path / "docs"
     build(arch, out)
-    page = (out / "falsification.html").read_text(encoding="utf-8")
+    assert not (out / "falsification.html").exists()
+    page = (out / "validation.html").read_text(encoding="utf-8")
     assert BANNER in page
-    assert "proceed" in page
+    section = page.split('<h2 id="falsification">', 1)[1]
+    assert "proceed" in section
+    assert "crossover" in section.lower()           # preflight K4 looks for this word
+    assert "Raw data" not in page                   # no generic JSON dump any more
+    assert _nav_hrefs(page) == SEVEN_TABS
 
 
 def _validation_fixture() -> dict:
@@ -1714,13 +1920,9 @@ def test_B64_validation_nav_entry_present_only_with_results(monkeypatch, tmp_pat
     out2 = tmp_path / "docs2"
     build(arch, out2)
     assert (out2 / "validation.html").is_file()
-    for name in ("index.html", "costmodel.html", "methodology.html", "validation.html"):
+    for name in ("index.html", "hypotheses.html", "methodology.html", "validation.html"):
         html = (out2 / name).read_text(encoding="utf-8")
-        assert _nav_hrefs(html) == [
-            "index.html", "explicit.html", "implicit.html", "adaptive.html",
-            "validation.html", "hypotheses.html", "falsification.html",
-            "methodology.html", "costmodel.html", "literature.html",
-            "interpretation.html", "glossary.html"], name
+        assert _nav_hrefs(html) == SEVEN_TABS, name
     # the active tab lands on the validation page itself
     val = (out2 / "validation.html").read_text(encoding="utf-8")
     assert '<a href="validation.html" class="on">validation</a>' in val
@@ -1734,7 +1936,7 @@ def test_B64_validation_build_is_deterministic_and_flag_resets(monkeypatch, tmp_
     build(arch, d2)
     assert _snapshot(d1) == _snapshot(d2)
     # the nav flag never leaks out of build(): a direct render afterwards has no tab
-    html = render_costmodel()
+    html = render_index(_empty_arch())
     assert 'href="validation.html"' not in html
 
 
@@ -2024,17 +2226,24 @@ def _write_benchmark(work: Path, data: dict) -> None:
     (bdir / "results.json").write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
 
 
-def test_B67_benchmark_page_built_from_results_json(monkeypatch, tmp_path):
+def test_B67_speed_section_built_from_results_json(monkeypatch, tmp_path):
+    """benchmark.html is retired; its timings are validation.html#speed, and a benchmark
+    file alone is enough to put the validation tab on the site."""
     work, arch = _site_archive(monkeypatch, tmp_path)
     _write_benchmark(work, _benchmark_fixture())
     out = tmp_path / "docs"
     build(arch, out)
-    page = out / "benchmark.html"
+    assert not (out / "benchmark.html").exists()
+    page = out / "validation.html"
     assert page.is_file()
-    html = page.read_text(encoding="utf-8")
-    assert html.lower().lstrip().startswith("<!doctype html>")
-    assert BANNER in html and "<script" not in html.lower()
-    check_banned(html)
+    full = page.read_text(encoding="utf-8")
+    assert full.lower().lstrip().startswith("<!doctype html>")
+    assert BANNER in full and "<script" not in full.lower()
+    check_banned(full)
+    assert '<h2 id="speed">Measured time per step</h2>' in full
+    html = full.split('<h2 id="speed">', 1)[1].split('<h2 id="falsification">', 1)[0]
+    # the library table left with the benchmark page: matched accuracy is on the class tabs
+    assert "Library accuracy at matched tolerance" not in full
     # the measured us/step chart, one row per method, with its visible caption
     assert 'aria-label="Measured microseconds per Q15 step, per method"' in html
     assert "<figure><figcaption>" in html
@@ -2044,37 +2253,37 @@ def test_B67_benchmark_page_built_from_results_json(monkeypatch, tmp_path):
     assert "champion Q15 error" in html and "rk4 Q15 error" in html
     assert "0.000198741" in html and "0.0159248" in html
     assert "22.729" in html and "56.399" in html
-    # the library accuracy table with the never-same-work caveat as a visible caption
-    assert "never a same-work comparison" in html
-    assert "RK45" in html and "Radau" in html and "6.65e-06" in html
-    # the environment line as a muted note
-    assert '<p class="note">Environment: CPython 3.13.5' in html
+    # the environment line sits in the timing fold with the rest of the fine print
+    fine = html.split("<summary>How the timings were taken</summary>", 1)[1]
+    assert "Environment: CPython 3.13.5" in fine.split("</details>", 1)[0]
     assert "TestCPU 9000" in html and "scipy 1.14.1" in html
     # every SVG on the page passes the chart-fit audit
-    _assert_chart_fit(html)
+    _assert_chart_fit(full)
 
 
-def test_B67_benchmark_nav_entry_present_only_with_results(monkeypatch, tmp_path):
+def test_B67_benchmark_data_raises_the_validation_tab_and_no_benchmark_tab(
+        monkeypatch, tmp_path):
     work, arch = _site_archive(monkeypatch, tmp_path)
     out1 = tmp_path / "docs1"
     build(arch, out1)
     assert not (out1 / "benchmark.html").exists()
-    assert 'href="benchmark.html"' not in (out1 / "index.html").read_text(encoding="utf-8")
-    # with both optional results files present, benchmark follows validation in the nav
+    assert not (out1 / "validation.html").exists()
+    idx1 = (out1 / "index.html").read_text(encoding="utf-8")
+    assert 'href="benchmark.html"' not in idx1 and 'href="validation.html"' not in idx1
+    # with both optional results files present there is still exactly one evidence tab
     _write_validation(work, _validation_fixture())
     _write_benchmark(work, _benchmark_fixture())
     out2 = tmp_path / "docs2"
     build(arch, out2)
-    assert (out2 / "benchmark.html").is_file()
-    for name in ("index.html", "validation.html", "benchmark.html"):
+    assert not (out2 / "benchmark.html").exists()
+    for name in ("index.html", "validation.html", "methodology.html"):
         html = (out2 / name).read_text(encoding="utf-8")
-        assert _nav_hrefs(html) == [
-            "index.html", "explicit.html", "implicit.html", "adaptive.html",
-            "validation.html", "benchmark.html", "hypotheses.html",
-            "falsification.html", "methodology.html", "costmodel.html",
-            "literature.html", "interpretation.html", "glossary.html"], name
-    val = (out2 / "benchmark.html").read_text(encoding="utf-8")
-    assert '<a href="benchmark.html" class="on">benchmark</a>' in val
+        assert _nav_hrefs(html) == SEVEN_TABS, name
+    val = (out2 / "validation.html").read_text(encoding="utf-8")
+    assert '<a href="validation.html" class="on">validation</a>' in val
+    # the validation suite leads, then the speed section, then the premise test
+    assert (val.index("<h2>Best per problem</h2>") < val.index('<h2 id="speed">')
+            < val.index('<h2 id="falsification">') < val.index("<h2>Full tables</h2>"))
 
 
 def test_B67_benchmark_build_is_deterministic_and_flag_resets(monkeypatch, tmp_path):
@@ -2085,8 +2294,8 @@ def test_B67_benchmark_build_is_deterministic_and_flag_resets(monkeypatch, tmp_p
     build(arch, d2)
     assert _snapshot(d1) == _snapshot(d2)
     # the nav flag never leaks out of build(): a direct render afterwards has no tab
-    html = render_costmodel()
-    assert 'href="benchmark.html"' not in html
+    html = render_index(_empty_arch())
+    assert 'href="validation.html"' not in html and 'href="benchmark.html"' not in html
 
 
 def _write_sidetrack(work: Path, points: list[dict]) -> None:
@@ -2117,25 +2326,25 @@ def _sidetrack_fixture() -> list[dict]:
     ]
 
 
-def test_B68_sidetrack_nav_entry_present_only_with_a_ledger(monkeypatch, tmp_path):
+def test_B68_a_ledger_adds_no_tab_and_lands_in_methodology(monkeypatch, tmp_path):
+    """sidetrack.html is retired: the ledger's rules and failures are
+    methodology.html#ledger, and a ledger file no longer adds a tab."""
     work, arch = _site_archive(monkeypatch, tmp_path)
     out1 = tmp_path / "docs1"
     build(arch, out1)
-    assert not (out1 / "sidetrack.html").exists()
-    assert 'href="sidetrack.html"' not in (out1 / "index.html").read_text(encoding="utf-8")
+    meth1 = (out1 / "methodology.html").read_text(encoding="utf-8")
+    assert "rk-work/sidetrack/ledger.jsonl, has not been written" in meth1
     _write_sidetrack(work, _sidetrack_fixture())
     out2 = tmp_path / "docs2"
     build(arch, out2)
-    assert (out2 / "sidetrack.html").is_file()
-    for name in ("index.html", "costmodel.html", "sidetrack.html"):
+    assert not (out2 / "sidetrack.html").exists()
+    for name in ("index.html", "methodology.html", "implicit.html"):
         html = (out2 / name).read_text(encoding="utf-8")
-        assert _nav_hrefs(html) == [
-            "index.html", "explicit.html", "implicit.html", "adaptive.html",
-            "hypotheses.html", "falsification.html",
-            "methodology.html", "costmodel.html", "sidetrack.html", "literature.html",
-            "interpretation.html", "glossary.html"], name
-    page = (out2 / "sidetrack.html").read_text(encoding="utf-8")
-    assert '<a href="sidetrack.html" class="on">measurement ledger</a>' in page
+        assert _nav_hrefs(html) == SIX_TABS, name
+        assert 'href="sidetrack.html"' not in html, name
+    page = (out2 / "methodology.html").read_text(encoding="utf-8")
+    assert '<a href="methodology.html" class="on">methodology</a>' in page
+    assert '<h2 id="ledger">Measurement ledger</h2>' in page
 
 
 def test_B68_sidetrack_build_is_deterministic_and_flag_resets(monkeypatch, tmp_path):
@@ -2145,28 +2354,32 @@ def test_B68_sidetrack_build_is_deterministic_and_flag_resets(monkeypatch, tmp_p
     build(arch, d1)
     build(arch, d2)
     assert _snapshot(d1) == _snapshot(d2)
-    html = render_costmodel()
+    html = render_index(_empty_arch())
     assert 'href="sidetrack.html"' not in html
 
 
-def test_B68_sidetrack_page_reports_every_point_and_stays_static(monkeypatch, tmp_path):
+def test_B68_the_ledger_section_counts_points_and_stays_static(monkeypatch, tmp_path):
     work, arch = _site_archive(monkeypatch, tmp_path)
     _write_sidetrack(work, _sidetrack_fixture())
     out = tmp_path / "docs"
     build(arch, out)
-    page = (out / "sidetrack.html").read_text(encoding="utf-8")
-    for p in _sidetrack_fixture():
-        assert p["job"] in page and p["key"] in page
+    page = (out / "methodology.html").read_text(encoding="utf-8")
+    section = page.split('<h2 id="ledger">', 1)[1].split("<h2 ", 1)[0]
     # the counts come from the ledger, not from a hardcoded number
-    assert ">2<" in page                      # points measured card
-    # both classes are named, and the page stays script-free like every other page
-    assert "adaptive" in page and "implicit" in page
+    assert "The ledger holds 2 points across 2 jobs" in section
+    assert "0123456789ab" in section               # the newest code hash, 12 characters
+    # no flattened whole-ledger dump: the points themselves are on the class pages
+    for p in _sidetrack_fixture():
+        assert p["key"] not in section, p["key"]
     assert "<script" not in page
     # each job's own reading is on its class page, filtered by track
     imp = (out / "implicit.html").read_text(encoding="utf-8")
     adp = (out / "adaptive.html").read_text(encoding="utf-8")
     assert "sdirk.stiff_suite" in imp and "sdirk.stiff_suite" not in adp
     assert "adaptive.suite_sweep" in adp and "adaptive.suite_sweep" not in imp
+    for p in _sidetrack_fixture():
+        cls_page = imp if p["track"] == "implicit" else adp
+        assert p["key"] in cls_page, p["key"]
 
 
 def test_B69_a_failed_point_message_cannot_block_the_site_build(monkeypatch, tmp_path):
@@ -2184,11 +2397,13 @@ def test_B69_a_failed_point_message_cannot_block_the_site_build(monkeypatch, tmp
                             sort_keys=True) + chr(10))
     out = tmp_path / "docs"
     build(arch, out)                       # build() runs check_banned before writing
-    page = (out / "sidetrack.html").read_text(encoding="utf-8")
+    page = (out / "methodology.html").read_text(encoding="utf-8")
     check_banned(page)
     # softened, not dropped: the reader still gets the message
-    assert "RuntimeError" in page
-    assert "shows the earliest new case" in page
+    section = page.split('<h2 id="ledger">', 1)[1].split("<h2 ", 1)[0]
+    assert "Points that did not complete" in section
+    assert "RuntimeError" in section
+    assert "shows the earliest new case" in section
 
 
 def test_B69_the_shipped_catalogue_prose_passes_the_guard(monkeypatch, tmp_path):
@@ -2207,16 +2422,18 @@ def test_B69_the_shipped_catalogue_prose_passes_the_guard(monkeypatch, tmp_path)
     sidetrack_mod.run_point(point, ts="fixed")     # cheapest real point: exact algebra
     out = tmp_path / "docs"
     build(arch, out)
-    page = (out / "sidetrack.html").read_text(encoding="utf-8")
+    check_banned((out / "methodology.html").read_text(encoding="utf-8"))
+    page = (out / "implicit.html").read_text(encoding="utf-8")
     check_banned(page)
     assert "sdirk.gamma_dyadic_scan" in page and "s04" in page
 
 
-def test_B67_render_benchmark_direct_is_banned_word_safe():
-    html = render_benchmark(_benchmark_fixture())
+def test_B67_render_validation_with_only_benchmark_is_banned_word_safe():
+    html = render_validation(None, benchmark=_benchmark_fixture())
     assert "<title>" in html.lower()
     check_banned(html)
-    assert render_benchmark(_benchmark_fixture()) == render_benchmark(_benchmark_fixture())
+    assert (render_validation(None, benchmark=_benchmark_fixture())
+            == render_validation(None, benchmark=_benchmark_fixture()))
 
 
 def test_B67_index_and_validation_carry_the_measured_speed_sentence(monkeypatch, tmp_path):
@@ -2231,7 +2448,8 @@ def test_B67_index_and_validation_carry_the_measured_speed_sentence(monkeypatch,
         html = (out / name).read_text(encoding="utf-8")
         assert ("runs in 36.293 us per Q15 step against 51.671 us for rk4" in html), name
         assert "speedup 1.450x" in html, name
-        assert 'href="benchmark.html"' in html, name
+        assert 'href="validation.html#speed"' in html, name
+        assert 'href="benchmark.html"' not in html, name
     # without benchmark results, no page invents a wall-clock figure
     out2 = tmp_path / "docs2"
     (work / "benchmark" / "results.json").unlink()
@@ -2259,12 +2477,195 @@ def test_B62_build_is_deterministic_and_creates_missing_out_dir(monkeypatch, tmp
     build(replay(), tmp_path / "d3")
     assert _snapshot(tmp_path / "d3") == s1
     assert render_index(arch) == render_index(arch)
-    assert render_costmodel() == render_costmodel()
+    assert sg._costmodel_section() == sg._costmodel_section()
 
 
 def test_B62_different_archives_give_different_indexes(monkeypatch, tmp_path):
     _work, arch = _site_archive(monkeypatch, tmp_path)
     assert render_index(arch) != render_index(_empty_arch())
+
+
+# ======================================================================================
+# D41: seven tabs, the overview link, and a build that removes what it retired
+# ======================================================================================
+
+RETIRED = ("benchmark.html", "costmodel.html", "falsification.html", "glossary.html",
+           "interpretation.html", "literature.html", "sidetrack.html")
+
+
+def _full_work(work: Path) -> None:
+    """Every optional source at once: the state in which the most pages and links exist."""
+    _write_validation(work, _stiff_validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    _write_sidetrack(work, _sidetrack_fixture())
+    (work / "falsification.json").write_text(json.dumps({
+        "verdict": "mixed",
+        "methods": {"rk4": {"crossover_h": 0.15, "crossover_practical": True,
+                            "coefficient_fraction": {"m0plus_fast": 0.41},
+                            "sweep": [{"h": 0.5, "q15_error": 0.01, "float_error": 0.02},
+                                      {"h": 0.1, "q15_error": 0.004, "float_error": 1e-4},
+                                      {"h": 0.01, "q15_error": 0.03, "float_error": 1e-8}]}}}),
+        encoding="utf-8")
+    append_hypothesis(_hyp())
+    from rk_harness import literature
+    literature.append_digest({"ts": CLOCK, "cycle": 5, "topic": "fixed point drift",
+                              "summary": "s.", "key_points": [],
+                              "sources": [{"title": "t", "url": "https://example.org/x"}]})
+    literature.append_interpretation({"ts": CLOCK, "cycle": 6, "text": "a reading."})
+
+
+def test_D41_the_nav_is_one_row_of_seven_tabs(monkeypatch, tmp_path):
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    assert sg._CONDITIONAL == {"validation.html"}
+    assert [h for h, _l in sg._NAV_ITEMS] == SEVEN_TABS
+    assert len(sg._NAV_ITEMS) <= 8
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        rows = re.findall(r'<nav class="tabs([^"]*)">', html)
+        assert rows == [""], (page.name, rows)            # exactly one row, no sub-rows
+        hrefs = _nav_hrefs(html)
+        assert len(hrefs) <= 8, page.name
+        assert hrefs == SEVEN_TABS, page.name
+    # a cell page keeps the explicit tab active
+    cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
+    assert '<a href="explicit.html" class="on">explicit</a>' in cell
+    hyp = (out / "hypotheses.html").read_text(encoding="utf-8")
+    assert '<a href="hypotheses.html" class="on">research log</a>' in hyp
+
+
+def test_D41_the_header_links_the_overview_site_outside_the_tabs(monkeypatch, tmp_path):
+    _work, arch = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    build(arch, out)
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        header = html.split('<header class="site">', 1)[1].split("</header>", 1)[0]
+        assert f'<a class="about" href="{OVERVIEW_URL}">About the project &#8599;</a>' in header, page.name
+        nav = re.search(r'<nav class="tabs[^"]*">(.*?)</nav>', header, re.S).group(1)
+        assert OVERVIEW_URL not in nav, page.name          # a link, not a tab
+        assert f'href="{OVERVIEW_URL}"' in html.split("<footer>", 1)[1], page.name
+    # the hub's lead links it too
+    index = (out / "index.html").read_text(encoding="utf-8")
+    lead = index.split('<p class="lead">', 1)[1].split("</p>", 1)[0]
+    assert f'href="{OVERVIEW_URL}"' in lead
+
+
+def test_D41_build_removes_retired_pages_and_stale_cells_and_nothing_else(
+        monkeypatch, tmp_path):
+    _work, arch = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    out.mkdir()
+    for name in RETIRED:
+        (out / name).write_text("old page", encoding="utf-8")
+    keep = {"README.md": "readme", "CNAME": "example.org", "notes.html": "mine",
+            "cell-p9-s9-b9.txt": "not a page", "cell-p1-s1-b0.html.bak": "backup",
+            "cell-extra.html": "not a cell name", ".nojekyll": ""}
+    for name, text in keep.items():
+        (out / name).write_text(text, encoding="utf-8")
+    (out / "sub").mkdir()
+    (out / "sub" / "cell-p1-s1-b0.html").write_text("nested", encoding="utf-8")
+    (out / "cell-p1-s1-b0.html").write_text("stale cell", encoding="utf-8")   # not in arch
+    (out / "cell-p4-s4-b2.html").write_text("stale copy", encoding="utf-8")   # in arch
+    build(arch, out)
+    names = {p.name for p in out.iterdir()}
+    for name in RETIRED:
+        assert name not in names, name
+    assert "cell-p1-s1-b0.html" not in names                   # a cell the archive lost
+    for name, text in keep.items():
+        assert (out / name).read_text(encoding="utf-8") == text, name
+    assert (out / "sub" / "cell-p1-s1-b0.html").read_text(encoding="utf-8") == "nested"
+    # a current cell page is rewritten, not deleted
+    assert rk4_cell_is_page((out / "cell-p4-s4-b2.html").read_text(encoding="utf-8"))
+    expected = {"index.html", "explicit.html", "implicit.html", "adaptive.html",
+                "hypotheses.html", "methodology.html", "cell-p4-s4-b2.html",
+                "cell-p3-s3-b1.html", "cell-p2-s2-b0.html"}
+    assert {n for n in names if n.endswith(".html")} == expected | {"notes.html",
+                                                                   "cell-extra.html"}
+
+
+def rk4_cell_is_page(html: str) -> bool:
+    return html.lower().lstrip().startswith("<!doctype html>") and BANNER in html
+
+
+def test_D41_a_build_that_fails_the_banned_word_check_deletes_nothing(monkeypatch, tmp_path):
+    _work, _ = _site_archive(monkeypatch, tmp_path)
+    out = tmp_path / "docs"
+    out.mkdir()
+    (out / "sidetrack.html").write_text("old page", encoding="utf-8")
+    (out / "cell-p1-s1-b0.html").write_text("stale cell", encoding="utf-8")
+    append_hypothesis(_hyp(id="H-009", statement="a novel method"))
+    with pytest.raises(BannedWordError):
+        build(replay(), out)
+    assert (out / "sidetrack.html").read_text(encoding="utf-8") == "old page"
+    assert (out / "cell-p1-s1-b0.html").read_text(encoding="utf-8") == "stale cell"
+
+
+def test_D41_no_page_links_a_retired_url(monkeypatch, tmp_path):
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    pages = sorted(out.glob("*.html"))
+    assert len(pages) >= 10
+    names = {p.name for p in pages}
+    for page in pages:
+        html = page.read_text(encoding="utf-8")
+        for href in re.findall(r'href="([^"]+)"', html):
+            target = href.split("#", 1)[0]
+            assert target not in RETIRED, (page.name, href)
+            if target and "://" not in target:             # every local link resolves
+                assert target in names, (page.name, href)
+
+
+def test_D41_the_verdict_chart_renders_deterministically_and_degrades_to_a_note():
+    counts = {"supported": 47, "refuted": 162, "inconclusive": 20, "open": 160}
+    chart = sg._verdict_chart(counts)
+    assert chart == sg._verdict_chart(dict(counts))
+    assert chart.startswith("<figure><figcaption>")
+    assert 'aria-label="Distinct predicates in each verdict group' in chart
+    assert "rk-work/hypotheses.jsonl" in chart            # the source note
+    for key, n in counts.items():
+        assert f">{key}<" in chart and f">{n}<" in chart, key
+    # bar length is the count: the widths keep the ratios 47:162:20:160
+    widths = {}
+    for key in counts:
+        m = re.search(r'width="([\d.]+)" height="18" rx="4" fill="var\(--s1\)" '
+                      r'class="cellstroke"><title>' + key + ": ", chart)
+        assert m, key
+        widths[key] = float(m.group(1))
+    for key, n in counts.items():
+        assert abs(widths[key] / widths["refuted"] - n / counts["refuted"]) < 0.01, key
+    _assert_chart_fit(chart)
+    check_banned(chart)
+    # a group with no predicate is left out, and no data means a note, never a frame
+    partial = sg._verdict_chart({"supported": 3, "refuted": 0})
+    assert ">refuted<" not in partial and ">supported<" in partial
+    for empty in ({}, {"open": 0}, {"open": None}):
+        note = sg._verdict_chart(empty)
+        assert "<svg" not in note and ">0<" not in note
+        assert "No hypotheses are recorded yet" in note
+    page = render_hypotheses([])
+    assert "No hypotheses are recorded yet" in page and "<svg" not in page
+
+
+def test_D41_the_hub_puts_the_three_classes_side_by_side_in_words(monkeypatch, tmp_path):
+    _setup_env(monkeypatch, tmp_path)
+    html = render_index(_empty_arch())
+    table = html.split("<h2>The three classes side by side</h2>", 1)[1].split("</table>", 1)[0]
+    for label in ("method family", "how candidates are found", "the question asked",
+                  "problems", "arithmetic", "what checks a result", "cost basis",
+                  "source documents"):
+        assert f'<th scope="row">{label}</th>' in table, label
+    for cls in ("explicit", "implicit", "adaptive"):
+        assert f'<th><a href="{cls}.html">{cls}</a></th>' in table, cls
+    assert "float64" in table and "order-verified" in table and "not scored" in table
+    # the old cross-class link list is gone; the boundary is one sentence
+    assert "Evidence that spans the classes" not in html
+    assert sg._CLASS_BOUNDARY.count(". ") == 0
+    check_banned(html)
 
 
 # ======================================================================================
@@ -2542,3 +2943,291 @@ def test_B60_heartbeat_writes_an_iso_timestamp_within_one_second(monkeypatch, tm
     stamp = _parse_iso(content)
     assert t0 - dt.timedelta(seconds=1) <= stamp <= t1 + dt.timedelta(seconds=1)
     assert stamp.utcoffset() == dt.timedelta(0)
+
+
+# ======================================================================================
+# A2 fix round (2026-09-11): the hub, validation, the research log, methodology, CSS
+# ======================================================================================
+
+def test_A2_no_page_claims_q15_for_every_class(monkeypatch, tmp_path):
+    """Implicit and adaptive runs are float64, so neither the footer on every page nor
+    the hub's subtitle may call the whole site Q15 or equal-budget."""
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    for page in sorted(out.glob("*.html")):
+        foot = page.read_text(encoding="utf-8").split("<footer>", 1)[1]
+        assert "Q15" not in foot and "equal cycle budget" not in foot, page.name
+    index = (out / "index.html").read_text(encoding="utf-8")
+    sub = index.split('<p class="sub">', 1)[1].split("</p>", 1)[0]
+    assert sub.startswith("Explicit methods scored in Q15") and "outside the archive" in sub
+
+
+def test_A2_the_hub_leads_with_the_classes_and_closes_with_the_epoch_panel(
+        monkeypatch, tmp_path):
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_progress_events(work)
+    _write_epoch_state(work)
+    body = render_index(arch).split("</header>", 1)[1]
+    marks = [body.index('<p class="lead">'), body.index("<h2>The three classes</h2>"),
+             body.index("<h2>The three classes side by side</h2>"),
+             body.index("<h2>Epoch status</h2>"), body.index("<strong>Epoch 1</strong>")]
+    assert marks == sorted(marks)
+    # the notes that described the page are gone; one no-comparison sentence stays
+    assert "Each card carries one number" not in body
+    assert "The class tabs carry the rest" not in body
+    assert body.count("Numbers from different columns do not compare") == 1
+    assert body.count("Off-archive by construction") == 0
+    check_banned(body)
+
+
+def test_A2_the_epoch_panel_names_a_progress_kind_once():
+    base = {"epoch": 1, "state": "active", "consecutive": 0, "consecutive_needed": 6,
+            "last_progress_ts": "2026-09-08T03:30:00Z", "falsification_present": True}
+    ver = sg._epoch_panel(dict(base, last_progress_kind="heldout_verified"))
+    assert "an acceptance at the heldout_verified tier" in ver
+    assert "(heldout_verified)" not in ver                 # the label already names it
+    imp = sg._epoch_panel(dict(base, last_progress_kind="elite_improvement"))
+    assert "a cell elite improved its held-out error" in imp and "(elite_improvement)" in imp
+    assert "Times are stored in UTC and shown in US Central." in ver
+
+
+def _a2_validation_page() -> tuple[str, dict, dict]:
+    data = _stiff_validation_fixture()
+    data.setdefault("verdicts", {})["overall"] = (
+        "On the non-stiff problems the discovered method leads; on the stiff one it "
+        "overflows. The pattern is the stability tax of explicit methods: an expensive "
+        "tableau takes larger steps. This is the motivating evidence for the epoch-3 "
+        "implicit (SDIRK) track.")
+    bench = _benchmark_fixture()
+    bench["verdicts"]["cycle_model"] = (
+        "Across 4 fixed-step Q15 runs the Pearson correlation between analytic cycles per "
+        "step and measured seconds per step is 0.980. The correlation speaks to ordering, "
+        "not to absolute scale.")
+    bench["generated_from"]["where"] = ("on the host, on demand; it runs at --cpu-shares "
+                                        "256 under a watchdog")
+    return render_validation(data, benchmark=bench), data, bench
+
+
+def test_A2_validation_says_each_thing_once_and_reaches_a_chart_early():
+    html, data, bench = _a2_validation_page()
+    body = html.split("</header>", 1)[1]
+    # the lead is two sentences and signposts nothing
+    lead = re.sub(r"<[^>]+>", "", body.split('<p class="lead">', 1)[1].split("</p>", 1)[0])
+    assert len(re.findall(r"[.?!](?:\s|$)", lead)) == 2, lead
+    assert "Further down" not in lead
+    # the suite's verdict restates the cards, so it sits in a fold under Full tables,
+    # and in the site's own words: validation.py calls the class an epoch-3 track and
+    # its overflow story a stability tax, and no other page here says either
+    verdict = sg._suite_verdict(data["verdicts"]["overall"])
+    assert verdict != data["verdicts"]["overall"]
+    assert "Explicit methods pay for stability:" in verdict
+    assert "This is why the implicit (SDIRK) class is measured." in verdict
+    assert body.count(verdict) == 1
+    assert "stability tax" not in body and "epoch-3" not in body
+    assert body.index("<h2>Full tables</h2>") < body.index(verdict)
+    assert "<summary>The suite&#x27;s verdict, in words</summary>" in body
+    # at most a short run of words comes before the first chart
+    import html as htmlmod
+    before = htmlmod.unescape(re.sub(r"<[^>]+>", " ", body[:body.index("<figure>")]))
+    assert len(before.split()) < 200, len(before.split())
+    # the stiff chart names what differs instead of repeating the practical caption
+    assert body.count("One row per method within each problem") == 1
+    assert "<figcaption>Same layout as the practical chart" in body
+    assert "A method shows in a stiff row only if" not in body
+    # Pearson once: the benchmark's verdict carries the number and its caveat
+    assert body.count("Pearson") == 1 and body.count("0.980") == 1
+    check_banned(html)
+
+
+def test_A2_validation_keeps_one_wall_clock_caveat_in_view():
+    html, _data, bench = _a2_validation_page()
+    speed = html.split('<h2 id="speed">', 1)[1].split('<h2 id="falsification">', 1)[0]
+    fold = speed.split("<summary>How the timings were taken</summary>", 1)[1]
+    fold = fold.split("</details>", 1)[0]
+    rest = speed.replace(fold, "")
+    for text in ("Environment: CPython 3.13.5", bench["environment"]["timing_caveat"],
+                 bench["speedup"]["caveat"]):
+        assert text in fold and text not in rest, text
+    assert "on one desktop machine" not in rest
+    assert "vary from run to run" not in speed
+
+
+def test_A2_validation_provenance_leaves_out_the_host_docstring_and_fits_one_line():
+    html, _data, bench = _a2_validation_page()
+    assert "<dt>where</dt>" not in html and "cpu-shares" not in html
+    assert "<dt>champion_hashes</dt>" in html and "<dt>scipy</dt>" in html
+    sub = html.split('<p class="sub">', 1)[1].split("</p>", 1)[0]
+    assert len(sub) <= 70, sub                      # one line at 1280, so the tabs sit still
+
+
+def test_A2_the_falsification_pair_reads_the_crossover_once():
+    sweep = [{"h": 0.5, "q15_error": 0.01, "float_error": 0.02},
+             {"h": 0.1, "q15_error": 0.004, "float_error": 1e-4},
+             {"h": 0.01, "q15_error": 0.03, "float_error": 1e-8}]
+    data = {"verdict": "mixed", "methods": {
+        "heun2": {"crossover_h": 0.1, "coefficient_fraction": {"m0plus_fast": 0.2},
+                  "sweep": sweep},
+        "rk4": {"crossover_h": None, "coefficient_fraction": {"m0plus_fast": 0.4},
+                "sweep": sweep}}}
+    sec = "".join(sg._falsification_section(data))
+    assert sec.count("turns back up") == 1           # the reading, once, above the pair
+    assert sec.index("turns back up") < sec.index("<figure>")
+    caps = re.findall(r"<figcaption>(.*?)</figcaption>", sec, re.S)
+    assert len(caps) == 2 and caps[0] != caps[1]
+    for cap in caps:
+        assert len(re.sub(r"<[^>]+>", "", cap).split()) < 30, cap
+    heun2, rk4 = (c for c in caps)
+    assert "dashed line is the measured crossover" in heun2
+    assert "dashed" not in rk4                       # no crossover, no dashed line
+    _assert_chart_fit(sec)
+    check_banned(sec)
+
+
+def test_A2_research_log_shows_the_newest_predicates_and_points_at_the_rest():
+    n = sg._HYP_SHOWN + 3
+    hyps = [_hyp(id=f"H-{i:03d}", predicate=f"fast.p2s3.heldout < fast.p{i}s4.heldout",
+                 verdict="refuted", n_samples=250, effect_size=0.9, resolved_cycle=i)
+            for i in range(1, n + 1)]
+    # H-001's predicate posed again as H-1000: numerically the newest, so its row leads
+    # and its verdict speaks for the group, which moves the group between the folds
+    hyps[0]["verdict"] = "inconclusive"
+    hyps.append(_hyp(id="H-1000", predicate=hyps[0]["predicate"], verdict="refuted",
+                     n_samples=260, effect_size=0.8, resolved_cycle=99))
+    html = render_hypotheses(hyps)
+    ids = re.findall(r'<details class="led"><summary><span class="mono">(H-\d+)', html)
+    assert len(ids) == sg._HYP_SHOWN
+    assert ids[0] == "H-001" and ids[1] == f"H-{n:03d}" and ids[2] == f"H-{n - 1:03d}"
+    for dropped in ("H-002", "H-003", "H-004"):          # the three oldest predicates
+        assert dropped not in ids
+    # anchored on the tag: "23 older predicates" contains "3 older predicates", so a
+    # bare substring passes for the whole group size as well as for the remainder
+    assert f">{n - sg._HYP_SHOWN} older predicates are not shown here" in html
+    assert "rk-work/hypotheses.jsonl" in html
+    assert '<dt>posed as</dt><dd class="mono">H-001, H-1000</dd>' in html
+    assert f"refuted ({n} predicates)" in html
+    assert "H-001" in html.split("refuted (", 1)[1].split("</details>", 1)[0]
+    # the group left the verdict of its oldest posing behind, and that group with it
+    assert "inconclusive (" not in html
+    # no verdict cards and no reconciling note: the chart caption carries the totals
+    assert '<div class="cards">' not in html and "cards above" not in html
+    assert "The cards count hypotheses" not in html
+    cap = html.split("<figcaption>", 1)[1].split("</figcaption>", 1)[0]
+    assert f"{n + 1} hypotheses over {n} distinct predicates; 1 was posed more than once." in cap
+    check_banned(html)
+
+
+def test_A2_the_cost_model_section_does_not_restate_the_glossary():
+    sec = sg._costmodel_section()
+    assert "cheaper of a shift-add" not in sec
+    assert "comes from coefficient arithmetic alone" not in sec
+    assert sec.count(AVR_NOTE) == 1 and "HANDOFF" not in sec
+    check_banned(sec)
+
+
+def test_A2_the_stylesheet_carries_the_layout_fixes():
+    css = sg._STYLE
+    phone = css.split("@media(max-width:640px){", 1)[1]
+    assert "figure{overflow-x:auto}" in phone and "figure svg{max-width:none}" in phone
+    assert ".charts.grid2>.panel{overflow-x:auto}" in phone
+    # visual-1: a figure that scrolls says so, without JavaScript, and the
+    # phone drawing of a chart replaces the wide one rather than joining it
+    assert "background-attachment:local,local,scroll,scroll" in phone
+    assert ".chart-wide{display:none}" in phone
+    assert ".chart-phone{display:block}" in phone
+    assert ".chart-phone{display:none}" in css.split("@media(max-width:640px){",
+                                                    1)[0]
+    assert "table.side{table-layout:fixed;width:100%}" in phone
+    assert "table.side td{min-width:0;max-width:none;overflow-wrap:break-word}" in phone
+    assert ".cards{display:grid;" in css
+    # a panel sizes to its chart whether the figure holds one svg, the two the
+    # phone variant emits, or a set of small multiples
+    assert ".panel:has(>figure>svg)," in css
+    assert ".panel:has(>figure>.chart-wide)," in css
+    assert (".panel:has(>figure>.multiples)"
+            "{width:fit-content;max-width:100%}") in css
+    # visual-prose-3: fit-content on a wrapping flex box resolves to one long row and
+    # then clamps to the column, so the multiples carry fixed tracks and size themselves
+    assert ("grid-template-columns:repeat(var(--cols,3),minmax(0,var(--tw,272px)))"
+            in css)
+    assert "width:fit-content;max-width:100%}" in css.split(".multiples{", 1)[1]
+    assert "display:flex" not in css.split(".multiples{", 1)[1].split("}", 1)[0]
+    # visual-4: card values line up across a row even when a label wraps
+    assert (".cards>.card:not(.klass){display:grid;grid-template-rows:subgrid;"
+            "grid-row:span 3}") in css
+    assert "align-items:stretch" in css.split(".charts.grid2{", 1)[1].split("}", 1)[0]
+    assert "header.site .sub{max-width:none}" in css
+    assert "p.note .hash{word-break:normal;white-space:nowrap}" in css
+    about = css.split("a.about{", 1)[1].split("}", 1)[0]
+    assert "var(--text-1)" in about and "13.5px" in about
+    assert "border:1px solid var(--line)" in about
+    assert "details.repeats" not in css                  # the nested repeats table is gone
+    check_banned(css)
+
+
+def test_A2_a_cell_page_names_its_cell_once_in_the_header():
+    rec = _site_records()[0]
+    html = render_cell(4, 4, 2, rec)
+    header, body = html.split("</header>", 1)
+    assert '<p class="sub">grid order 4, 4 stages, cycle bucket 2</p>' in header
+    assert "grid order 4, 4 stages, cycle bucket 2" not in body
+    assert AVR_NOTE in body and "HANDOFF \u00a74.5" not in html
+    assert html.count(AVR_NOTE) == 1
+    check_banned(html)
+
+
+def test_A2_card_counts_carry_thousands_separators():
+    assert sg._count(141364) == "141,364" and sg._count(7) == "7"
+    assert sg._count(None) == "n/a" and sg._count(True) == "true"
+    arch = ArchiveState(n_records=141364, last_cycle_id=1, grids={1: {}, 2: {}, 3: {}, 4: {}},
+                        open_hypotheses=(), refuted_hypotheses=())
+    assert '<div class="v">141,364</div>' in sg._stat_cards(arch)
+
+
+# ===================================================================================
+# round 2 (2026-09-11): one spelling, and page titles in sentence case
+# ===================================================================================
+
+def test_the_site_prose_uses_one_spelling():
+    """American spelling in the two modules that write the site's own prose.
+
+    The overview was normalized to American spelling, and the two sites are read as
+    one. A published page can still carry a British spelling that came out of a lane
+    document or a model-written log, so the scan reads the sources of our own prose
+    rather than the built pages.
+    """
+    pat = re.compile(r"\b(colour\w*|behaviour\w*|modelled|labelled|neighbouring)\b",
+                     re.IGNORECASE)
+    for mod in (sg, methodology_mod):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in pat.finditer(src)})
+        assert not hits, (mod.__name__, hits)
+
+
+def test_page_titles_are_sentence_case_and_the_tabs_stay_lowercase(monkeypatch, tmp_path):
+    """The h1 and the browser tab capitalize; the nav labels do not.
+
+    The hub keeps the repository's own name, which is lowercase wherever it appears.
+    """
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    seen = 0
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        h1 = re.search(r"<h1>([^<]+)</h1>", html).group(1)
+        assert f"<title>{h1}</title>" in html, page.name
+        seen += 1
+        if page.name == "index.html":
+            assert h1 == "rk-harness findings"
+            continue
+        assert h1[:1].isupper(), (page.name, h1)
+    assert seen >= 10
+    idx = (out / "index.html").read_text(encoding="utf-8")
+    for label in ("explicit", "implicit", "adaptive", "validation", "research log",
+                  "methodology"):
+        assert f">{label}</a>" in idx, label
+    cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
+    assert "<h1>Cell p4 s4 b2</h1>" in cell

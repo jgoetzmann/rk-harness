@@ -262,6 +262,7 @@ def test_C19_runner_literature_and_interpretation_gating(tmp_path, monkeypatch):
 
 
 def test_C20_sitegen_publishes_literature_and_interpretation(tmp_path, monkeypatch):
+    """Both logs are sections of the research log (hypotheses.html) since D41."""
     work = tmp_path / "work"
     monkeypatch.setenv("RK_WORK_DIR", str(work))
     from rk_harness import archive, literature, sitegen
@@ -272,12 +273,14 @@ def test_C20_sitegen_publishes_literature_and_interpretation(tmp_path, monkeypat
                                       "text": "The archive proves a novel pattern.\n\nSecond paragraph."})
     out = tmp_path / "docs"
     sitegen.build(archive.replay(), out)                              # would raise on any banned word
-    lit = (out / "literature.html").read_text(encoding="utf-8")
-    interp = (out / "interpretation.html").read_text(encoding="utf-8")
-    assert sitegen.BANNER in lit and sitegen.BANNER in interp
-    assert "arxiv.org" in lit and "Model-written" in lit and "Model-written" in interp
-    for page in (lit, interp):
-        sitegen.check_banned(page)
+    assert not (out / "literature.html").exists() and not (out / "interpretation.html").exists()
+    page = (out / "hypotheses.html").read_text(encoding="utf-8")
+    interp = page.split('<h2 id="interpretation">', 1)[1].split('<h2 id="literature">', 1)[0]
+    lit = page.split('<h2 id="literature">', 1)[1]
+    assert sitegen.BANNER in page
+    assert "arxiv.org" in lit and "Model-written" in page
+    assert "Second paragraph." in interp
+    sitegen.check_banned(page)
 
 
 def test_C21_a_snapshot_whose_window_has_reset_does_not_cap(tmp_path, monkeypatch):

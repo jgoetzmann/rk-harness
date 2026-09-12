@@ -26,7 +26,7 @@ to know before the gate has finished.
 | Job | What it proves | Rough time |
 | --- | --- | --- |
 | `gate` | The verifier hash matches its pin (K3), then the golden and canary tests G1-G20, K1-K2. This is `entrypoint.sh`'s check, run in the same order. | 32 s |
-| `suite` | The full suite, sharded five ways by test file. `--durations=10` in every shard so the log carries its own balance data. | 25-87 s per shard, in parallel |
+| `suite` | Tiers t1 to t13, sharded five ways by test file. t14, t15, the three t16 files, t17 and t18 are not in the matrix and do not run here. `--durations=10` in every shard so the log carries its own balance data. | 25-87 s per shard, in parallel |
 | `determinism` | Both prototype curves and every side-track artifact the catalogue declares reproduce byte for byte across two independent runs, and no scored file is created. The expected count is read from the catalogue in the job rather than written here. Invariants I5 and D5 in `SIDETRACK-AUTOMATION.md`. | 130 s |
 | `image` | The Dockerfile still builds, the entrypoint gate passes **inside the image on Python 3.12**, and the harness mount is read-only (K4). | 156 s cold, less once cached |
 | `pins` | The Dockerfile and `pyproject.toml` pin the same versions of the same nine packages. | 4 s |
@@ -100,7 +100,7 @@ whether the machine is currently running it.
 hardcoded constants, and they had drifted 25 tests behind without anything noticing, which is how
 a site ends up publishing a number that is quietly wrong.
 
-The consequence for work in *this* repo: **adding or removing a `tests/test_tN_*.py` file fails the
+The consequence for work in *this* repo: **adding a `tests/test_tN_*.py` file for a new tier fails the
 rk-overview build** until `_SUITE_DESC` in `rk-overview/tools/generate.py` has a one-line
 description for it. That is deliberate. It converts a silent stale number into a build failure with
 an instruction, and it costs one line.
@@ -177,6 +177,9 @@ avoid. When a CI run for the commit under test has finished, take its result ins
 
     gh run download <run-id> -n preflight-suite -D .fullsend/
     .venv/Scripts/python.exe scripts/preflight.py --reuse-suite --docker
+
+The merged result holds only the five shards, so it leaves out t14 to t18. Run those files
+locally when a change touches what they test.
 
 The artifact holds two files. `preflight-junit.xml` is the merged suite result, and preflight reads
 it the same way it reads a local run. `preflight-evidence.json` is the provenance: the commit, the

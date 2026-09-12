@@ -636,17 +636,17 @@ def section_H(results):
     sitegen.build(arch, out)
     pages = {p.name: p.read_text(encoding="utf-8") for p in out.glob("*.html")}
     elites = [r for g in arch.grids.values() for r in g.values()]
-    idx = pages.get("index.html", "")
-    R.check("H1", results.get("E3") != "failed" and all(r.tier in idx and r.tableau_hash[:12] in idx for r in elites),
-            f"site built from the live archive ({arch.n_records} records, {len(elites)} elites, {len(pages)} pages); every elite shows tier + hash on index")
+    exp = pages.get("explicit.html", "")
+    R.check("H1", results.get("E3") != "failed" and all(r.tier in exp and r.tableau_hash[:12] in exp for r in elites),
+            f"site built from the live archive ({arch.n_records} records, {len(elites)} elites, {len(pages)} pages); every elite shows tier + hash on explicit.html")
     try:
         sitegen.check_banned("<p>a novel method that beats rk4</p>")
         R.add("H2", "FAIL", "check_banned accepted a banned word")
     except sitegen.BannedWordError as e:
         R.check("H2", results.get("E4") != "failed", f"planted 'novel'/'beats' -> BannedWordError({e}); build() raises before writing (E4 {results.get('E4', 'not run')})")
     R.check("H3", all(sitegen.BANNER in h for h in pages.values()), f"banner on {sum(sitegen.BANNER in h for h in pages.values())}/{len(pages)} pages")
-    cm = pages.get("costmodel.html", "")
-    R.check("H4", "avr_approx" in cm and sitegen.AVR_NOTE in cm, f"costmodel.html carries AVR_APPROX figures with the note: {sitegen.AVR_NOTE in cm}")
+    cm = pages.get("methodology.html", "")
+    R.check("H4", "avr_approx" in cm and sitegen.AVR_NOTE in cm, f"methodology.html#costmodel carries AVR_APPROX figures with the note: {sitegen.AVR_NOTE in cm}")
     cells = [h for n, h in pages.items() if n.startswith("cell-")]
     R.check("H5", cells and all(("verifier" in h and "tableau_hash" in h.replace(" ", "_").lower()) or ("verifier_hash" in h) for h in cells),
             f"{len(cells)} cell pages each show tableau_hash and verifier_hash")
@@ -770,9 +770,9 @@ def section_K(results):
     cf = rk4.get("coefficient_fraction") or {}
     R.add("K2", "PASS" if cf else "FAIL", f"rk4 coefficient-arithmetic fraction: m0plus_fast {cf.get('m0plus_fast', '?')}, m0plus_slow {cf.get('m0plus_slow', '?')}; heun2: {(frac('heun2').get('coefficient_fraction') or {})}")
     R.add("K3", "PASS" if "crossover" in json.dumps(rk4) else "FAIL", f"rk4 crossover h = {rk4.get('crossover_h', rk4.get('crossover'))}; heun2 crossover h = {frac('heun2').get('crossover_h', frac('heun2').get('crossover'))}; verdict = {data.get('verdict')}")
-    page = RK_FINDINGS / "docs" / "falsification.html"
+    page = RK_FINDINGS / "docs" / "validation.html"
     ok = page.exists() and "crossover" in page.read_text(encoding="utf-8").lower()
-    R.check("K4", ok, f"decision recorded in rk-findings/docs/falsification.html (verdict {data.get('verdict')}): {ok}")
+    R.check("K4", ok, f"decision recorded in rk-findings/docs/validation.html#falsification (verdict {data.get('verdict')}): {ok}")
 
 
 def section_containers(docker_ok: bool):

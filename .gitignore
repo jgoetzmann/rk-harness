@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+
+# Scratch directories for work that needs a Windows path, deleted when that work finishes.
+.tmp-*/
