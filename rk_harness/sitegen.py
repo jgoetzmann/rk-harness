@@ -3945,7 +3945,7 @@ def _trace_section(doc) -> list[str]:
         named = ", ".join(f"{_esc(n)} at {g:.3f}" for n, g in outside)
         parts.append(
             f"<p>{len(outside)} of {len(rows)} methods sit outside the "
-            f"{_TRACE_BAND:.2f} band this comparison set for itself, measured as "
+            f"{_TRACE_BAND:.2f} band this comparison chose for itself, measured as "
             f"|cycles_analytic minus cycles_traced| over cycles_traced at matched scope: "
             f"{named}. That is published rather than tuned, and the cause is in the next "
             "paragraph.</p>")

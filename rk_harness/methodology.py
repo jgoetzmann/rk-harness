@@ -177,8 +177,8 @@ search-set and held-out error, across at least two problem families.
 <em>search_only</em>: the search error improved and the held-out error did not, which is
 the signature of overfitting. <em>no_incumbent</em>: the cell was empty.
 <em>no_improvement</em>: there was an incumbent and neither rule above applied, which
-includes improving held-out error but not search error. Both were one word,
-<em>unreplicated</em>, which every record written before the split still carries. The tier
+includes improving held-out error but not search error. Those last two were one word,
+<em>unreplicated</em>, before the split, and every record written earlier still carries it. The tier
 words appear in no
 prompt template, and a planted tableau tuned to the search set must land in search_only;
 canaries check both. The archive
@@ -225,8 +225,8 @@ criterion, an error within 5 percent of the reference solution's norm, catches a
 that decayed to nothing. validation/results.json stores that norm for each problem, on
 the same scale as the errors, so the pages read it from the document rather than
 assuming it. Any error ratio within 2 percent of 1.0 is counted as a tie. A third
-criterion, an identical peak magnitude equal to the initial condition, was dropped for
-flagging a healthy problem{_cite(5, 20)}.</p>
+criterion, an identical peak magnitude equal to the initial condition, was dropped because
+it flagged a healthy problem{_cite(5, 20)}.</p>
 """
 
 _S4 = f"""
@@ -296,8 +296,8 @@ equation in low-precision floating point and show that under round-to-nearest th
 computed solution stagnates once the timestep is small enough, with global rounding
 error growing like unit roundoff divided by the timestep until it does{_cite(22)}.
 Hopkins and colleagues measure stochastic rounding and reduced-precision fixed point in
-ODE solvers built for neuromorphic hardware, which is the same arithmetic regime as this
-work in different hardware{_cite(23)}. Croci and Rosilho de Souza build mixed-precision
+ODE solvers built for neuromorphic hardware, the same arithmetic regime as this
+work on different hardware{_cite(23)}. Croci and Rosilho de Souza build mixed-precision
 explicit stabilized Runge-Kutta methods and show where the low-precision part can sit
 without costing accuracy{_cite(24)}.</p>
 
