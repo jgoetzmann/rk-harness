@@ -751,6 +751,20 @@ def validation_error(name: str, y_final_phys: tuple[float, ...]) -> float:
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(y_final_phys, ref))) / PEAK[name]
 
 
+def reference_norm_over_peak(name: str) -> float:
+    """L2 norm of the reference solution at t_end, divided by the same PEAK.
+
+    Normalized exactly as validation_error normalizes, so the two are on one scale
+    and can be compared directly.  It is the error an integrator would report if it
+    returned the zero state, which makes it the yardstick for a run that decayed to
+    nothing: a reported error near this number is measuring the reference rather
+    than the method, and a reader cannot tell the two apart without it.
+    """
+    p = PROBLEMS[name]
+    ref = p.reference(p.t_end)
+    return math.sqrt(sum(v * v for v in ref)) / PEAK[name]
+
+
 # --------------------------------------------------------------------------- evaluation
 
 def evaluate_pair(t: Tableau, name: str) -> dict:
@@ -868,9 +882,12 @@ _SCHEMA_DOC = {
         "one entry per practical problem: name, domain, source, equation, reference, "
         "family, scale (power of two), deriv_scale (1.0 for all), y0 in physical "
         "units, peak (max per-state |y| over the window, float RK4 at 40000 steps), "
-        "per_state_peaks, window {t_end, time_unit, real_span}, stiff (true for the "
-        "moderately stiff subset), stiffness_ratio (fast rate over slow rate, see "
-        "stiffness_basis for how each was measured), optional notes"
+        "per_state_peaks, reference_norm_over_peak (L2 norm of the reference solution "
+        "at t_end divided by peak, normalized exactly as the errors below are, so it "
+        "is the error a run that returned the zero state would report), window "
+        "{t_end, time_unit, real_span}, stiff (true for the moderately stiff subset), "
+        "stiffness_ratio (fast rate over slow rate, see stiffness_basis for how each "
+        "was measured), optional notes"
     ),
     "methods": (
         "one entry per evaluated method: name_or_hash (classical fixture name, or the "
@@ -947,6 +964,7 @@ def _problem_entry(name: str) -> dict:
         "deriv_scale": DERIV_SCALE[name],
         "peak": PEAK[name],
         "per_state_peaks": list(PER_STATE_PEAKS[name]),
+        "reference_norm_over_peak": reference_norm_over_peak(name),
         "window": meta["window"],
         "stiff": STIFF[name],
         "stiffness_ratio": STIFFNESS_RATIO[name],
@@ -1160,11 +1178,17 @@ def validate_results(doc: dict) -> None:
         fail(f"problems must cover {VALIDATION_NAMES}, got {pnames}")
     for p in doc["problems"]:
         for k in ("name", "domain", "source", "scale", "deriv_scale", "window",
-                  "stiff", "stiffness_ratio", "stiffness_basis"):
+                  "stiff", "stiffness_ratio", "stiffness_basis",
+                  "reference_norm_over_peak"):
             if k not in p:
                 fail(f"problem {p.get('name')!r} missing {k!r}")
         if not isinstance(p["stiff"], bool):
             fail(f"problem {p.get('name')!r} stiff must be a boolean")
+        rn = p["reference_norm_over_peak"]
+        if not isinstance(rn, (int, float)) or isinstance(rn, bool) \
+                or not math.isfinite(rn) or rn <= 0:
+            fail(f"problem {p.get('name')!r} reference_norm_over_peak must be "
+                 "a finite positive number")
         if not isinstance(p["stiffness_ratio"], (int, float)):
             fail(f"problem {p.get('name')!r} stiffness_ratio must be a number")
     mnames = [m["name_or_hash"] for m in doc["methods"]]

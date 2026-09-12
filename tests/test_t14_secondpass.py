@@ -58,7 +58,7 @@ def _rec(t, heldout: float, stab: float = -1.0, cycles: int = 20,
          cycle_id: int = 1, date: str = "2026-09-01") -> Record:
     return Record(
         tableau_hash=content_hash(t), tableau=t, score=_score(heldout, stab, cycles),
-        tier="unreplicated", cycle_id=cycle_id, seed=0, verifier_hash="testhash",
+        tier="no_improvement", cycle_id=cycle_id, seed=0, verifier_hash="testhash",
         directive_id=None, hypothesis_id=None, timestamp=f"{date}T00:00:00Z",
     )
 

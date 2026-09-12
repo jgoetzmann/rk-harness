@@ -46,8 +46,8 @@ pattern{_cite(21)}.</p>
 hypotheses, but it never scores, tiers or verifies anything. Results are on the other
 tabs and the machinery on the <a href="{_ARCH}">overview architecture page</a>. Terms are
 in the <a href="methodology.html#glossary">glossary</a> below, and a bracketed number such
-as {_cite(21)} cites a file in the rk-harness repository or a section of the frozen
-specification, docs/HANDOFF.md.</p>
+as {_cite(21)} cites a file in the rk-harness repository, a section of the frozen
+specification, docs/HANDOFF.md, or a published paper.</p>
 """
 
 _INFOBOX = """
@@ -175,9 +175,13 @@ _S3 = f"""
 when it is archived. <em>heldout_verified</em>: it improved on the incumbent elite in both
 search-set and held-out error, across at least two problem families.
 <em>search_only</em>: the search error improved and the held-out error did not, which is
-the signature of overfitting. <em>unreplicated</em>: everything else, including a record
-in an empty cell. The tier words appear in no prompt template, and a planted tableau
-tuned to the search set must land in search_only; canaries check both. The archive
+the signature of overfitting. <em>no_incumbent</em>: the cell was empty.
+<em>no_improvement</em>: there was an incumbent and neither rule above applied, which
+includes improving held-out error but not search error. Both were one word,
+<em>unreplicated</em>, which every record written before the split still carries. The tier
+words appear in no
+prompt template, and a planted tableau tuned to the search set must land in search_only;
+canaries check both. The archive
 behind the cells is on the <a href="{_ARCH}#archive">architecture page</a>{_cite(11, 13)}.</p>
 
 <p>The two early phases enumerate their spaces completely, so their entries are marked
@@ -212,6 +216,17 @@ applications that the optimizer never sees and that no score, tier or archive st
 includes. The archived champions and the classical anchors run each one at the same
 65,536-cycle budget, to see whether methods selected on the fixed problems hold up on
 dynamics they were not selected on{_cite(5, 21)}.</p>
+
+<p>Two numeric filters run before any win or loss from that suite is published. A
+problem is flagged degenerate when its finishers' Q15 errors span less than 5 percent
+from best to worst, because a field that tight is reporting the problem rather than the
+method; a flagged problem is left out of every tally with its reason printed. The second
+criterion, an error within 5 percent of the reference solution's norm, catches a state
+that decayed to nothing. validation/results.json stores that norm for each problem, on
+the same scale as the errors, so the pages read it from the document rather than
+assuming it. Any error ratio within 2 percent of 1.0 is counted as a tie. A third
+criterion, an identical peak magnitude equal to the initial condition, was dropped for
+flagging a healthy problem{_cite(5, 20)}.</p>
 """
 
 _S4 = f"""
@@ -274,6 +289,34 @@ threshold are conventions chosen in advance, frozen by the specification so resu
 stay comparable across the run{_cite(21)}.</p>
 """
 
+RELATED_WORK = f"""
+<p>Rounding error in time integration is an active line of work, and this project did
+not discover it. Croci and Giles analyse Runge-Kutta discretizations of the heat
+equation in low-precision floating point and show that under round-to-nearest the
+computed solution stagnates once the timestep is small enough, with global rounding
+error growing like unit roundoff divided by the timestep until it does{_cite(22)}.
+Hopkins and colleagues measure stochastic rounding and reduced-precision fixed point in
+ODE solvers built for neuromorphic hardware, which is the same arithmetic regime as this
+work in different hardware{_cite(23)}. Croci and Rosilho de Souza build mixed-precision
+explicit stabilized Runge-Kutta methods and show where the low-precision part can sit
+without costing accuracy{_cite(24)}.</p>
+
+<p>The crossover this run measures, where Q15 error turns back up as the step size falls,
+is the fixed-point counterpart of that stagnation result in a different arithmetic.
+Finding the same shape under a different rounding rule is a check on this harness rather
+than a new phenomenon, and it is consistent with what that literature shows.</p>
+
+<p>Two things here are different from that line of work, and both are narrow. The
+arithmetic is fixed point with directed rounding: every Q15 multiply ends in an
+arithmetic right shift that floors, so the error is biased one way, where round-to-nearest
+is symmetric and stochastic rounding is unbiased by construction. And the object of study
+is the tableau rather than the arithmetic: this run searches coefficient space against
+that bias and prices every coefficient on a cost model, where the work above analyses
+fixed methods under a rounding mode. Neither difference is a claim of priority over that
+work.</p>
+"""
+
+
 _REFS = """
 <h2 id="meth-references">References</h2>
 
@@ -299,6 +342,9 @@ _REFS = """
 <li id="meth-ref-19">rk_harness/falsification.py; HANDOFF 15 (criteria and sweep).</li>
 <li id="meth-ref-20">rk_harness/sitegen.py; HANDOFF 17 (auto-publish rules, determinism, labels).</li>
 <li id="meth-ref-21">docs/HANDOFF.md (frozen specification; section numbers as cited above).</li>
+<li id="meth-ref-22">M. Croci and M. B. Giles, "Effects of round-to-nearest and stochastic rounding in the numerical solution of the heat equation in low precision", IMA Journal of Numerical Analysis 43(3), 2023, pages 1358-1390.</li>
+<li id="meth-ref-23">M. Hopkins, M. Mikaitis, D. R. Lester and S. Furber, "Stochastic rounding and reduced-precision fixed-point arithmetic for solving neural ordinary differential equations", Philosophical Transactions of the Royal Society A 378:20190052, 2020.</li>
+<li id="meth-ref-24">M. Croci and G. Rosilho de Souza, "Mixed-precision explicit stabilized Runge-Kutta methods for single- and multi-scale differential equations", Journal of Computational Physics 464, 2022, 111349.</li>
 </ol>
 """
 

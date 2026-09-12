@@ -874,8 +874,17 @@ def _families_improved(cand: ScoreVector, inc: ScoreVector) -> int:
 
 
 def assign_tier(cand: ScoreVector, incumbent: ScoreVector | None) -> Tier:
+    """The evidence tier a candidate gets on entering its cell (K1/K2/B31).
+
+    An empty cell and a candidate that earned neither of the tiers above both used to
+    return "unreplicated", one word for a fact about the cell and a fact about the
+    candidate. They are no_incumbent and no_improvement. Both of the tiers above start
+    from a lower search error, so a candidate whose held-out error improved while its
+    search error did not lands on no_improvement. "unreplicated" remains a legal stored
+    tier, because every record written before the split carries it.
+    """
     if incumbent is None:
-        return "unreplicated"
+        return "no_incumbent"
     beats_search = cand.search_error < incumbent.search_error
     beats_heldout = cand.heldout_error < incumbent.heldout_error
     fam = _families_improved(cand, incumbent)
@@ -883,7 +892,7 @@ def assign_tier(cand: ScoreVector, incumbent: ScoreVector | None) -> Tier:
         return "heldout_verified"
     if beats_search and not beats_heldout:
         return "search_only"
-    return "unreplicated"
+    return "no_improvement"
 
 
 # --------------------------------------------------------------------------- CLI

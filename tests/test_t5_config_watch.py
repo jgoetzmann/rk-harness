@@ -198,7 +198,8 @@ def test_C17_hypothesize_action_appends_a_validated_hypothesis(tmp_path, monkeyp
     # K8/I5: the hypothesis prompt carries no tier strings and never asks for a verdict
     from rk_harness import prompts
     text = prompts.HYPOTHESIS_SYSTEM_PROMPT + prompts.build_hypothesis_prompt(arch, st, [], [])
-    for banned in ("heldout_verified", "search_only", "unreplicated"):
+    for banned in ("heldout_verified", "search_only", "no_incumbent", "no_improvement",
+                   "unreplicated"):
         assert banned not in text
     assert "verdicts are assigned" in prompts.HYPOTHESIS_SYSTEM_PROMPT
 
@@ -223,7 +224,8 @@ def test_C18_literature_store_soften_and_prompt_wiring(tmp_path, monkeypatch):
     st = RunState(1, 2, "", "", 0.0, 0, None)
     assert "floor bias is systematic" in prompts.build_user_prompt(arch, st, [], [], literature=text)
     assert "floor bias is systematic" in prompts.build_hypothesis_prompt(arch, st, [], [], literature=text)
-    for banned in ("heldout_verified", "search_only", "unreplicated"):
+    for banned in ("heldout_verified", "search_only", "no_incumbent", "no_improvement",
+                   "unreplicated"):
         assert banned not in prompts.LITERATURE_SYSTEM_PROMPT + prompts.INTERPRET_SYSTEM_PROMPT
 
 

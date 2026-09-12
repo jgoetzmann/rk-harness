@@ -148,7 +148,7 @@ def _site_records() -> list[Record]:
     return [
         _rec(c["rk4"], _sv(33, 85, 0.001, 0.002, 4.0), "heldout_verified", 1, "D-E000001"),
         _rec(c["kutta3"], _sv(26, 65, 0.003, 0.004, 3.0), "search_only", 2, "D-0112", "H-047"),
-        _rec(c["heun2"], _sv(13, 13, 0.005, 0.006, 2.0), "unreplicated", 3, None),
+        _rec(c["heun2"], _sv(13, 13, 0.005, 0.006, 2.0), "no_improvement", 3, None),
     ]
 
 
@@ -761,8 +761,8 @@ def test_B60_now_without_rk_clock_is_utc_wall_clock(monkeypatch, tmp_path):
 def test_R4_load_state_rebuilds_from_replay_when_runstate_absent(monkeypatch, tmp_path):
     work = _setup_env(monkeypatch, tmp_path, phase="2")
     c = _classical_8()
-    append(_rec(c["rk4"], _sv(33, 85, 0.001, 0.002), "unreplicated", 3, None))
-    append(_rec(c["rk38"], _sv(36, 64, 0.002, 0.003), "unreplicated", 4, None))
+    append(_rec(c["rk4"], _sv(33, 85, 0.001, 0.002), "no_improvement", 3, None))
+    append(_rec(c["rk38"], _sv(36, 64, 0.002, 0.003), "no_improvement", 4, None))
     assert not (work / "RUNSTATE.json").exists()
     st = load_state()
     assert isinstance(st, RunState)
@@ -800,7 +800,7 @@ def test_R4_load_state_phase_defaults_to_zero_without_rk_phase(monkeypatch, tmp_
 ])
 def test_R5_load_state_falls_back_to_replay_on_corrupt_runstate(monkeypatch, tmp_path, capsys, garbage):
     work = _setup_env(monkeypatch, tmp_path, phase="1")
-    append(_rec(_classical_8()["rk4"], _sv(33, 85, 0.001, 0.002), "unreplicated", 5, None))
+    append(_rec(_classical_8()["rk4"], _sv(33, 85, 0.001, 0.002), "no_improvement", 5, None))
     (work / "RUNSTATE.json").write_bytes(garbage)
     st = load_state()
     assert isinstance(st, RunState)
@@ -813,9 +813,9 @@ def test_R5_load_state_falls_back_to_replay_on_corrupt_runstate(monkeypatch, tmp
 def test_R2_truncated_trailing_archive_line_is_discarded_and_state_rebuilds(monkeypatch, tmp_path):
     work = _setup_env(monkeypatch, tmp_path)
     c = _classical_8()
-    append(_rec(c["rk4"], _sv(33, 85, 0.001, 0.002), "unreplicated", 1, None))
-    append(_rec(c["kutta3"], _sv(26, 65, 0.003, 0.004), "unreplicated", 2, None))
-    append(_rec(c["heun2"], _sv(13, 13, 0.005, 0.006), "unreplicated", 3, None))
+    append(_rec(c["rk4"], _sv(33, 85, 0.001, 0.002), "no_improvement", 1, None))
+    append(_rec(c["kutta3"], _sv(26, 65, 0.003, 0.004), "no_improvement", 2, None))
+    append(_rec(c["heun2"], _sv(13, 13, 0.005, 0.006), "no_improvement", 3, None))
     files = sorted(archive_dir().glob("*.jsonl"))
     assert len(files) == 1
     assert files[0].name == "2026-09-21.jsonl"
@@ -840,9 +840,9 @@ def test_R2_truncated_trailing_archive_line_is_discarded_and_state_rebuilds(monk
 def test_R2_corrupt_middle_line_is_discarded_with_a_warning(monkeypatch, tmp_path, capsys):
     _setup_env(monkeypatch, tmp_path)
     c = _classical_8()
-    append(_rec(c["rk4"], _sv(33, 85, 0.001, 0.002), "unreplicated", 1, None))
-    append(_rec(c["kutta3"], _sv(26, 65, 0.003, 0.004), "unreplicated", 2, None))
-    append(_rec(c["heun2"], _sv(13, 13, 0.005, 0.006), "unreplicated", 3, None))
+    append(_rec(c["rk4"], _sv(33, 85, 0.001, 0.002), "no_improvement", 1, None))
+    append(_rec(c["kutta3"], _sv(26, 65, 0.003, 0.004), "no_improvement", 2, None))
+    append(_rec(c["heun2"], _sv(13, 13, 0.005, 0.006), "no_improvement", 3, None))
     f = sorted(archive_dir().glob("*.jsonl"))[0]
     lines = f.read_bytes().splitlines(keepends=True)
     mid = lines[1]
@@ -989,7 +989,7 @@ def test_B58_seed_baselines_adds_the_eight_classical_once(monkeypatch, tmp_path)
     for r in recs:
         assert r.cycle_id == 0
         assert r.seed == 0
-        assert r.tier == "unreplicated"
+        assert r.tier == "no_incumbent"
         assert r.directive_id is None
         assert r.hypothesis_id is None
         assert r.verifier_hash == vh
@@ -1041,7 +1041,10 @@ def test_E3_index_parses_and_shows_every_elite_tier_next_to_its_hash(monkeypatch
 
     elites = [rec for grid in arch.grids.values() for rec in grid.values()]
     assert len(elites) == 3
-    assert {e.tier for e in elites} == set(TIERS)
+    # The three site records cover the three tiers a search can write. "unreplicated" is
+    # still in TIERS for the records already on disk, so the set is named, not derived.
+    assert {e.tier for e in elites} == {"heldout_verified", "search_only", "no_improvement"}
+    assert all(e.tier in TIERS for e in elites)
     for rec in elites:
         # The table prints a 12-character prefix and carries the full hash in the link's
         # title, so the row stays narrow without losing provenance.
@@ -1206,7 +1209,7 @@ def test_B61_cell_pages_carry_phase_label_tier_hashes_and_fractions(monkeypatch,
 
     h2_page = (out / "cell-p2-s2-b0.html").read_text(encoding="utf-8")
     assert "search result" in h2_page
-    assert "unreplicated" in h2_page
+    assert "no_improvement" in h2_page
     assert heun2_rec.tableau_hash in h2_page
 
 
@@ -1219,7 +1222,7 @@ def test_a_seeded_classical_tableau_is_not_labelled_a_search_result():
     in cycle 3, so the cycle half of the test is load-bearing rather than decorative.
     """
     c = _classical_8()
-    seeded = _rec(c["euler"], _sv(5, 5, 0.32, 0.33, 1.0), "unreplicated", 0, None)
+    seeded = _rec(c["euler"], _sv(5, 5, 0.32, 0.33, 1.0), "no_incumbent", 0, None)
     searched = _site_records()[2]               # heun2: no directive, cycle 3
     enumerated = _site_records()[0]             # rk4: D-E000001
 
@@ -1243,7 +1246,7 @@ def test_the_explicit_cards_and_elite_table_count_seeded_cells_apart(monkeypatch
     c = _classical_8()
     for r in _site_records():
         append(r)
-    append(_rec(c["euler"], _sv(5, 5, 0.32, 0.33, 1.0), "unreplicated", 0, None))
+    append(_rec(c["euler"], _sv(5, 5, 0.32, 0.33, 1.0), "no_incumbent", 0, None))
     arch = replay()
     html = render_explicit(arch)
     assert "4 cells hold an elite, 3 found by the search and 1 seeded classical" in html
@@ -1550,12 +1553,12 @@ def test_D41_research_log_shows_the_newest_entries_and_points_at_the_rest():
 def test_B61_heatmap_rows_extend_to_occupied_stage_counts_outside_the_default_range():
     """Design review fix 1: an order-1 elite at stages=1 must get a heatmap row."""
     c = _classical_8()
-    rec = _rec(c["euler"], _sv(13, 13, 0.005, 0.5942853, 1.0), "unreplicated", 1, None)
+    rec = _rec(c["euler"], _sv(13, 13, 0.005, 0.5942853, 1.0), "no_improvement", 1, None)
     arch = ArchiveState(n_records=1, last_cycle_id=1,
                         grids={1: {(1, 0): rec}, 2: {}, 3: {}, 4: {}},
                         open_hypotheses=(), refuted_hypotheses=())
     html = render_explicit(arch)
-    i = html.index('aria-label="Order 1 elite grid heatmap"')
+    i = html.index('aria-label="Order 1 elite grid heatmap, 1 of 48 cells occupied"')
     svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i)]
     assert ">s=1<" in svg                          # the occupied row is rendered
     assert 'href="cell-p1-s1-b0.html"' in svg      # with its linked, filled cell
@@ -1586,9 +1589,9 @@ def test_B61_heatmap_rows_extend_to_occupied_stage_counts_outside_the_default_ra
 def test_B61_cell_bar_value_labels_stay_inside_the_viewbox():
     """Design review fix 2: a label after a long bar moves end-anchored inside the bar."""
     c = _classical_8()
-    rec = _rec(c["euler"], _sv(13, 13, 4.53999e-05, 0.5942853, 1.0), "unreplicated", 1, None)
+    rec = _rec(c["euler"], _sv(13, 13, 4.53999e-05, 0.5942853, 1.0), "no_improvement", 1, None)
     html = render_cell(1, 1, 0, rec)
-    i = html.index('aria-label="Per-problem error, log scale"')
+    i = html.index('aria-label="Per-problem error on ')
     svg = html[html.rindex("<svg", 0, i):html.index("</svg>", i)]
     labels = re.findall(
         r'<text class="lbl" x="([\d.]+)" y="[\d.]+"( text-anchor="end")?>([^<]+)</text>', svg)
@@ -1812,7 +1815,7 @@ def _validation_fixture() -> dict:
             {"kind": "discovered", "name_or_hash": disc, "order": 2, "stages": 3,
              "roles": ["champion"], "cycles_per_step": {"buck_converter": 44},
              "steps": {"buck_converter": 1489},
-             "archive": {"cycle_id": 33, "tier": "unreplicated",
+             "archive": {"cycle_id": 33, "tier": "no_improvement",
                          "heldout_error": 0.0286, "search_error": 0.0114,
                          "verifier_hash": VH}},
         ],
@@ -1904,7 +1907,7 @@ def test_B64_validation_page_built_from_results_json(monkeypatch, tmp_path):
     assert "power electronics" in html                       # problem domain
     assert "Erickson and Maksimovic" in html                 # problem source
     assert "11e898cb" in html                                # discovered method label
-    assert "unreplicated" in html                            # archive provenance of champion
+    assert "no_improvement" in html                          # archive provenance of champion
     # classical hold-out stays visible: pll_lock's winner row names rk38
     assert "rk38" in html
 
@@ -1961,9 +1964,9 @@ def _write_epoch_state(work: Path, *, consecutive=4, last_check="2026-09-21T09:3
 def _write_progress_events(work: Path) -> None:
     events = [
         {"ts": "2026-09-19T08:00:00Z", "kind": "accepted", "order": 2, "stages": 2,
-         "bucket": 0, "tier": "unreplicated", "new_elite": False, "tableau_hash": "aa"},
+         "bucket": 0, "tier": "no_improvement", "new_elite": False, "tableau_hash": "aa"},
         {"ts": "2026-09-20T10:00:00Z", "kind": "accepted", "order": 2, "stages": 2,
-         "bucket": 0, "tier": "unreplicated", "new_elite": True, "tableau_hash": "bb"},
+         "bucket": 0, "tier": "no_improvement", "new_elite": True, "tableau_hash": "bb"},
         {"ts": "2026-09-21T09:00:00Z", "kind": "cycle_done", "cycle_id": 9},
     ]
     (work / "events.jsonl").write_text(
@@ -2245,14 +2248,14 @@ def test_B67_speed_section_built_from_results_json(monkeypatch, tmp_path):
     # the library table left with the benchmark page: matched accuracy is on the class tabs
     assert "Library accuracy at matched tolerance" not in full
     # the measured us/step chart, one row per method, with its visible caption
-    assert 'aria-label="Measured microseconds per Q15 step, per method"' in html
+    assert 'aria-label="Measured microseconds per Q15 step, per method, 2 methods"' in html
     assert "<figure><figcaption>" in html
     # the speedup table: predicted and measured ratio columns plus the accuracy columns
     assert "predicted ratio" in html and "measured ratio" in html
     assert "1.500" in html and "1.571" in html and "1.659" in html
     assert "champion Q15 error" in html and "rk4 Q15 error" in html
     assert "0.000198741" in html and "0.0159248" in html
-    assert "22.729" in html and "56.399" in html
+    assert "22.73" in html and "56.40" in html
     # the environment line sits in the timing fold with the rest of the fine print
     fine = html.split("<summary>How the timings were taken</summary>", 1)[1]
     assert "Environment: CPython 3.13.5" in fine.split("</details>", 1)[0]
@@ -2282,7 +2285,7 @@ def test_B67_benchmark_data_raises_the_validation_tab_and_no_benchmark_tab(
     val = (out2 / "validation.html").read_text(encoding="utf-8")
     assert '<a href="validation.html" class="on">validation</a>' in val
     # the validation suite leads, then the speed section, then the premise test
-    assert (val.index("<h2>Best per problem</h2>") < val.index('<h2 id="speed">')
+    assert (val.index("<h2>The champion against each anchor</h2>") < val.index('<h2 id="speed">')
             < val.index('<h2 id="falsification">') < val.index("<h2>Full tables</h2>"))
 
 
@@ -2437,25 +2440,148 @@ def test_B67_render_validation_with_only_benchmark_is_banned_word_safe():
 
 
 def test_B67_index_and_validation_carry_the_measured_speed_sentence(monkeypatch, tmp_path):
-    """Verdict spots tie theory to measured time: with benchmark results present, the
-    index and validation pages carry one sentence with the real microseconds."""
+    """Verdict spots tie theory to measured time, and say what the timing supports.
+
+    The sentence used to open "Measured wall clock agrees with the cycle model" on three
+    pages, while the section it linked to said the correlation speaks to ordering and
+    not to absolute scale: the model predicts one flat ratio and the measured ratios
+    spread either side of it. What the benchmark supports is the ordering claim and the
+    correlation it was computed from, so that is what the pages state.
+    """
     work, arch = _site_archive(monkeypatch, tmp_path)
     _write_validation(work, _validation_fixture())
     _write_benchmark(work, _benchmark_fixture())
     out = tmp_path / "docs"
     build(arch, out)
-    for name in ("index.html", "validation.html"):
+    for name in ("index.html", "explicit.html", "validation.html"):
         html = (out / name).read_text(encoding="utf-8")
-        assert ("runs in 36.293 us per Q15 step against 51.671 us for rk4" in html), name
-        assert "speedup 1.450x" in html, name
+        assert "Measured wall clock agrees" not in html, name
+        assert "preserves the cycle model's ordering" in html, name
+        assert "modeled rather than measured on a Cortex-M0+" in html, name
+    # the head-to-head and the correlation ride with the sentence on the pages that do
+    # not hold the speed table. validation.html holds it a screen below, states the
+    # correlation once in the benchmark's own verdict, and repeats neither
+    for name in ("index.html", "explicit.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert "(Pearson r 0.980 over 4 fixed-step Q15 runs)" in html, name
+        assert "runs in 36.29 us per Q15 step against 51.67 us for rk4" in html, name
+        assert "The per-step speedup of 1.450x is the geometric mean" in html, name
         assert 'href="validation.html#speed"' in html, name
         assert 'href="benchmark.html"' not in html, name
+    val = (out / "validation.html").read_text(encoding="utf-8")
+    assert "runs in 36.29 us per Q15 step" not in val and "(Pearson r" not in val
+    assert ("preserves the cycle model's ordering, and the cycle counts are modeled"
+            in val)
+    assert "so their quotient is a different number again" in val
     # without benchmark results, no page invents a wall-clock figure
     out2 = tmp_path / "docs2"
     (work / "benchmark" / "results.json").unlink()
     build(arch, out2)
     for name in ("index.html", "validation.html"):
         assert "us per Q15 step" not in (out2 / name).read_text(encoding="utf-8"), name
+
+
+def test_the_build_refuses_the_agreement_claim_and_an_unqualified_chip():
+    """Two claim gates, run beside the banned-word check and failing the same way.
+
+    Both regressions were live: the wall-clock sentence on three pages, and a hub whose
+    only mention of the chip was the footer, with no word near it saying the cycle counts
+    behind every number are modeled.
+    """
+    ok = ('<html><head><title>rk-harness findings</title>'
+          '<meta name="description" content="a page about the search"></head>'
+          "<body><p>Cost is counted against a modeled Cortex-M0+ cycle budget.</p>"
+          "</body></html>")
+    sg.check_claims("index.html", ok)
+    sg.check_head("index.html", ok)
+    with pytest.raises(sg.ClaimError):
+        sg.check_claims("index.html", ok.replace("against a modeled Cortex",
+                                                 "against a Cortex"))
+    with pytest.raises(sg.ClaimError):
+        sg.check_claims("validation.html",
+                        "<p>Measured wall clock agrees with the cycle model.</p>")
+    # the qualifier has to sit near the mention, not anywhere on the page
+    far = ('<html><head><title>rk-harness findings</title>'
+           '<meta name="description" content="a page about the search"></head><body><p>'
+           "Cortex-M0+ " + "word " * 20 + "modeled.</p></body></html>")
+    with pytest.raises(sg.ClaimError):
+        sg.check_claims("index.html", far)
+    # a page with no title of its own, or no description, is also not written
+    with pytest.raises(sg.ClaimError):
+        sg.check_head("validation.html", "<html><head><title>Validation</title></head>")
+    with pytest.raises(sg.ClaimError):
+        sg.check_head("validation.html",
+                      "<html><head><title>Validation | rk-harness findings</title></head>")
+    # ClaimError is a BannedWordError, so runner.py's existing handler catches it and
+    # leaves the previous site standing rather than ending the cycle
+    assert issubclass(sg.ClaimError, BannedWordError)
+
+
+def test_every_page_ships_a_document_title_and_a_description(monkeypatch, tmp_path):
+    """A shared link or a search result gets the page's own words, not a bare label."""
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    seen = 0
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        head = html.split("</head>", 1)[0]
+        title = re.search(r"<title>([^<]+)</title>", head).group(1)
+        desc = re.search(r'<meta name="description" content="([^"]+)"', head).group(1)
+        assert "rk-harness findings" in title, page.name
+        assert len(desc.split()) >= 8, (page.name, desc)
+        for tag in ("og:title", "og:description", "og:url", "og:type"):
+            assert f'property="{tag}"' in head, (page.name, tag)
+        assert '<link rel="canonical"' in head, page.name
+        assert "<script" not in html.lower(), page.name
+        seen += 1
+    assert seen >= 10
+    idx = (out / "index.html").read_text(encoding="utf-8")
+    # og:image is not claimed: this repository ships no image to point it at
+    assert "og:image" not in idx
+    assert 'content="https://jgoetzmann.github.io/rk-findings/"' in idx
+    cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
+    assert ('<link rel="canonical" href="https://jgoetzmann.github.io/rk-findings/'
+            'cell-p4-s4-b2.html">') in cell
+
+
+def test_the_hub_stamps_the_archive_state_it_was_built_from(monkeypatch, tmp_path):
+    """A build stamp above the fold, from stored values only.
+
+    The hub called itself the run's live record and carried no stamp at all, so a reader
+    could not tell a paused run from a broken build. Whether the state is old stays the
+    reader's subtraction against their own clock: an age computed here would need a
+    wall-clock read, and two builds of one archive would stop matching.
+    """
+    _work, arch = _site_archive(monkeypatch, tmp_path)
+    html = render_index(arch)
+    assert "the run's live record" not in html
+    assert "This site is rebuilt from the run's data at the end of every cycle" in html
+    stamp = re.search(r'<p class="when">([^<]+)</p>', html).group(1)
+    assert "Built from cycle 3 of the run, 3 archive records" in stamp
+    assert sg._ct(CLOCK) in stamp
+    assert render_index(arch) == html
+    # an empty archive has no state to stamp, and says nothing rather than printing zeroes
+    assert '<p class="when">' not in render_index(_empty_arch())
+
+
+def test_each_panel_names_the_archive_state_its_document_was_built_at(monkeypatch, tmp_path):
+    """benchmark/results.json carries no record count of its own, so the hub names the
+    document it took its tableaus from and that document's state, which is not the live
+    archive's. The two have differed by tens of thousands of records."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    idx = (out / "index.html").read_text(encoding="utf-8")
+    assert "That document was built at 45,973 archive records" in idx
+    val = (out / "validation.html").read_text(encoding="utf-8")
+    assert ("The suite below reads validation/results.json, built at 45,973 archive "
+            f"records, verifier hash {VH[:8]}.") in val
+    exp = (out / "explicit.html").read_text(encoding="utf-8")
+    assert '<p class="when">Built from cycle 3 of the run, 3 archive records' in exp
 
 
 def test_B62_build_is_deterministic_and_creates_missing_out_dir(monkeypatch, tmp_path):
@@ -2680,7 +2806,7 @@ def test_R6_the_cycle_writes_a_checkpoint_once_a_day_has_closed(monkeypatch, tmp
         append(r)
     monkeypatch.setenv("RK_CLOCK", "2026-12-05T10:00:00Z")
     c = _classical_8()
-    append(_rec(c["heun3"], _sv(23, 50, 0.007, 0.008, 3.0), "unreplicated", 4, None))
+    append(_rec(c["heun3"], _sv(23, 50, 0.007, 0.008, 3.0), "no_improvement", 4, None))
     # the freeze date, so the cycle stops at the encourager instead of searching
     monkeypatch.setenv("RK_CLOCK", "2026-12-06T10:00:00Z")
     monkeypatch.setattr("rk_harness.runner.seed_baselines", lambda vh, known=(): 0)
@@ -3218,10 +3344,17 @@ def test_page_titles_are_sentence_case_and_the_tabs_stay_lowercase(monkeypatch, 
     for page in sorted(out.glob("*.html")):
         html = page.read_text(encoding="utf-8")
         h1 = re.search(r"<h1>([^<]+)</h1>", html).group(1)
-        assert f"<title>{h1}</title>" in html, page.name
+        # the tab and the heading are deliberately no longer one string: a title of
+        # "Validation" or "Cell p4 s4 b2" says nothing in a search result or a shared
+        # link, so the document title keeps the heading and adds the site to it
+        title = re.search(r"<title>([^<]+)</title>", html).group(1)
+        assert title.startswith(h1), (page.name, title, h1)
+        assert len(title) > len(h1), (page.name, title)
+        assert "rk-harness findings" in title, page.name
         seen += 1
         if page.name == "index.html":
             assert h1 == "rk-harness findings"
+            assert title == "rk-harness findings: Runge-Kutta methods in Q15 fixed point"
             continue
         assert h1[:1].isupper(), (page.name, h1)
     assert seen >= 10
@@ -3231,3 +3364,237 @@ def test_page_titles_are_sentence_case_and_the_tabs_stay_lowercase(monkeypatch, 
         assert f">{label}</a>" in idx, label
     cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
     assert "<h1>Cell p4 s4 b2</h1>" in cell
+
+
+# ======================================================================================
+# FIND-2 (2026-09-12): the compiled trace, the hover and tally gates, the bisection
+# floor, and stage counts that read as English
+# ======================================================================================
+
+def _trace_fixture() -> dict:
+    """A trace document in the shape rk_harness.tracecheck writes, with both scopes.
+
+    Two methods: one whose matched-scope gap sits inside the band, one outside it, and
+    the pair inverted between the analytic order and the traced order, which is the case
+    the page has to name rather than hide.
+    """
+    def method(name, origin, stages, ana, traced, matched, muls):
+        return {
+            "name": name, "origin": origin, "stages": stages,
+            "cycles_analytic": {"m0plus_fast": ana, "m0plus_slow": ana},
+            "cycles_traced": {"m0plus_fast": traced, "m0plus_slow": traced * 2},
+            "cycles_traced_model_scope": {"m0plus_fast": matched, "m0plus_slow": matched},
+            "ratio_model_scope": {"m0plus_fast": matched / ana, "m0plus_slow": 1.0},
+            "relative_gap_model_scope": {"m0plus_fast": abs(ana - matched) / matched,
+                                         "m0plus_slow": 0.0},
+            "instructions_per_step": traced // 2,
+            "muls_per_step": muls, "muls_in_model_scope": 0,
+            "crosscheck": {"cases": 8, "comparable": 8, "matched": 8,
+                           "overflow_cases": 2, "trap_index_matched": 2},
+        }
+    return {
+        "methods": [method("midpoint", "classical", 2, 11, 50, 14, 2),
+                    method("rk4", "classical", 4, 33, 139, 67, 4),
+                    method("11e898cb", "discovered", 3, 22, 86, 35, 3)],
+        "accuracy": {
+            "statement": "The emulator is instruction accurate and NOT cycle accurate.",
+            "does_not_establish": ["wall clock time on any physical part"],
+        },
+        "assumptions": {"flash": "zero wait state", "branch_taken_cycles": 3,
+                        "branch_not_taken_cycles": 1, "load_cycles": 2, "store_cycles": 2,
+                        "muls_cycles_fast_variant": 1, "muls_cycles_small_variant": 32},
+        "toolchain": {"compiler": "arm-none-eabi-gcc 13.2.1", "emulator": "unicorn 2.1.4",
+                      "flags": ["-mcpu=cortex-m0plus", "-mthumb", "-O2"]},
+        "verdicts": {"scope": "The analytic model prices the stage and b combinations "
+                              "only."},
+        "correlation": {
+            "spearman_analytic_vs_traced_model_scope_fast": 0.9429,
+            "spearman_analytic_vs_traced_slow": 1.0,
+            "inversions_model_scope_fast": [{"pair": ["rk4", "rk38"],
+                                             "analytic": {"rk4": 33, "rk38": 36},
+                                             "traced": {"rk4": 67, "rk38": 59}}],
+            "inversions_slow": [],
+        },
+        "generated_from": {"trace_hash": "17a00337" + "0" * 56},
+    }
+
+
+def test_the_trace_section_keeps_the_two_scopes_apart_and_publishes_the_failed_band():
+    """F1 Tier A rendering. The document carries a whole-step traced count and a count
+    matched to what the cost model actually prices, and quoting the first against
+    cycles_analytic would report a scope difference as a model error. The comparison
+    table takes the matched one, says what it excludes, and names the rows that miss the
+    band rather than moving the band."""
+    doc = _trace_fixture()
+    html = render_validation(None, trace=doc)
+    assert '<h2 id="trace">Compiled and traced against the cost model</h2>' in html
+    sec = html.split('<h2 id="trace">', 1)[1].split('<h2 id="falsification">', 1)[0]
+    # the comparison table is the matched scope: 11 against 14, not 11 against 50
+    row = sec.split("<tr><td class=\"hash\">midpoint</td>", 1)[1].split("</tr>", 1)[0]
+    assert ">11<" in row and ">14<" in row and "50" not in row
+    assert "1.273" in row                                  # ratio at matched scope
+    assert "excludes the derivative call" in sec and "loop control" in sec
+    # instruction accurate, not cycle accurate, in the document's own words
+    assert "instruction accurate and NOT cycle accurate" in sec
+    # the TRM assumptions are named, and a one-cycle entry reads as one cycle
+    assert "taken branch: 3 cycles" in sec and "MULS on the fast multiplier: 1 cycle" in sec
+    assert "1 cycles" not in sec
+    # 2 of the 3 rows miss the 0.25 band, and the page says which and by how much
+    assert "2 of 3 methods sit outside the 0.25 band" in sec
+    assert "rk4 at 0.507" in sec and "11e898cb at 0.371" in sec
+    # the inversion is named with both numbers, and the small multiplier is not
+    assert "One pair comes out the other way round" in sec
+    assert "rk4" in sec and "rk38" in sec and "0.9429" in sec
+    assert "no pair is inverted" in sec
+    # the champion's MULS count and the dyadic assumption behind its cost
+    assert "the trace contains 3 MULS per step" in sec
+    assert "0 of them apply a tableau coefficient" in sec
+    # the correction is an epoch decision, said in those terms
+    assert "moves VERIFIER_HASH" in sec and "epoch decision" in sec
+    # the whole-step numbers exist but sit in a fold that says what they include
+    assert "The assumptions, the limits and the whole-step counts" in sec
+    assert "cycles traced, whole step" in sec
+    assert render_validation(None, trace=doc) == html
+    check_banned(html)
+    sg.check_hover("validation.html", html)
+    sg.check_tallies("validation.html", html)
+
+
+def test_a_missing_trace_document_says_so_and_draws_nothing():
+    html = render_validation(None, trace={})
+    assert '<h2 id="trace">' in html
+    assert "rk-work/trace/results.json has not been written" in html
+    assert "cycles_traced" not in html
+    # and with no trace argument at all the section is absent, not empty
+    assert '<h2 id="trace">' not in render_validation(None)
+
+
+def test_no_page_tells_the_reader_to_hover(monkeypatch, tmp_path):
+    """F12. The wide drawing is the only one carrying mark titles and the stylesheet
+    hides it below 640px, so "hover a dot" was false on every phone and in every screen
+    reader. The gate runs over emitted HTML with the stylesheet stripped, because the
+    :hover rules in it are styling rather than an instruction."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _stiff_validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    _write_sidetrack(work, _sidetrack_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        sg.check_hover(page.name, html)
+        body = re.sub(r"<style>.*?</style>", "", html, flags=re.S)
+        assert "hover" not in body.lower(), page.name
+        assert ":hover" in html                     # the stylesheet keeps its own rules
+    with pytest.raises(sg.ClaimError):
+        sg.check_hover("x.html", "<p>hover a dot for exact values</p>")
+    # a page whose only hover is inside the stylesheet passes
+    sg.check_hover("x.html", "<style>a:hover{color:red}</style><p>select a row</p>")
+
+
+def test_every_win_tally_carries_both_sample_sizes(monkeypatch, tmp_path):
+    """F4 acceptance 5, as a gate. A win count over a maximum of one set against a
+    maximum of another means nothing without the size of both sets."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _stiff_validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    for page in sorted(out.glob("*.html")):
+        sg.check_tallies(page.name, page.read_text(encoding="utf-8"))
+    with pytest.raises(sg.ClaimError):
+        sg.check_tallies("v.html", "<p>Discovered methods have the lower Q15 error on "
+                                   "4 of 5 problems.</p>")
+    sg.check_tallies("v.html", "<p>Discovered methods have the lower Q15 error on 4 of 5 "
+                               "problems, 3 discovered against 5 classical.</p>")
+    # a paragraph quoted from a source document cannot be rewritten, so it is exempt and
+    # the note beside it carries the sizes instead
+    sg.check_tallies("v.html", '<p class="quoted">the best discovered method has lower '
+                               "Q15 error on 1 of 3 problems.</p>")
+
+
+def test_the_cell_page_calls_stability_imag_a_bisection_floor():
+    """F11. The scorer bisects a sampled grid, so a method whose stability region meets
+    the imaginary axis only at the origin reports the smallest resolvable interval rather
+    than 0, and every order-2 record carries the same value for that reason. evaluator.py
+    is pinned, so the fix is at render time."""
+    c = _classical_8()
+    rec = _rec(c["midpoint"], _sv(11, 11, 0.02, 0.084, 1.2), "no_improvement", 2, None)
+    html = render_cell(2, 2, 0, rec)
+    assert "stability_imag <span class=\"note\">(bisection floor)</span>" in html
+    assert "4000 samples and 200 bisection steps" in html
+    assert "a floor rather than a measured extent" in html
+    # the old sentence called both extents measurements of the region
+    assert "are the extents of the stability region" not in html
+    check_banned(html)
+
+
+def test_a_stage_count_of_one_reads_as_one_stage():
+    """F13 acceptance 5: euler is the only one-stage method and it wrote "1 stages" into
+    eighteen published strings, one of them a visible subtitle."""
+    c = _classical_8()
+    rec = _rec(c["euler"], _sv(5, 5, 0.32, 0.594, 1.0), "no_improvement", 1, None)
+    arch = ArchiveState(n_records=1, last_cycle_id=1,
+                        grids={1: {(1, 0): rec}, 2: {}, 3: {}, 4: {}},
+                        open_hypotheses=(), refuted_hypotheses=())
+    pages = [render_explicit(arch), render_cell(1, 1, 0, rec)]
+    for html in pages:
+        assert "1 stages" not in html
+        assert "1 stage" in html
+    assert '<p class="sub">grid order 1, 1 stage, cycle bucket 0</p>' in pages[1]
+    assert sg._stages(1) == "1 stage" and sg._stages(3) == "3 stages"
+
+
+def test_every_chart_table_is_reachable_from_its_chart(monkeypatch, tmp_path):
+    """F13 acceptance 3. role="img" collapses a chart to one announced node, so the
+    numbers inside the marks are unreachable; the table is the path to them, and
+    aria-describedby is what ties the two together."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _stiff_validation_fixture())
+    _write_benchmark(work, _benchmark_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    seen = 0
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        ids = set(re.findall(r'id="([^"]+)"', html))
+        for target in set(re.findall(r'aria-describedby="([^"]+)"', html)):
+            assert target in ids, (page.name, target)
+            seen += 1
+            # chart first, then its table, which is the order the class pages already use
+            assert html.index(f'aria-describedby="{target}"') < html.index(f'id="{target}"')
+    assert seen >= 4
+    # F13 remainder: every non-decorative chart on the site names how much it
+    # plots and points at a table of its own numbers. The previous pass did the
+    # nine charts the audit named and left 33 labels without a count, most of them
+    # the per-problem panels that repeat once per problem. The rule is checked over
+    # the whole build rather than chart by chart, so a new chart cannot arrive
+    # without either half.
+    charts = 0
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        ids = set(re.findall(r'id="([^"]+)"', html))
+        for attrs in re.findall(r'<svg\b([^>]*)>', html):
+            if 'aria-hidden="true"' in attrs:
+                continue
+            charts += 1
+            label = re.search(r'aria-label="([^"]*)"', attrs)
+            assert label and label.group(1), (page.name, attrs[:90])
+            assert re.search(r"\b\d[\d,]*\s+(?!of\b)[a-z]", label.group(1)), \
+                (page.name, label.group(1))
+            db = re.search(r'aria-describedby="([^"]+)"', attrs)
+            assert db and db.group(1) in ids, (page.name, label.group(1))
+    assert charts >= 8, charts
+    val = (out / "validation.html").read_text(encoding="utf-8")
+    assert 'aria-describedby="validation-non-stiff-values"' in val
+    assert "<summary>Every plotted run, in one table (" in val
+    exp = (out / "explicit.html").read_text(encoding="utf-8")
+    assert 'aria-describedby="elite-table"' in exp        # the grids point at the elites
+    assert re.search(r'aria-hidden="true"><title>order \d+, \d+ stages?, bucket \d+: empty', exp)
+
+
+def test_a_chart_mark_that_is_a_link_gets_a_focus_ring():
+    """F12's compliant half: the 54 links inside the explicit page's charts were tab
+    stops with nothing to show for it. CSS only, so the site stays JavaScript-free."""
+    assert "svg a:focus-visible rect" in sg._STYLE
+    assert "outline:2px solid var(--s1)" in sg._STYLE

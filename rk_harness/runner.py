@@ -37,7 +37,9 @@ from rk_harness import sitegen
 from rk_harness import tableau as tableau_mod
 from rk_harness import verifier
 from rk_harness import verifier_hash
-from rk_harness.paths import FIXTURES_DIR, archive_dir, findings_dir, work_dir
+from rk_harness.paths import (
+    FIXTURES_DIR, HARNESS_DIR, archive_dir, findings_dir, work_dir,
+)
 from rk_harness.types import Record, RunState, Tableau
 
 HEARTBEAT_INTERVAL_S = 10
@@ -420,7 +422,11 @@ def _classical_orders() -> dict[str, int]:
 
 
 def seed_baselines(verifier_hash_value: str, known: frozenset[str] | None = None) -> int:
-    """Append the 8 classical tableaus (cycle 0, seed 0, unreplicated) if absent.
+    """Append the 8 classical tableaus (cycle 0, seed 0, no_incumbent) if absent.
+
+    Each one opens its cell, before any search has run, so it carries the tier assign_tier
+    gives a candidate with no incumbent to compare against. These eight are the only
+    records the runner tiers without calling assign_tier.
 
     `known` is the set of archived hashes the caller already has (ArchiveState.record_hashes).
     Passing it avoids a full re-read of the archive; omitting it re-reads, which is what any
@@ -443,7 +449,7 @@ def seed_baselines(verifier_hash_value: str, known: frozenset[str] | None = None
             tableau_hash=h,
             tableau=t,
             score=sv,
-            tier="unreplicated",
+            tier="no_incumbent",
             cycle_id=0,
             seed=0,
             verifier_hash=verifier_hash_value,
@@ -636,6 +642,38 @@ def _git(args: list[str]) -> None:
         subprocess.run(["git"] + args, check=False, capture_output=True, timeout=120)
     except Exception as e:
         log_event("git_failed", args=args, error=repr(e))
+
+
+_HEX = set("0123456789abcdef")
+
+
+def _repo_shas() -> dict[str, str]:
+    """The commit each mounted repository sits at, for the findings-site footer.
+
+    Read here and handed to sitegen.build as data. The generator never reads git
+    itself: its determinism tests build into a directory with no repository, and a
+    generator that shelled out would make its own bytes depend on its environment.
+
+    The findings commit is the one the build started from, since _commit_outputs runs
+    after the build. rk-overview is not mounted into the container, so it is absent
+    here and the footer lists what it can see. A repository that does not answer is
+    left out rather than guessed at.
+    """
+    out: dict[str, str] = {}
+    for name, path in (("rk-harness", HARNESS_DIR), ("rk-work", work_dir()),
+                       ("rk-findings", findings_dir())):
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--short=12", "HEAD"],
+                check=False, capture_output=True, timeout=30, text=True,
+                encoding="utf-8", errors="replace")
+        except Exception as e:  # noqa: BLE001 - provenance must not end a cycle
+            log_event("repo_sha_failed", repo=name, error=repr(e)[:200])
+            continue
+        sha = (proc.stdout or "").strip()
+        if proc.returncode == 0 and 7 <= len(sha) <= 40 and set(sha) <= _HEX:
+            out[name] = sha
+    return out
 
 
 # Small, slow-moving state that the container writes into /work. Without these the
@@ -1077,7 +1115,7 @@ def _run_lane_cycle(state: RunState, new_cycle_id: int, arch, lane: str,
 
     if os.environ.get("RK_SITE") != "off":
         try:
-            sitegen.build(arch, findings_dir() / "docs")
+            sitegen.build(arch, findings_dir() / "docs", commit_shas=_repo_shas())
         except sitegen.BannedWordError as e:
             log_event("site_build_failed", error=repr(e))
     if os.environ.get("RK_GIT_COMMIT") == "on":
@@ -1240,11 +1278,13 @@ def _run_cycle(state: RunState) -> RunState:
             continue
         stg = tableau_mod.stages(t)
         bucket = archive.cycle_bucket(int(sv.cycles["m0plus_fast"]))
+        # The tier here is a placeholder. The record is built this early so record_order
+        # can read its tableau, and assign_tier replaces the tier a few lines down.
         prelim = Record(
             tableau_hash=h,
             tableau=t,
             score=sv,
-            tier="unreplicated",
+            tier="no_improvement",
             cycle_id=new_cycle_id,
             seed=cand.seed,
             verifier_hash=vh,
@@ -1289,7 +1329,8 @@ def _run_cycle(state: RunState) -> RunState:
     # 6. site + commits
     if os.environ.get("RK_SITE") != "off":
         try:
-            sitegen.build(arch_after, findings_dir() / "docs")
+            sitegen.build(arch_after, findings_dir() / "docs",
+                          commit_shas=_repo_shas())
         except sitegen.BannedWordError as e:
             log_event("site_build_failed", error=repr(e))
     if os.environ.get("RK_GIT_COMMIT") == "on":

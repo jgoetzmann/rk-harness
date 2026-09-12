@@ -290,7 +290,8 @@ def section_A(results, docker_ok: bool):
             f"verify() closure = {closure}; network/subprocess hits: {bad or 'none'}; file writes: {writes or 'none'}; read-only open(): {reads or 'none'}")
     from rk_harness import archive
     src = inspect.getsource(archive.assign_tier)
-    hits = _grep([HARNESS / "rk_harness" / "prompts.py"], r"heldout_verified|search_only|unreplicated")
+    hits = _grep([HARNESS / "rk_harness" / "prompts.py"],
+                 r"heldout_verified|search_only|no_incumbent|no_improvement|unreplicated")
     R.check("A5", "def assign_tier" in src and not hits, f"assign_tier in archive.py ({len(src.splitlines())} lines, pure); prompt template tier-string hits: {hits or 'none'}")
     offenders = []
     for m in [p.stem for p in _pkg_files() if p.stem not in ("runner", "credentials")]:
@@ -441,7 +442,7 @@ def section_D(results):
     R.check("D1", t1 == "search_only", f"planted search-tuned tableau (search 0.005 < 0.02, heldout 0.20 > 0.05, 3 search families improved) -> {t1}")
     single = sv(0.03, 0.06, {"dahlquist": 0.001, "damped_osc": 0.05, "vanderpol_mild": 0.05, "pendulum": 0.06, "dc_motor": 0.06, "rc_thermal": 0.06, "quaternion": 0.06})
     t2 = archive.assign_tier(single, inc)
-    R.check("D2", t2 == "unreplicated", f"single-family winner (dahlquist only, worse aggregates) -> {t2}")
+    R.check("D2", t2 == "no_improvement", f"single-family winner (dahlquist only, worse aggregates) -> {t2}")
     closure = _import_closure("search")
     import ast
     loads = []
@@ -481,7 +482,7 @@ def section_D(results):
         search.SEARCH_SET = orig
     both_one_family = sv(0.01, 0.04, {"dahlquist": 0.001, "damped_osc": 0.05, "vanderpol_mild": 0.05, "pendulum": 0.06, "dc_motor": 0.06, "rc_thermal": 0.06, "quaternion": 0.06})
     t3 = archive.assign_tier(both_one_family, inc)
-    R.check("D6", t3 == "unreplicated", f"better on both aggregates but only 1 family -> {t3} (heldout_verified needs >= 2 families)")
+    R.check("D6", t3 == "no_improvement", f"better on both aggregates but only 1 family -> {t3} (heldout_verified needs >= 2 families)")
     cands = list(search.cmaes_island(2, 2, 1, search.default_constraints(), 30))
     dy = all((x.denominator & (x.denominator - 1)) == 0 and x.denominator <= 32768 for t in cands for row in t.A for x in row)
     R.check("D7", bool(cands) and dy, f"{len(cands)} yielded tableaus; every A entry is k/2^s with s<=15 before the runner verifies (snap happens inside search.project)")
@@ -694,7 +695,7 @@ def section_I(results):
     def mk(t, cyc, held, cid):
         sv = ScoreVector(2.0, 5, 0.1, -2.0, 0.0, {"m0plus_fast": cyc, "m0plus_slow": cyc, "avr_approx": cyc}, 2, 0.0, 0.01, held, 2.0,
                          {"dahlquist": 0.01, "slow:heldout_error": held, "slow:search_error": 0.01, "avr_approx:heldout_error": held, "avr_approx:search_error": 0.01})
-        return Record(tableau.content_hash(t), t, sv, "unreplicated", cid, 0, "vh", None, None, "2026-09-21T10:00:00Z")
+        return Record(tableau.content_hash(t), t, sv, "no_improvement", cid, 0, "vh", None, None, "2026-09-21T10:00:00Z")
     archive.append(mk(ct["heun2"], 13, 0.30, 1))       # bucket 0
     archive.append(mk(ct["ralston2"], 16, 0.10, 2))    # bucket 1, same (order 2, stages 2)
     arch = archive.replay()

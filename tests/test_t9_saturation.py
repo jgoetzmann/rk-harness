@@ -13,7 +13,7 @@ def _write_events(work, events):
         "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
 
 
-def _accepted(ts, order=2, stages=2, bucket=0, tier="unreplicated", new_elite=False):
+def _accepted(ts, order=2, stages=2, bucket=0, tier="no_improvement", new_elite=False):
     return {"ts": ts, "kind": "accepted", "order": order, "stages": stages,
             "bucket": bucket, "tier": tier, "new_elite": new_elite,
             "heldout_error": 0.1, "tableau_hash": "x"}

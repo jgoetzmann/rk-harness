@@ -756,6 +756,42 @@ def test_the_matched_chart_draws_a_line_only_through_distinct_reached_points(
     assert "<svg" not in nothing and "no mark to draw" in nothing
 
 
+def test_every_matched_panel_names_its_size_and_shares_one_table(monkeypatch, tmp_path):
+    """F13 remainder. The per-problem panels are the widest set of charts on the site,
+    one per problem on each of the three class pages, and every one of them stopped at
+    what it plotted without saying how much. role="img" also collapses a panel to a
+    single announced node, so the marks inside it are out of reach: the panels now share
+    one table of every plotted mark, the way the four elite grids share the elite table.
+    """
+    _env(monkeypatch, tmp_path)
+
+    def row(side, solver, problem, target, nfev, err, arith="q15"):
+        return {"class": "adaptive", "side": side, "solver": solver, "problem": problem,
+                "arithmetic": arith, "target_error": target, "nfev": nfev,
+                "achieved_error": err, "status": "reached"}
+
+    rows = [row("ours", "bs32_q15", "pendulum", 1e-2, 160, 8e-4),
+            row("ours", "bs32_q15", "pendulum", 1e-4, 480, 9e-5),
+            row("library", "RK23", "pendulum", 1e-3, 130, 7e-4, arith="float64"),
+            row("ours", "bs32_q15", "stiff_one", 1e-3, 220, 5e-4)]
+    chart = sitegen._matched_chart(rows, "adaptive")
+    assert ('aria-label="pendulum: achieved error against rhs evaluations for the '
+            'adaptive class at matched accuracy, 3 marks"') in chart
+    assert ('aria-label="stiff_one: achieved error against rhs evaluations for the '
+            'adaptive class at matched accuracy, 1 mark"') in chart
+    # both panels point at the one table, and the chart comes before it
+    assert chart.count('aria-describedby="matched-adaptive-values"') == 2
+    assert (chart.index('aria-describedby="matched-adaptive-values"')
+            < chart.index('id="matched-adaptive-values"'))
+    table = chart.split('id="matched-adaptive-values"', 1)[1]
+    for cell in ("pendulum", "stiff_one", "bs32_q15", "RK23", "library", "ours"):
+        assert cell in table, cell
+    assert "4 rows" in table                       # every mark on both panels
+    check_banned(chart)
+    # the id follows the class, so the three class pages cannot collide on one id
+    assert 'id="matched-implicit-values"' in sitegen._matched_chart(rows, "implicit")
+
+
 # --------------------------------------------------------------------------------------
 # the traceability rule
 # --------------------------------------------------------------------------------------
@@ -1423,6 +1459,31 @@ def test_lane_prose_carrying_every_banned_word_still_publishes(monkeypatch, tmp_
     assert "earliest order difference" in imp       # a value inside a shape column
     adp = _lane_section((out / "adaptive.html").read_text(encoding="utf-8"))
     assert "<td>new</td>" in adp                    # the controller safety value
+    # the strip chart's own table prints the Jacobian policy, so it takes the same pass
+    assert "earliest order difference" in imp.split('id="lane-implicit-values"', 1)[1]
+
+
+def test_the_lane_charts_name_their_size_and_carry_their_numbers(monkeypatch, tmp_path):
+    """F13 remainder, the two lane charts. Both draw a ranked document whose per-entry
+    numbers a reader cannot otherwise reach: the strip dodges marks by Jacobian policy
+    and the scatter merges entries that land on one point, so the table is the only
+    place each entry's own values appear."""
+    work = _env(monkeypatch, tmp_path)
+    for lane in ("implicit", "adaptive"):
+        _write_json(work / f"{lane}_archive" / "elites.json", _lane_elites_fixture(lane))
+    out = tmp_path / "docs"
+    build(_empty_arch(), out)
+    imp = (out / "implicit.html").read_text(encoding="utf-8")
+    adp = (out / "adaptive.html").read_text(encoding="utf-8")
+    for html, tid, label in ((imp, "lane-implicit-values", "Implicit lane elites:"),
+                             (adp, "lane-adaptive-values", "Adaptive lane elites:")):
+        assert f'aria-describedby="{tid}"' in html, tid
+        assert html.index(f'aria-describedby="{tid}"') < html.index(f'id="{tid}"')
+        m = re.search(r'aria-label="' + label + r'[^"]+, (\d+) entr(?:y|ies)"', html)
+        assert m, label
+        # the count in the label is the number of rows in the table beside it
+        body = html.split(f'id="{tid}"', 1)[1].split("</details>", 1)[0]
+        assert f"({m.group(1)} row" in body, (label, m.group(1))
 
 
 def test_the_lane_elites_helpers_tolerate_rubbish(monkeypatch, tmp_path):
@@ -1856,7 +1917,10 @@ def test_the_sweep_draws_one_panel_per_problem_with_the_others_for_scale(
     assert chart == sitegen._sweep_multiples(list(docs))
     assert chart.count('role="img"') == 2
     assert ('aria-label="buck_converter: achieved error against rhs evaluations across '
-            'the tolerance sweep"') in chart
+            'the tolerance sweep, 3 points"') in chart
+    # the panel points at the one table under the set, which carries every plotted point
+    assert chart.count('aria-describedby="sweep-tolerance-values"') == 2
+    assert 'id="sweep-tolerance-values"' in chart
     # small panels on shared axes, four to a row at full width; a panel draws only its
     # own problem, so the page carries no second copy of every line in grey
     assert chart.count('viewBox="0 0 256 184"') == 2
@@ -2104,8 +2168,10 @@ def test_the_validation_charts_carry_distinct_labels_and_a_source_line(monkeypat
     _env(monkeypatch, tmp_path)
     html = sitegen.render_validation(_validation_fixture())
     for group in ("non-stiff", "stiff"):
+        # the label names the group and counts what it plots: a chart that collapses to
+        # one announced node for a screen reader should at least say how much is in it
         assert (f'aria-label="Q15 final-state error per method on each {group} validation '
-                'problem, log scale"') in html, group
+                "problem, log scale, ") in html, group
     for fig in _figures_in(html):
         if 'role="img"' in fig:
             assert 'class="note">Source: rk-work/validation/results.json, results.' in fig
@@ -2129,12 +2195,15 @@ def test_the_speed_chart_fades_the_median_bar_and_keeps_values_off_the_marks():
             "median of 15 repeats after 3 warmups).") in chart
     marks = _marks(chart)
     dots = {m["title"]: m for m in marks if m["tag"] == "circle"}
+    # every microsecond figure prints to the same precision, chart included: the stored
+    # medians carry whatever the timer produced (20.47 beside 31.993) and the page used
+    # to print both as stored, four significant figures beside five
     ours = [dots[f"11e898cb / {p}: {v} us per step"] for p, v in
-            (("a", "18"), ("b", "20.47"), ("c", "25"))]
+            (("a", "18.00"), ("b", "20.47"), ("c", "25.00"))]
     _assert_proportional([m["cx"] for m in ours], [18.0, 20.47, 25.0])
     labels = re.findall(r'<text class="lbl" x="([\d.]+)" y="[\d.]+" text-anchor="end">'
                         r"([^<]+)</text>", chart)
-    assert sorted(t for _x, t in labels) == ["20.47", "31.993"]
+    assert sorted(t for _x, t in labels) == ["20.47", "31.99"]
     right = max(m["cx"] + 4 for m in dots.values())
     for x, t in labels:                                # the value column clears every dot
         assert float(x) - 7.0 * len(t) > right, t
@@ -2151,6 +2220,11 @@ def test_the_explicit_page_reaches_past_its_search_problems(monkeypatch, tmp_pat
     val = {"cost_model": "m0plus_fast",
            "problems": [{"name": "p1", "stiff": False}, {"name": "p2", "stiff": False},
                         {"name": "stiff1", "stiff": True}],
+           # the sentence states the size of both sides, so the document has to say how
+           # many methods each side had; without them the page states no tally at all
+           "methods": [{"kind": "discovered", "name_or_hash": champ},
+                       {"kind": "classical", "name_or_hash": "rk4"},
+                       {"kind": "classical", "name_or_hash": "midpoint"}],
            "verdicts": {"practical_problems_won_by_discovered": 1,
                         "practical_problems_compared": 2,
                         # the whole-suite counts, which include the stiff problem this
@@ -2174,10 +2248,11 @@ def test_the_explicit_page_reaches_past_its_search_problems(monkeypatch, tmp_pat
     html = render_explicit(_stocked_arch(), validation=val, benchmark=bench)
     assert html == render_explicit(_stocked_arch(), validation=val, benchmark=bench)
     sec = html.split("<h2>Beyond the search problems</h2>", 1)[1].split("<h2>", 1)[0]
-    assert "On 1 of 2 practical problems that no search saw" in sec
+    assert ("On 1 of 2 practical problems that no search saw, the best of 1 discovered "
+            "tableau ends with lower Q15 error than the best of 2 classical anchors") in sec
     assert 'href="validation.html"' in sec and 'href="validation.html#speed"' in sec
     assert ('aria-label="Best discovered against best classical Q15 error on each '
-            'non-stiff practical problem, log scale"') in sec
+            'non-stiff practical problem, log scale, 2 problems"') in sec
     assert "Source: rk-work/validation/results.json, verdicts.per_problem." in sec
     marks = _marks(sec)
     d1, c1 = (_mark_titled(marks, f"p1: best {w}") for w in ("discovered", "classical"))
@@ -2210,17 +2285,31 @@ def test_each_hub_card_carries_its_own_class_number(monkeypatch, tmp_path):
     cards = re.findall(r'<div class="card klass k-(\w+)[^"]*"><div class="k">\w+</div>'
                        r'<div class="v">([^<]+)</div><div class="d">([^<]+)</div>', html)
     got = {cls: (v, d) for cls, v, d in cards}
-    assert got["explicit"][0] == "4 of 4"
-    # two "ours" arithmetics on one card: the set they come out of has to be sorted, or
-    # two processes print them in two orders
-    assert "; Q15 and float64 runs," in got["explicit"][1]
-    # a row that never ran is not a target this class missed: it leaves the denominator
-    # and is counted beside it
-    assert got["implicit"][0] == "1 of 1"
-    assert "; 1 further row never ran; float64 runs," in got["implicit"][1]
-    assert got["adaptive"][0] == "0 of 1" and "; Q15 runs," in got["adaptive"][1]
+    # the three cards carry the same two figures, so none of them reads as perfect:
+    # targets reached out of the rows that ran, then the rows that ran out of the rows
+    # the class has. A row that never ran is still not a target this class missed, so it
+    # stays out of the value's denominator and is counted in the description instead.
+    assert got["explicit"][0] == "4 of 4 run"
+    assert got["implicit"][0] == "1 of 1 run"
+    assert got["adaptive"][0] == "0 of 1 run"
+    assert "; 4 of 4 rows ran" in got["explicit"][1]
+    assert "; 1 of 2 rows ran" in got["implicit"][1]
+    assert "; 1 of 1 row ran" in got["adaptive"][1]
+    # the solvers behind the number are named with their arithmetic, because "our
+    # solvers" reads as "the methods this project found" and two thirds of the explicit
+    # set is the classical rk4 control, one row of it in float64. The pairs come out of
+    # a set, so they have to be sorted or two processes print two orders
+    assert ("matched-accuracy targets reached by rk4 in Q15 and rk4_float64 in float64;"
+            in got["explicit"][1])
+    assert ("reached by sdirk2_analytic_jac in float64 and sdirk2_fd_jac in float64;"
+            in got["implicit"][1])
+    assert "reached by bs32_q15 in Q15;" in got["adaptive"][1]
+    assert "our solvers" not in html.lower().split("<footer>")[0]
     for _v, d in got.values():
         assert d.endswith("from benchmark/results.json")
+    # and the convention the three share is stated once, under the row
+    assert html.count("a row that never ran is not a target the class missed") == 1
+    assert html.count("so it does not mean discovered") == 1
     assert ("on 1 of 2 stiff validation problems every discovered explicit tableau "
             "overflows Q15 (validation/results.json)") in html
     assert "stiff problems no discovered method finishes" not in html
@@ -2421,3 +2510,206 @@ def test_the_attempt_cost_source_line_writes_q15_as_the_prose_does():
     fig = sitegen._attempt_cost_chart({"adaptive_matched_tolerance": _attempt_rows()})
     note = fig.split('<p class="note">Source:', 1)[1]
     assert "Arithmetic: Q15." in note and "Arithmetic: q15" not in note
+
+
+# --------------------------------------------------------------------------------------
+# FIND-2 (2026-09-12): one fixed comparator, a tie band and a degeneracy filter
+# --------------------------------------------------------------------------------------
+
+def _champion_validation_fixture() -> dict:
+    """One champion, two anchors, four problems: a win, a loss to one anchor, a tie
+    inside the band, and a problem whose whole field lands within a few percent."""
+    champ = "11e898cb" + "0" * 56
+    other = "196b1d17" + "0" * 56
+    def row(problem, method, err, **extra):
+        return {"problem": problem, "method": method, "q15_error": err,
+                "float_error": 1e-9, "steps": 1000, "cycles_per_step": 44,
+                "max_abs_q": 9000, **extra}
+    return {
+        "budget_cycles": 65536, "cost_model": "m0plus_fast",
+        "rounding": "floor (ASRS), per HANDOFF 4.2",
+        "generated_from": {"archive_records": 46398, "champion_hash": champ,
+                           "verifier_hash": "de5bec22" + "0" * 56},
+        "methods": [
+            {"kind": "classical", "name_or_hash": "midpoint", "order": 2, "stages": 2,
+             "roles": ["anchor"]},
+            {"kind": "classical", "name_or_hash": "rk4", "order": 4, "stages": 4,
+             "roles": ["anchor"]},
+            {"kind": "discovered", "name_or_hash": champ, "order": 2, "stages": 3,
+             "roles": ["champion"],
+             "archive": {"cycle_id": 33, "tier": "no_improvement", "heldout_error": 0.0286}},
+            {"kind": "discovered", "name_or_hash": other, "order": 4, "stages": 4,
+             "roles": ["best_elite_order_4"]},
+        ],
+        "problems": [
+            {"name": "buck_converter", "domain": "power electronics", "n_states": 2,
+             "t_end": 25.0, "stiff": False, "stiffness_ratio": 1.0},
+            {"name": "bicycle_lateral", "domain": "vehicle dynamics", "n_states": 2,
+             "t_end": 20.0, "stiff": False, "stiffness_ratio": 1.4},
+            {"name": "servo_load_step", "domain": "motion control", "n_states": 2,
+             "t_end": 4.0, "stiff": True, "stiffness_ratio": 940.0},
+            {"name": "enzyme_qssa", "domain": "chemical kinetics", "n_states": 2,
+             "t_end": 12.0, "stiff": True, "stiffness_ratio": 300.0},
+        ],
+        "results": [
+            row("buck_converter", champ, 0.002), row("buck_converter", "midpoint", 0.02),
+            row("buck_converter", "rk4", 0.03), row("buck_converter", other, 0.004),
+            row("bicycle_lateral", champ, 0.00054),
+            row("bicycle_lateral", "midpoint", 0.00039),
+            row("bicycle_lateral", "rk4", 0.04), row("bicycle_lateral", other, 0.00018),
+            row("servo_load_step", champ, 0.0115754),
+            row("servo_load_step", "midpoint", 0.0115746),
+            row("servo_load_step", "rk4", 0.0124), row("servo_load_step", other, 0.013),
+            row("enzyme_qssa", champ, 0.009655), row("enzyme_qssa", "midpoint", 0.009698),
+            row("enzyme_qssa", "rk4", 0.009913), row("enzyme_qssa", other, 0.009741),
+        ],
+        "verdicts": {
+            "practical_problems_total": 2, "practical_problems_compared": 2,
+            "practical_problems_won_by_discovered": 2,
+            "practical_median_ratio_discovered_over_classical": 0.28,
+            "stiff_problems_total": 2, "stiff_problems_compared": 2,
+            "stiff_problems_won_by_discovered": 1,
+            "stiff_problems_with_no_discovered_finisher": 0,
+            "stiff_median_ratio_discovered_over_classical": 0.998,
+            "overall": "On the 2 non-stiff practical problems the best discovered method "
+                       "has lower Q15 error on 2 of 2.",
+            "per_problem": {
+                "buck_converter": {"winner": "11e898cb" + "0" * 56,
+                                   "winner_kind": "discovered", "winner_q15_error": 0.002,
+                                   "best_classical": "midpoint",
+                                   "best_classical_q15_error": 0.02,
+                                   "best_discovered": "11e898cb" + "0" * 56,
+                                   "best_discovered_q15_error": 0.002,
+                                   "ratio_discovered_over_classical": 0.1,
+                                   "finishers_classical": 2, "finishers_discovered": 2},
+                "bicycle_lateral": {"winner": "196b1d17" + "0" * 56,
+                                    "winner_kind": "discovered",
+                                    "winner_q15_error": 0.00018,
+                                    "best_classical": "midpoint",
+                                    "best_classical_q15_error": 0.00039,
+                                    "best_discovered": "196b1d17" + "0" * 56,
+                                    "best_discovered_q15_error": 0.00018,
+                                    "ratio_discovered_over_classical": 0.4615,
+                                    "finishers_classical": 2, "finishers_discovered": 2},
+                "servo_load_step": {"winner": "midpoint", "winner_kind": "classical",
+                                    "winner_q15_error": 0.0115746,
+                                    "best_classical": "midpoint",
+                                    "best_classical_q15_error": 0.0115746,
+                                    "best_discovered": "11e898cb" + "0" * 56,
+                                    "best_discovered_q15_error": 0.0115754,
+                                    "ratio_discovered_over_classical": 1.00007,
+                                    "finishers_classical": 2, "finishers_discovered": 2},
+                "enzyme_qssa": {"winner": "11e898cb" + "0" * 56,
+                                "winner_kind": "discovered",
+                                "winner_q15_error": 0.009655,
+                                "best_classical": "midpoint",
+                                "best_classical_q15_error": 0.009698,
+                                "best_discovered": "11e898cb" + "0" * 56,
+                                "best_discovered_q15_error": 0.009655,
+                                "ratio_discovered_over_classical": 0.99557,
+                                "finishers_classical": 2, "finishers_discovered": 2},
+            },
+        },
+    }
+
+
+def test_the_champion_table_fixes_one_comparator_against_every_anchor(monkeypatch,
+                                                                      tmp_path):
+    """F4. Every row of the old primary table was a maximum over the discovered methods
+    against a maximum over the anchors, and the discovered side was itself selected on
+    error, so the win rate rose with the number of discovered methods run. The primary
+    view is now one pre-registered method against each anchor, and the max-over-both
+    table is a fold that states the size of both sides."""
+    _env(monkeypatch, tmp_path)
+    data = _champion_validation_fixture()
+    html = sitegen.render_validation(data)
+    sec = html.split("<h2>The champion against each anchor</h2>", 1)[1]
+    head = sec.split("<details", 1)[0]
+    # the pre-registration rule, tied to the cycle the champion was archived at
+    assert "the archive champion" in head and "coefficients unchanged" in head
+    assert "It was picked at cycle 33 out of 46,398 archived records" in head
+    # one column per anchor, and a verdict in every cell
+    assert head.count("<th class=\"num\">midpoint</th>") == 1
+    assert "(lower)" in head and "(higher)" in head
+    assert "(tie)" in head                         # servo_load_step, 0.007 percent apart
+    assert "(flagged)" in head                     # enzyme_qssa, whole field within 2.7%
+    # both tallies carry both sample sizes, and the gate agrees
+    assert "1 discovered method against 2 classical anchors" in head
+    sitegen.check_tallies("validation.html", html)
+    # the champion is not the discovered method that wins bicycle_lateral, and the page
+    # says so rather than letting the max-over-both tally stand in for the champion
+    assert "the champion is not the discovered method with the lowest error" in head
+    assert "196b1d17" in head
+    # the demoted view is a fold labelled with N on both sides
+    assert ("<summary>Best per problem, a maximum over 2 discovered and 2 classical "
+            "methods</summary>") in sec
+    assert sitegen.render_validation(data) == html
+    check_banned(html)
+
+
+def test_a_ratio_inside_the_tie_band_counts_as_a_tie_everywhere(monkeypatch, tmp_path):
+    """F5. servo_load_step's two errors are 0.007 percent apart and were published as a
+    classical win; enzyme_qssa's are 0.44 percent apart and were published as a discovered
+    win. Those are the same number, and the site now says so in both places."""
+    _env(monkeypatch, tmp_path)
+    html = sitegen.render_validation(_champion_validation_fixture())
+    cards = dict(re.findall(r'<div class="k">([^<]+)</div><div class="v">([^<]+)</div>',
+                            html))
+    # enzyme is flagged and leaves the stiff tally; servo is a tie, so nobody won it
+    assert cards["stiff problems"] == "0 of 1"
+    assert cards["practical problems"] == "2 of 2"
+    stiff = html.split("<h3>Stiff</h3>", 1)[1].split("</table>", 1)[0]
+    assert "tie" in stiff and "inside the 2 percent band" in stiff
+    assert "1 left out as degenerate (enzyme_qssa)" in html
+    assert "1 of them is a tie inside the 2 percent band" in html
+
+
+def test_degeneracy_flags_a_dead_integration_and_leaves_a_healthy_field():
+    """F5 acceptance 7, on a synthetic case: every method returning the same error is the
+    signature of a state that went nowhere, and a healthy field spans orders of
+    magnitude. The reference-norm criterion reads the norm from the problem's own entry;
+    a document written before that field existed carries none, and the criterion then
+    stays quiet rather than inventing one."""
+    def rows(*errs):
+        return [{"q15_error": e} for e in errs]
+    flagged, why = sitegen.degeneracy({}, rows(0.00970, 0.00971, 0.00974))
+    assert flagged and "span" in why and "percent from best to worst" in why
+    assert not sitegen.degeneracy({}, rows(0.002, 0.02, 0.2))[0]
+    # two finishers agreeing is not a field, so the spread criterion stays quiet
+    assert not sitegen.degeneracy({}, rows(0.00970, 0.00971))[0]
+    # a run that returned the reference itself, once the document carries the norm
+    norm = {"reference_norm_over_peak": 0.0098}
+    flagged, why = sitegen.degeneracy(norm, rows(0.00970, 0.00971, 0.00974))
+    assert flagged
+    healthy = sitegen.degeneracy(norm, rows(0.0005, 0.005, 0.05))
+    assert not healthy[0]
+    # without the field, the same healthy rows stay unflagged and nothing is claimed
+    assert not sitegen.degeneracy({}, rows(0.0005, 0.005, 0.05))[0]
+    assert sitegen._REFERENCE_NORM_KEY == "reference_norm_over_peak"
+    # two finishers are too few for a spread to say anything, but two errors that both
+    # sit on the reference norm are still a dead integration, and the norm criterion
+    # carries that case by itself
+    flagged, why = sitegen.degeneracy(norm, rows(0.00970, 0.00991))
+    assert flagged and "reference solution's norm" in why
+    # the contract with the other file: the key this reads is the field that one writes
+    from rk_harness import validation as V
+    assert sitegen._REFERENCE_NORM_KEY in V._problem_entry("enzyme_qssa")
+
+
+def test_the_degenerate_block_prints_its_reason_and_the_thresholds_are_published(
+        monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    html = sitegen.render_validation(_champion_validation_fixture())
+    assert "<h3>Problems left out of the tallies</h3>" in html
+    block = html.split("<h3>Problems left out of the tallies</h3>", 1)[1]
+    assert "enzyme_qssa" in block
+    assert "reporting the problem rather than the method" in block
+    assert 'href="methodology.html#meth-protocol"' in block
+    from rk_harness import methodology as methodology_mod
+    meth = methodology_mod.render_page(sitegen._page,
+                                       sitegen._methodology_sections(None))
+    assert "span less than 5 percent" in meth
+    assert "within 2 percent of" in meth and "counted as a tie" in meth
+    # the norm criterion now runs, and the page says where the norm comes from
+    assert "stores that norm for each problem" in meth
+    assert "does not yet carry" not in meth

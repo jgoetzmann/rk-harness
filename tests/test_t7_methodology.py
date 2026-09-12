@@ -148,9 +148,17 @@ def test_practical_validation_subsection_present(fake_html):
 
 
 def test_reference_targets_present(fake_html):
+    """21 internal files and specification sections, then the three outside papers.
+
+    References 22 to 24 are published work, cited by the related-work section: the lead
+    says the list carries papers as well as repository files, so a citation that points
+    outside the repository has somewhere to land.
+    """
     _, ids = _hrefs_and_ids(fake_html)
     refs = {i for i in ids if i.startswith("meth-ref-")}
-    assert refs == {f"meth-ref-{n}" for n in range(1, 22)}
+    assert refs == {f"meth-ref-{n}" for n in range(1, 25)}
+    for name in ("Croci", "Giles", "Hopkins", "Rosilho de Souza"):
+        assert name in fake_html, name
 
 
 def test_infobox_present(fake_html):
@@ -228,10 +236,33 @@ def test_every_glossary_definition_is_at_most_two_sentences():
         assert 1 <= len(re.findall(r"[.?!](?:\s|$)", text)) <= 2, anchor
 
 
+_CHART_TABLE_RE = r'<details class="fold" id="[a-z0-9-]+-values">.*?</details>'
+
+
 def test_the_page_stays_under_its_word_budget():
-    """Visible words, counting tables, the infobox and the references: under 3,500."""
+    """Visible words, counting the article's own tables, the infobox and the references:
+    under 4,100.
+
+    The budget was 3,500 and the page was within a few words of it, so the audit's two
+    required additions did not fit: a related-work section naming the low-precision
+    time-integration literature (about 260 words and three full citations), and the
+    numeric thresholds behind the degeneracy filter and the tie band in section 3 (about
+    125). The budget was raised once, by what those cost plus a little headroom, and it
+    still fails on unbounded growth, which is what it is for.
+
+    A chart's folded data table is left out of the count. It is generated from the
+    numbers already in the drawing, it stays collapsed until a reader opens it, and it
+    exists because role="img" puts those numbers out of reach otherwise. Counting it
+    would price a chart's accessibility as prose and squeeze the writing to pay for it.
+    Its size is bounded below instead, so the exclusion cannot hide growth.
+    """
     html = methodology.render_page(sitegen._page, sitegen._methodology_sections(None))
     body = html.split("</header>", 1)[1].split("<footer>", 1)[0]
-    words = re.sub(r"<[^>]+>", " ", body).split()
-    assert len(words) < 3500, len(words)
+    tables = re.findall(_CHART_TABLE_RE, body, re.S)
+    prose = re.sub(_CHART_TABLE_RE, " ", body, flags=re.S)
+    words = re.sub(r"<[^>]+>", " ", prose).split()
+    assert len(words) < 4100, len(words)
+    table_words = sum(len(re.sub(r"<[^>]+>", " ", t).split()) for t in tables)
+    assert len(tables) == 1, len(tables)
+    assert table_words < 100, table_words
     assert methodology._SUBTITLE == "How the run measures, checks and reproduces its numbers."

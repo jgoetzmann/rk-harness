@@ -1131,3 +1131,306 @@ def test_B15_emit_c_is_a_nonempty_string_for_every_classical():
         assert isinstance(src, str)
         assert len(src) > 0
         assert "rk_step" in src
+
+
+# --------------------------------------------------------------------------- tracecheck
+
+# B86-B96 arbitrate rk_harness/tracecheck.py, which compiles emit_c's output for
+# cortex-m0plus, executes it, and prices the executed instructions against the TRM table.
+# None of these needs the toolchain: what needs arm-none-eabi-gcc and the unicorn engine is
+# marked slow and skips when they are absent, and B95 pins the rule that a missing toolchain
+# is a failure rather than a skip when the tracer itself runs.
+
+
+def _tc():
+    from rk_harness import tracecheck
+    return tracecheck
+
+
+def test_B86_every_emitted_c_line_is_classified_and_the_model_scope_is_the_combination():
+    """The region map decides what counts as the analytic model's own scope, so an
+    unclassified line would silently move work out of the comparison."""
+    tc = _tc()
+    for name in CLASSICAL_NAMES:
+        t = classical()[name]
+        src = emit_c(t, 1)
+        regions = tc.classify_step_source(src)
+        assert len(regions) == len(src.splitlines())
+        counts = {}
+        for region in regions.values():
+            counts[region] = counts.get(region, 0) + 1
+        priced_rows = sum(1 for row in t.A if any(x != 0 for x in row)) + 1
+        nonzero = sum(1 for row in t.A if any(x != 0 for x in row)
+                      for x in row if x != 0) + sum(1 for x in t.b if x != 0)
+        assert counts.get("load", 0) == priced_rows, name
+        assert counts.get("store", 0) == priced_rows, name
+        assert counts.get("coeff", 0) == nonzero, name
+        assert counts.get("hscale", 0) == len(t.b), name
+        assert set(tc._REGION_MODEL_SCOPE) == {"load", "coeff", "store"}
+
+
+def test_B86_an_unrecognised_emitted_line_raises_rather_than_landing_in_other():
+    tc = _tc()
+    src = emit_c(classical()["rk4"], 1).replace(
+        "        acc[m] = (int16_t)tmp;                   /* store */",
+        "        acc[m] = saturate(tmp);", 1)
+    with pytest.raises(tc.TraceCheckError):
+        tc.classify_step_source(src)
+
+
+def test_B87_replay_q15_is_the_pinned_evaluator_operation_for_operation():
+    """The tracer's replica exists to record what the C port needs. If it drifted from
+    simulate.solve_q15 the whole comparison would be against a copy rather than against the
+    code that scored the archive, so the equivalence is pinned rather than assumed."""
+    from rk_harness import problems, simulate
+    tc = _tc()
+    checked = 0
+    for name in ("euler", "midpoint", "heun2", "rk4", "rk38"):
+        t = classical()[name]
+        for pname in ("dahlquist", "damped_osc"):
+            p = problems.PROBLEMS[pname]
+            try:
+                want = simulate.solve_q15(t, p, 48)
+            except Q15OverflowError:
+                want = None
+            rep = tc.replay_q15(t, p, 48)
+            if want is None:
+                assert rep.status == "overflow", (name, pname)
+                assert rep.final is None
+            else:
+                assert rep.status == "ok", (name, pname)
+                assert rep.final == want[0], (name, pname)
+                assert rep.max_abs == want[1], (name, pname)
+            checked += 1
+    assert checked == 10
+
+
+def test_B87_replay_records_one_stage_input_and_one_derivative_per_stage_and_state():
+    from rk_harness import problems
+    tc = _tc()
+    t = classical()["rk4"]
+    p = problems.PROBLEMS["dahlquist"]
+    rep = tc.replay_q15(t, p, 48)
+    assert rep.status == "ok"
+    assert len(rep.acc_log) == 48 * len(t.b) * p.n_states
+    assert len(rep.k_log) == len(rep.acc_log)
+    assert rep.ops > 0
+
+
+def test_B88_an_overflow_has_a_position_and_not_only_a_fact():
+    """Nothing wraps and nothing saturates: the primitives raise. The C port has to trap at
+    the same operation, so the replica has to count operations the same way."""
+    from rk_harness import problems
+    tc = _tc()
+    t = classical()["midpoint"]
+    p = problems.PROBLEMS["damped_osc"]
+    rep = tc.replay_q15(t, p, 2, y0=(32000, -32000), h_q=32767)
+    assert rep.status == "overflow"
+    assert rep.trap_op >= 1
+    assert rep.final is None
+    assert "outside int16" in rep.detail
+    clean = tc.replay_q15(t, p, 2, y0=(1000, 500), h_q=2048)
+    assert clean.status == "ok"
+    assert clean.trap_op == 0
+
+
+def test_B89_the_pinned_five_classes_are_used_unchanged_and_an_unknown_mnemonic_raises():
+    from rk_harness.costmodel import _MNEMONIC_CLASS
+    tc = _tc()
+    for mnemonic, cls in _MNEMONIC_CLASS.items():
+        assert tc.mnemonic_class(mnemonic) == cls
+        assert tc.mnemonic_class(mnemonic.lower()) == cls
+    assert tc.mnemonic_class("ldrsh") == "load"
+    assert tc.mnemonic_class("strh") == "store"
+    assert tc.mnemonic_class("sxth") == "alu"
+    assert tc.mnemonic_class("bne.n") == "branch"
+    assert tc.mnemonic_class("bgt") == "branch"
+    assert tc.mnemonic_class("bl") == "call"
+    assert tc.mnemonic_class("push") == "multi"
+    with pytest.raises(tc.TraceCheckError):
+        tc.mnemonic_class("vldr")
+
+
+def test_B90_shared_mnemonics_are_priced_out_of_the_cost_models_own_table():
+    """The point of the comparison is that both sides use one table. If the traced side
+    priced a multiply differently from cycle_count, the ratio would measure the tables."""
+    tc = _tc()
+    for model in (M0PLUS_FAST, M0PLUS_SLOW):
+        assert tc.instruction_cycles("MULS", "r0, r1", model, False) == model.cycles["mul"]
+        assert tc.instruction_cycles("LDR", "r0, [r1]", model, False) == model.cycles["load"]
+        assert tc.instruction_cycles("LDRSH", "r0, [r1, r2]", model, False) == model.cycles["load"]
+        assert tc.instruction_cycles("STRH", "r0, [r1]", model, False) == model.cycles["store"]
+        assert tc.instruction_cycles("ADDS", "r0, r0, r1", model, False) == model.cycles["add"]
+        assert tc.instruction_cycles("ASRS", "r0, r0, #4", model, False) == model.cycles["shift"]
+    assert tc.instruction_cycles("MULS", "r0, r1", M0PLUS_FAST, False) == 1
+    assert tc.instruction_cycles("MULS", "r0, r1", M0PLUS_SLOW, False) == 32
+    assert tc.instruction_cycles("MOV", "r3, sp", M0PLUS_FAST, False) == 1
+    assert tc.instruction_cycles("BL", "7c <rk_rhs>", M0PLUS_FAST, False) == 4
+    assert tc.instruction_cycles("B", "20 <x>", M0PLUS_FAST, True) == 3
+    assert tc.instruction_cycles("BNE", "20 <x>", M0PLUS_FAST, False) == 1
+    assert tc.instruction_cycles("PUSH", "{r4, r5, lr}", M0PLUS_FAST, False) == 4
+    assert tc.instruction_cycles("POP", "{r4, r5, pc}", M0PLUS_FAST, False) == 6
+    assert tc.instruction_cycles("PUSH", "{r4-r7, lr}", M0PLUS_FAST, False) == 6
+
+
+def test_B91_rank_correlation_and_the_pairs_behind_it():
+    tc = _tc()
+    assert tc.spearman([1.0, 2.0, 3.0], [10.0, 20.0, 30.0]) == pytest.approx(1.0)
+    assert tc.spearman([1.0, 2.0, 3.0], [30.0, 20.0, 10.0]) == pytest.approx(-1.0)
+    assert tc.spearman([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]) is None
+    assert tc.spearman([1.0], [1.0]) is None
+    rows = [
+        {"name": "a", "cycles_analytic": {"m": 10}, "cycles_traced": {"m": 100}},
+        {"name": "b", "cycles_analytic": {"m": 20}, "cycles_traced": {"m": 300}},
+        {"name": "c", "cycles_analytic": {"m": 30}, "cycles_traced": {"m": 200}},
+    ]
+    found = tc.inversions(rows, "m", "cycles_traced")
+    assert [d["pair"] for d in found] == [["b", "c"]]
+    assert found[0]["cheaper_analytic"] == "b"
+    assert found[0]["cheaper_traced"] == "c"
+    rows[1]["cycles_traced"]["m"] = 150
+    assert tc.inversions(rows, "m", "cycles_traced") == []
+
+
+def test_B92_paths_cross_the_wsl_boundary_without_being_guessed_at():
+    tc = _tc()
+    assert tc.Toolchain.wsl_path("D:\\a\\b.c") == "/mnt/d/a/b.c"
+    assert tc.Toolchain.wsl_path("D:/a/b.c") == "/mnt/d/a/b.c"
+    assert tc.Toolchain.wsl_path("/mnt/d/a/b.c") == "/mnt/d/a/b.c"
+    assert tc.Toolchain.wsl_path("relative/b.c") == "relative/b.c"
+
+
+def test_B93_the_gate_fails_closed_on_a_mismatch_and_on_an_unexercised_trap():
+    """generate._check_scripts warns and returns when node is missing, which makes a gate on
+    a correctness claim fail open. This one raises."""
+    tc = _tc()
+
+    def doc(**over):
+        cc = {"cases": 2, "comparable": 2, "matched": 2, "overflow_cases": 1,
+              "trap_index_matched": 1, "not_comparable": 0}
+        cc.update(over)
+        return {"methods": [{"name": "m", "crosscheck": cc, "crosscheck_cases": [
+            {"case": "c1", "verdict": "match", "python_status": "ok",
+             "shift_is_arithmetic": True, "problems": []}]}]}
+
+    tc.gate(doc())
+    with pytest.raises(tc.TraceCheckError):
+        tc.gate(doc(matched=1))
+    with pytest.raises(tc.TraceCheckError):
+        tc.gate(doc(overflow_cases=0, trap_index_matched=0))
+    with pytest.raises(tc.TraceCheckError):
+        tc.gate(doc(trap_index_matched=0))
+    bad = doc()
+    bad["methods"][0]["crosscheck_cases"][0]["shift_is_arithmetic"] = False
+    with pytest.raises(tc.TraceCheckError):
+        tc.gate(bad)
+
+
+def test_B94_the_traced_step_carries_no_range_check_and_the_checked_one_carries_them_all():
+    """Two entry points on purpose. The traced one is emit_c output, unedited, so its
+    instruction mix is the thing under test. The checked one mirrors the primitives, and the
+    difference between them is the reason the cross-check reads the overflow verdict."""
+    tc = _tc()
+    t = classical()["rk4"]
+    step = emit_c(t, 1)
+    assert "ck(" not in step
+    assert "32767" not in step
+    drv = tc.driver_c(t, 1)
+    assert "static int ck(int32_t v)" in drv
+    assert drv.count("rk_trap = rk_op; return 1;") >= 3
+    assert "__attribute__((noinline, noclone))" in drv
+    assert "void rk_rhs(const int16_t *y, int16_t *dy)" in drv
+    assert "acc_table[k_index + m]" in drv
+    assert "g_shift_ok = ((((int32_t)-3) >> 1) == -2) ? 1 : 0;" in drv
+
+
+def test_B94_the_checked_step_counts_one_operation_for_every_pinned_primitive_call():
+    from rk_harness import problems
+    tc = _tc()
+    t = classical()["rk4"]
+    drv = tc.driver_c(t, 1)
+    # 48 steps because h_q is q15_from_float(t_end / n): a one-step run of a t_end of 10
+    # has no Q15 step size, which is a property of the problem set and not of the tracer.
+    rep = tc.replay_q15(t, problems.PROBLEMS["dahlquist"], 48)
+    assert rep.status == "ok"
+    # one rk_op++ per counted primitive call site, and the replica counts the same calls
+    assert drv.count("rk_op++;") == _expected_ops_per_step(t)
+    assert rep.ops == _expected_ops_per_step(t) * 48
+
+
+def _expected_ops_per_step(t):
+    """q15_apply + q15_add per nonzero A and b entry, plus one q15_mul per stage."""
+    per_a = sum(2 for row in t.A for x in row if x != 0)
+    per_b = sum(2 for x in t.b if x != 0)
+    return per_a + per_b + len(t.b)
+
+
+def test_B95_the_trace_pin_is_its_own_and_never_joins_the_verifier_pin():
+    """CLAUDE.md rule 1: VERIFIER_FILES is the ten-file tuple whose sha256 every archived
+    record carries. Adding to it is an epoch boundary. The trace gets the same guarantee
+    from a second pin that costs no score."""
+    from rk_harness import trace_hash
+    from rk_harness.verifier_hash import VERIFIER_FILES
+    assert trace_hash.TRACE_FILES == ("rk_harness/tracecheck.py", "rk_harness/trace_hash.py")
+    assert not set(trace_hash.TRACE_FILES) & set(VERIFIER_FILES)
+    assert len(VERIFIER_FILES) == 10
+    for rel in trace_hash.TRACE_FILES:
+        assert (PACKAGE_DIR.parent / rel).is_file(), rel
+    assert trace_hash.compute_trace_hash() == trace_hash.pinned_trace_hash()
+    assert trace_hash.matches()
+
+
+def test_B95_a_missing_toolchain_is_a_failure_and_not_a_skip(monkeypatch):
+    tc = _tc()
+    monkeypatch.setattr(tc.Toolchain, "resolve",
+                        classmethod(lambda cls: (_ for _ in ()).throw(
+                            tc.TraceCheckError("no arm-none-eabi toolchain"))))
+    with pytest.raises(tc.TraceCheckError):
+        tc.run()
+    assert tc.main([]) == 1
+
+
+def test_B96_load_method_takes_a_classical_name_or_an_archive_hash_prefix(monkeypatch, tmp_path):
+    tc = _tc()
+    origin, t, thash = tc.load_method("rk4")
+    assert origin == "classical"
+    assert thash == content_hash(classical()["rk4"])
+    work = tmp_path / "work"
+    (work / "archive").mkdir(parents=True)
+    rec = {"tableau_hash": "abc123def456" + "0" * 52,
+           "tableau": to_json(classical()["heun2"])}
+    (work / "archive" / "2026-01-01.jsonl").write_text(
+        json.dumps(rec) + "\n", encoding="utf-8")
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
+    origin, t, thash = tc.load_method("abc123de")
+    assert origin == "discovered"
+    assert t == classical()["heun2"]
+    assert thash.startswith("abc123de")
+    with pytest.raises(tc.TraceCheckError):
+        tc.load_method("ffffffff")
+    with pytest.raises(tc.TraceCheckError):
+        tc.load_method("not a method")
+
+
+@pytest.mark.slow
+def test_B96_the_whole_chain_runs_when_the_toolchain_is_present():
+    """Compile, execute, attribute, price and cross-check one method end to end. Skipped
+    where arm-none-eabi-gcc or the unicorn engine is absent; the tracer's own gate raises
+    there rather than skipping, which is what B95 pins."""
+    tc = _tc()
+    try:
+        tc.Toolchain.resolve()
+        import unicorn                                            # noqa: F401
+    except Exception as exc:                                      # pragma: no cover
+        pytest.skip(f"no cross-toolchain on this host: {exc}")
+    doc = tc.run(("heun2",))
+    tc.gate(doc)
+    row = doc["methods"][0]
+    assert row["name"] == "heun2"
+    assert row["cycles_analytic"]["m0plus_fast"] == cycle_count(classical()["heun2"],
+                                                               M0PLUS_FAST, 1)
+    assert row["muls_per_step"] == len(classical()["heun2"].b)
+    assert row["muls_in_model_scope"] == 0
+    assert row["crosscheck"]["matched"] == row["crosscheck"]["comparable"]
+    assert row["instructions_per_step"] > 0
+    assert doc["accuracy"]["statement"].count("NOT cycle accurate") == 1

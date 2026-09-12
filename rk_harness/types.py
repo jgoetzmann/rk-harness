@@ -8,10 +8,16 @@ from typing import Callable, Literal
 
 Q15 = int                      # int16 domain [-32768, 32767], scale 2**-15
 CostModelName = Literal["m0plus_fast", "m0plus_slow", "avr_approx"]
-Tier = Literal["heldout_verified", "search_only", "unreplicated"]
+Tier = Literal["heldout_verified", "search_only", "no_incumbent", "no_improvement",
+               "unreplicated"]
 Verdict = Literal["supported", "refuted", "inconclusive"]
 
-TIERS: tuple[str, ...] = ("heldout_verified", "search_only", "unreplicated")
+# "unreplicated" is what assign_tier returned for two opposite cases until they were
+# split into no_incumbent and no_improvement. It stays legal because every record written
+# before the split carries it, and archive.record_from_json rejects a tier that is not
+# in this tuple.
+TIERS: tuple[str, ...] = ("heldout_verified", "search_only", "no_incumbent",
+                          "no_improvement", "unreplicated")
 VERDICTS: tuple[str, ...] = ("supported", "refuted", "inconclusive")
 COST_MODEL_NAMES: tuple[str, ...] = ("m0plus_fast", "m0plus_slow", "avr_approx")
 

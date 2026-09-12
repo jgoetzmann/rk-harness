@@ -41,7 +41,7 @@ def _score(heldout: float, search: float = 0.5) -> ScoreVector:
 def _rec(t, heldout: float, cycle_id: int = 1) -> Record:
     return Record(
         tableau_hash=content_hash(t), tableau=t, score=_score(heldout),
-        tier="unreplicated", cycle_id=cycle_id, seed=0, verifier_hash="testhash",
+        tier="no_improvement", cycle_id=cycle_id, seed=0, verifier_hash="testhash",
         directive_id=None, hypothesis_id=None, timestamp="2026-09-02T00:00:00Z",
     )
 
@@ -329,12 +329,45 @@ def test_results_schema_validates(synthetic_doc):
         assert p["stiffness_basis"] == V.STIFFNESS_BASIS[name]
 
 
+@pytest.mark.parametrize("name", V.VALIDATION_NAMES)
+def test_reference_norm_is_the_error_a_dead_run_would_report(name):
+    """F5. The degeneracy filter on the findings site compares a reported error
+    against the reference solution's own norm, which only means anything if the two
+    sit on one scale. They are the same expression over the same denominator, so a
+    run that returned the zero state reports exactly this number: that identity is
+    what the filter rests on, and it is cheap to pin.
+    """
+    norm = V.reference_norm_over_peak(name)
+    assert math.isfinite(norm) and norm > 0, name
+    zero = tuple(0.0 for _ in range(V.PROBLEMS[name].n_states))
+    assert math.isclose(V.validation_error(name, zero), norm, rel_tol=1e-12), name
+    # a second call is the same float: the references are cached or closed form,
+    # and the document this lands in has to rebuild byte for byte
+    assert V.reference_norm_over_peak(name) == norm
+
+
+def test_every_problem_entry_carries_its_reference_norm(synthetic_doc):
+    by_name = {p["name"]: p for p in synthetic_doc["problems"]}
+    for name in V.VALIDATION_NAMES:
+        assert by_name[name]["reference_norm_over_peak"] == V.reference_norm_over_peak(name)
+
+
 def test_results_schema_rejects_bad_docs(synthetic_doc):
     import copy
     bad = copy.deepcopy(synthetic_doc)
     del bad["verdicts"]
     with pytest.raises(ValueError):
         V.validate_results(bad)
+    # the reference norm is required, and a zero or missing one is rejected rather
+    # than passed to a page that would read it as a real measurement
+    bad_norm = copy.deepcopy(synthetic_doc)
+    del bad_norm["problems"][0]["reference_norm_over_peak"]
+    with pytest.raises(ValueError):
+        V.validate_results(bad_norm)
+    bad_norm2 = copy.deepcopy(synthetic_doc)
+    bad_norm2["problems"][0]["reference_norm_over_peak"] = 0.0
+    with pytest.raises(ValueError):
+        V.validate_results(bad_norm2)
     bad2 = copy.deepcopy(synthetic_doc)
     bad2["results"][0]["q15_error"] = float("inf")
     with pytest.raises(ValueError):

@@ -1425,3 +1425,103 @@ container, and a shared machine whose other containers no status file mentioned.
 
 
 ---
+
+## D42 - The compiled and traced cycle comparison joins the traceability list, under a second pin (2026-09-12)
+
+**Decision.** `rk-work/trace/results.json` is a permitted source for a number on a public
+page. A number taken from it is rendered with what produced it: compiled ARM Thumb code for
+cortex-m0plus, executed under an instruction-accurate emulator, priced offline against the
+Cortex-M0+ TRM table under the assumptions the document states. It is not a measurement on
+any physical part, and a page that quotes it says so in the same breath, the way a
+side-track number carries its job's own `arithmetic` string (D24). The tracer is pinned by
+`TRACE_HASH` and `rk_harness/trace_hash.py`, never by `VERIFIER_HASH`.
+
+**Why.** The cost model is analytic and always has been. `cycle_count` derives an instruction
+sequence from a tableau's sparsity pattern and each coefficient's CSD weight, takes
+`min(csd_cost, mul_cost)` per coefficient, and prices the result. The 65,536-cycle budget
+that defines fitness, the `m0plus_fast` and `m0plus_slow` split, and the champion's 22 cycles
+per step all rest on that derivation, and nothing in the harness had ever compiled it or run
+it. The risk was never the TRM table: MULS at 1 cycle on the fast multiplier and 32 on the
+small one is in the TRM, and the two cost models correspond to those two configurations. The
+risk was the instruction mix, and that is answerable without hardware. It is now answered,
+so the answer needs a document it can be quoted from.
+
+**What the comparison found, because it is not a confirmation.** Under `m0plus_fast` the
+analytic model undercounts the compiled combination on five of six methods. At matched scope
+the traced-to-analytic ratio runs 1.000 for euler, 1.273 midpoint, 1.308 heun2, 1.591 for the
+champion, 1.639 rk38 and 2.030 rk4; three of those exceed the 0.25 relative band the audit
+proposed, and the document says so rather than moving the band. The cause is one line of the
+model. `coeff_cost` takes the cheaper of the CSD shift-add sequence and a multiply, and under
+`m0plus_fast` a multiply plus shift costs 2, so every coefficient whose CSD weight is 2 or
+more is priced at 2. GCC 13.2.1 at -O2 never emits that multiply. Across all six methods the
+count of MULS instructions applying a tableau coefficient is zero; every MULS in every trace
+is the h times k product, one per stage, which the model excludes from its scope entirely.
+Under `m0plus_slow`, where a multiply costs 33 and the model therefore picks the shift-add
+sequence, the same ratios run 0.788 to 1.308 and the rank correlation with the traced order
+is exactly 1.0. The model's slow-variant pricing describes the compiled code; its
+fast-variant pricing assumes a shortcut the compiler declines to take.
+
+Two consequences worth stating plainly. The dyadic-coefficient assumption holds, and holds
+harder than it was stated: dyadic coefficients compile to shifts and adds, and so do the
+non-dyadic ones, which is why rk4 is the worst row. And the ordering is not quite preserved:
+Spearman between analytic and traced cycles across the six methods is 0.9429 under
+`m0plus_fast`, with one inverted pair. The model puts rk4 at 33 and rk38 at 36; the trace
+puts rk38 at 130 and rk4 at 139. rk4's b coefficients 1/6 and 1/3 carry high CSD weight and
+the model caps them at the 2-cycle multiply it never gets; rk38's b is 1/8 and 3/8. Under
+`m0plus_slow` there is no inversion.
+
+**Why a second pin and not two more entries in `VERIFIER_FILES`.** The audit asked for the C
+source and the emulator to be hash-pinned by the same mechanism as the existing ten files.
+Taken literally that means appending to `verifier_hash.VERIFIER_FILES`, whose sha256 is
+`VERIFIER_HASH`, which is checked at container start and carried inside every archived
+record. Moving it invalidates all 141,364 scores. CLAUDE.md rule 1 calls that an epoch
+boundary rather than an edit, and this work measures the cost model instead of changing it,
+so it has no business charging one. `TRACE_HASH` gives the identical guarantee, a changed
+file is a refused run, over the two files that actually produce the document. `costmodel.py`
+stays untouched: `emit_c` is imported and its output compiled verbatim, and the generated C
+is published beside the results with its sha256 recorded per method.
+
+**The alternative this rejects.** "Publish the whole-step traced number alone, since it is
+the one a reader wants." The whole-step ratios run 3.611 to 6.400, and most of that gap is
+work the analytic model excludes on purpose: the derivative call, the h times k scaling, the
+stack frame. Quoting it against `cycles_analytic` would report a scope difference as a model
+error. Both are published, `ratio` whole step and `ratio_model_scope` matched, and the schema
+says which is which.
+
+**What it does not establish.** No wall-clock time on any part. Nothing about flash wait
+states, bus contention or buffering, all of which are assumed away. Nothing about interrupt
+or RTOS overhead. Nothing about a chip the TRM table does not describe. No free tool is cycle
+accurate for Cortex-M0+, so the document states that the emulator is instruction accurate and
+not cycle accurate, and any page quoting it repeats that.
+
+**Evidence.** `rk_harness/tracecheck.py`, the tracer; `rk_harness/trace_hash.py` and
+`TRACE_HASH`, the pin; `rk-work/trace/results.json` and the generated C under
+`rk-work/trace/c/`. Toolchain: arm-none-eabi-gcc 13.2.1 at
+`-mcpu=cortex-m0plus -mthumb -O2 -ffreestanding -nostdlib`, GNU objdump 2.42, unicorn 2.1.4.
+Correctness before timing: 48 of 48 comparable cases agree with `simulate.solve_q15` on the
+exact final int16 state and on every stage input, and 10 of those are cases where the Q15
+primitives raise, where the checked C traps at the same operation index. Tests B86 to B96 in
+`tests/test_t1_fixedpoint_coeff_cost.py`.
+
+**Consequence.** A validation page may state the per-method table, the ratios at either
+scope, the opcode histogram, the MULS count per step, and the rank correlation with its one
+inverted pair named. It may not state a time, a clock rate or a measured cycle count, because
+none was measured. The comparability rule D24 set applies here too: a traced number and a Q15
+error number may not appear in one claim without their labels, since one is an emulated
+instruction stream priced by a table and the other is arithmetic. The run itself is
+unaffected; nothing in the search, the scorer or the site build calls this module, and it is
+run on the host when the cost model or the toolchain moves.
+
+**What would reopen this.** A cost-model change. `coeff_cost` under `m0plus_fast` is now
+known to price a multiply the compiler does not emit, and if that line is ever revisited the
+epoch boundary it sits behind is the place to do it, with this document as the evidence.
+
+**Closes.** The audit's F1 Tier A, acceptance conditions 1 through 7, and the question of
+whether the instruction mix the cost model assumes is the one a compiler produces.
+
+**Epoch impact.** None. No verifier-pinned file is edited, `VERIFIER_HASH` is untouched, no
+scored record is read or written, and every archived score keeps its meaning. The tracer
+imports `costmodel.emit_c` and never modifies it. The new pin is separate by construction,
+which is the whole point of it.
+
+---

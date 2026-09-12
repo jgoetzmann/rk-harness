@@ -77,7 +77,7 @@ def _synthetic_validation_doc() -> dict:
             {"name_or_hash": content_hash(champ), "kind": "discovered",
              "roles": ["champion"], "order": 2, "stages": 3,
              "tableau": to_json(champ),
-             "archive": {"cycle_id": 33, "tier": "unreplicated"}},
+             "archive": {"cycle_id": 33, "tier": "no_improvement"}},
         ],
     }
 

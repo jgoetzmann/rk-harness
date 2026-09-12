@@ -103,7 +103,10 @@ from rk_harness.types import (
 )
 
 UTC = datetime.timezone.utc
-TIER_STRINGS = ("heldout_verified", "search_only", "unreplicated")
+# Every legal tier string, the merged legacy value included, because the K8 canaries
+# below assert that none of them reaches a prompt template.
+TIER_STRINGS = ("heldout_verified", "search_only", "no_incumbent", "no_improvement",
+                "unreplicated")
 
 PROBLEM_NAMES = (
     "dahlquist", "damped_osc", "vanderpol_mild",
@@ -225,7 +228,7 @@ def _record(
     sv: ScoreVector,
     cycle_id: int = 1,
     seed: int = 0,
-    tier: str = "unreplicated",
+    tier: str = "no_improvement",
     directive_id: str | None = None,
     hypothesis_id: str | None = None,
     timestamp: str = "2026-09-21T10:00:00Z",
@@ -305,15 +308,17 @@ def test_K1_search_only_requires_strictly_better_search_error():
     inc = _sv(search=0.010, heldout=0.020)
     cand = _sv(search=0.010, heldout=0.050,
                per_problem=_per_problem(0.020, dahlquist=0.005, damped_osc=0.005))
-    # Equal search_error is not "beats"; falls through to unreplicated.
-    assert assign_tier(cand, inc) == "unreplicated"
+    # Equal search_error is not "beats"; falls through to no_improvement.
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
 def test_K2_single_family_winner_worse_on_both_aggregates_is_unreplicated():
+    # The name is recorded in tests/golden_gate.txt, so it stays; the tier it asserts is
+    # the half of the merged label this case always meant.
     inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
     cand = _sv(search=0.020, heldout=0.050,
                per_problem=_per_problem(0.020, dahlquist=0.001))
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
 def test_K2_two_problems_of_the_same_family_count_as_one_family():
@@ -321,7 +326,7 @@ def test_K2_two_problems_of_the_same_family_count_as_one_family():
     # dahlquist and dc_motor are both "linear": still one family.
     cand = _sv(search=0.005, heldout=0.010,
                per_problem=_per_problem(0.020, dahlquist=0.001, dc_motor=0.001))
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
 def test_B31_better_on_both_aggregates_and_two_families_is_heldout_verified():
@@ -331,29 +336,31 @@ def test_B31_better_on_both_aggregates_and_two_families_is_heldout_verified():
     assert assign_tier(cand, inc) == "heldout_verified"
 
 
-def test_B31_better_on_both_aggregates_but_one_family_is_unreplicated():
+def test_B31_better_on_both_aggregates_but_one_family_is_no_improvement():
     inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
     cand = _sv(search=0.005, heldout=0.010,
                per_problem=_per_problem(0.020, quaternion=0.001))
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
-def test_B31_no_incumbent_is_unreplicated():
+def test_B31_no_incumbent_is_its_own_tier():
+    """The assertion this test used to make is the defect it now guards against: an empty
+    cell and a candidate that improved on nothing shared one word."""
     cand = _sv(search=0.000001, heldout=0.000001, per_problem=_per_problem(0.0))
-    assert assign_tier(cand, None) == "unreplicated"
+    assert assign_tier(cand, None) == "no_incumbent"
 
 
-def test_B31_better_on_heldout_only_is_unreplicated_not_search_only():
+def test_B31_better_on_heldout_only_is_no_improvement_not_search_only():
     inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
     cand = _sv(search=0.020, heldout=0.010,
                per_problem=_per_problem(0.001))
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
-def test_B31_identical_scores_are_unreplicated():
+def test_B31_identical_scores_are_no_improvement():
     inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
     cand = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
 def test_B31_family_count_only_looks_at_plain_problem_keys():
@@ -364,7 +371,7 @@ def test_B31_family_count_only_looks_at_plain_problem_keys():
         pp[f"slow:{n}"] = 0.001
         pp[f"avr_approx:{n}"] = 0.001
     cand = _sv(search=0.005, heldout=0.010, per_problem=pp)
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
 def test_B31_missing_per_problem_keys_are_ignored_not_an_error():
@@ -373,10 +380,10 @@ def test_B31_missing_per_problem_keys_are_ignored_not_an_error():
     assert assign_tier(cand, inc) == "heldout_verified"
 
 
-def test_B31_worse_on_everything_is_unreplicated():
+def test_B31_worse_on_everything_is_no_improvement():
     inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
     cand = _sv(search=0.100, heldout=0.200, per_problem=_per_problem(0.100))
-    assert assign_tier(cand, inc) == "unreplicated"
+    assert assign_tier(cand, inc) == "no_improvement"
 
 
 def test_B31_beats_search_with_equal_heldout_is_search_only():
@@ -392,6 +399,22 @@ def test_B31_result_is_always_one_of_TIERS():
     for cand in (_sv(0.001, 0.001), _sv(0.5, 0.5), _sv(0.001, 0.5), _sv(0.5, 0.001)):
         assert assign_tier(cand, inc) in TIERS
     assert assign_tier(_sv(), None) in TIERS
+
+
+def test_B31_the_two_tiers_that_replaced_unreplicated_are_distinct():
+    """Splitting the merged label buys nothing unless the two branches keep returning
+    different strings: one states a fact about the cell, the other about the candidate."""
+    inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
+    cand = _sv(search=0.020, heldout=0.050, per_problem=_per_problem(0.020))
+    assert assign_tier(cand, None) == "no_incumbent"
+    assert assign_tier(cand, inc) == "no_improvement"
+
+
+def test_B31_assign_tier_no_longer_returns_the_merged_value():
+    inc = _sv(search=0.010, heldout=0.020, per_problem=_per_problem(0.010))
+    for cand in (_sv(0.001, 0.001), _sv(0.5, 0.5), _sv(0.001, 0.5), _sv(0.5, 0.001), _sv()):
+        assert assign_tier(cand, inc) != "unreplicated"
+        assert assign_tier(cand, None) != "unreplicated"
 
 
 # ===========================================================================
@@ -502,8 +525,11 @@ def test_K7_uppercase_hash_does_not_match():
         record_from_json(d)
 
 
-@pytest.mark.parametrize("tier", ["heldout_verified", "search_only", "unreplicated"])
+@pytest.mark.parametrize("tier", ["heldout_verified", "search_only", "no_incumbent",
+                                  "no_improvement", "unreplicated"])
 def test_K7_every_legal_tier_round_trips(tier):
+    """The merged value is on the list because every record already on disk carries it and
+    has to keep loading until the archive is rewritten."""
     r = _record(_rk4(), _sv_for(_rk4()), tier=tier)
     assert record_from_json(record_to_json(r)) == r
 

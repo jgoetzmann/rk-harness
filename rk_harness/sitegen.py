@@ -39,9 +39,19 @@ BANNED_WORDS = ("novel", "first", "beats", "outperforms", "breakthrough", "prove
                 "state-of-the-art", "best-ever")
 # Provenance line, rendered quietly in the footer of every page. The footer's link to
 # the rk-overview site completes the sentence, so the constant ends mid-phrase.
-BANNER = ("Generated from run data by the harness; no human review. "
-          "Human interpretation is at")
+#
+# Every gate named here runs. The hash check and the golden tests run at container
+# start (entrypoint.sh), the banned-word check runs over every rendered page before
+# build() opens the first file, and _prune deletes the retired names on the same build.
+# The full test suite, the host preflight and the overview's demo cross-check are not
+# in this path and are not claimed.
+BANNER = ("Generated from run data by the harness, with no human review. The container "
+          "starts only if the ten pinned scoring files still match their hash, no page "
+          "is written unless every page passes the banned-word check, and pages this "
+          "site has retired are deleted on the same build. Human interpretation is at")
 OVERVIEW_URL = "https://jgoetzmann.github.io/rk-overview/"
+FINDINGS_URL = "https://jgoetzmann.github.io/rk-findings/"
+SITE_NAME = "rk-harness findings"
 AVR_NOTE = "avr_approx is an approximate model, shown for context only."
 
 _EXHAUSTIVE_LABEL = "exhaustive: optimal within the enumerated space"
@@ -150,6 +160,14 @@ svg .cv{font-weight:600}
 svg .axis{stroke:var(--line)}
 svg .gridline{stroke:var(--grid)}
 svg .cellstroke{stroke:var(--surface-1);stroke-width:2px}
+/* A chart mark that is a link is a tab stop, and until now nothing marked which one had
+   the keyboard. The outline draws the ring; the stroke is the fallback for engines that
+   do not paint an outline on an SVG child. Only :focus-visible, so a mouse click on a
+   cell does not leave a ring behind it. */
+svg a:focus-visible rect,svg a:focus-visible circle,svg a:focus-visible path{
+  outline:2px solid var(--s1);outline-offset:2px;stroke:var(--s1);stroke-width:2.5px}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--s1);outline-offset:2px;
+  border-radius:3px}
 .scroll{overflow-x:auto}
 table{border-collapse:collapse;margin:10px 0;font-size:13px;background:var(--surface-1);
   border:1px solid var(--line);border-radius:8px}
@@ -165,6 +183,9 @@ th.num,td.num{text-align:right}
 .tier-heldout_verified{background:var(--good-bg);color:var(--good-fg)}
 .tier-search_only{background:var(--warn-bg);color:var(--warn-fg)}
 .tier-unreplicated{background:var(--mut-bg);color:var(--mut-fg)}
+/* The two tiers that replaced the merged unreplicated label. Neither is a grade, so both
+   wear the muted badge that label wore. */
+.tier-no_incumbent,.tier-no_improvement{background:var(--mut-bg);color:var(--mut-fg)}
 .badge-open{background:var(--mut-bg);color:var(--mut-fg)}
 .badge-supported{background:var(--good-bg);color:var(--good-fg)}
 .badge-refuted{background:var(--bad-bg);color:var(--bad-fg)}
@@ -315,6 +336,16 @@ class BannedWordError(Exception):
     pass
 
 
+class ClaimError(BannedWordError):
+    """A page states something the data behind it does not support.
+
+    A subclass of BannedWordError on purpose: runner.py catches that one around the
+    site build, logs site_build_failed and leaves the previous site standing. A claim
+    regression should fail the same way a banned word does, before anything is written,
+    rather than ending the cycle or publishing the claim.
+    """
+
+
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------
@@ -353,6 +384,29 @@ def _count(v) -> str:
     if isinstance(v, int) and not isinstance(v, bool):
         return f"{v:,}"
     return _num(v)
+
+
+def _us(v) -> str:
+    """Microseconds per Q15 step: one precision for every such figure on the site.
+
+    The stored medians carry whatever precision the timer produced (20.47 beside
+    31.993), and _num prints what it is given, so one sentence held two figures at
+    four and five significant figures. _num formats every other number on every page,
+    so it is left alone and the microsecond figures get their own formatter.
+    """
+    if not isinstance(v, (int, float)) or isinstance(v, bool) or v != v:
+        return _num(v)
+    return f"{float(v):.2f}"
+
+
+def _stages(n) -> str:
+    """A stage count with its noun: "1 stage", "3 stages".
+
+    Every mark title, heatmap cell and cell-page subtitle that names a stage count goes
+    through this. euler is the only one-stage method on the site, and it put "1 stages"
+    into eighteen published strings, one of them visible page text.
+    """
+    return f"{_num(n)} stage" if n == 1 else f"{_num(n)} stages"
 
 
 def _tier_badge(tier: str) -> str:
@@ -504,14 +558,72 @@ def _nav(active: str) -> str:
     return '<nav class="tabs">' + "".join(links) + "</nav>"
 
 
-def _page(title: str, body: str, active: str = "", subtitle: str = "") -> str:
+# The page description used when a page gives neither a description nor a subtitle.
+_DEFAULT_DESCRIPTION = (
+    "An automated search for Runge-Kutta methods that hold up in Q15 fixed-point "
+    "arithmetic at a modeled Cortex-M0+ cycle budget.")
+
+# Repository commits the build ran from, set by build() and cleared in its finally, the
+# way _PRESENT is. sitegen never reads git itself: the determinism tests build into a
+# directory with no repository at all, and a generator that shelled out would make its
+# own output depend on its environment. runner.py reads the SHAs and passes them in.
+_COMMIT_SHAS: tuple[tuple[str, str], ...] = ()
+
+
+def _doc_title(title: str) -> str:
+    """The browser tab and the search result: the heading, plus the site it sits on.
+
+    The visible h1 stays as short as the page deserves ("Validation"), which says
+    nothing on its own in a search result or a shared link, so the document title
+    carries the context and the two are no longer the same string. Callers apply this
+    themselves: _page takes the title it is given, so the methodology article, which
+    arrives through an injected page callable, is titled by the build rather than by a
+    rule hidden in the shell.
+    """
+    return f"{title} | {SITE_NAME}"
+
+
+def _meta(key: str, name: str, content: str) -> str:
+    return f'<meta {key}="{_esc(name)}" content="{_esc(content)}">\n'
+
+
+def _sha_line() -> str:
+    """The commits this build read, when the caller passed them; nothing otherwise."""
+    if not _COMMIT_SHAS:
+        return ""
+    bits = ", ".join(f"{repo} {sha}" for repo, sha in _COMMIT_SHAS)
+    return (f'<p class="prov">Built from {_esc(bits)}: the commit each repository was '
+            "at when this page was written.</p>\n")
+
+
+def _page(title: str, body: str, active: str = "", subtitle: str = "",
+          doc_title: str = "", description: str = "", page_name: str = "") -> str:
+    """The shared shell. doc_title and description are the head's own strings.
+
+    doc_title defaults to the heading plus the site name and description to the
+    subtitle, so a page that says nothing still ships a usable tab and link preview.
+    page_name is this page's own file name where it differs from the active tab, which
+    is every cell page.
+    """
     sub = f'<p class="sub">{_esc(subtitle)}</p>' if subtitle else ""
+    dtitle = doc_title or title
+    desc = description or subtitle or _DEFAULT_DESCRIPTION
+    name = page_name or active
+    url = FINDINGS_URL + ("" if name in ("", "index.html") else name)
     return (
         "<!doctype html>\n"
         '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f"<title>{_esc(title)}</title>\n"
-        f"<style>{_STYLE}</style>\n</head>\n<body>\n"
+        f"<title>{_esc(dtitle)}</title>\n"
+        + _meta("name", "description", desc)
+        + _meta("property", "og:type", "website")
+        + _meta("property", "og:site_name", SITE_NAME)
+        + _meta("property", "og:title", dtitle)
+        + _meta("property", "og:description", desc)
+        + _meta("property", "og:url", url)
+        + _meta("name", "twitter:card", "summary")
+        + f'<link rel="canonical" href="{_esc(url)}">\n'
+        + f"<style>{_STYLE}</style>\n</head>\n<body>\n"
         '<header class="site"><div class="wrap">\n'
         f"<h1>{_esc(title)}</h1>\n{sub}\n"
         f'<div class="navrow">{_nav(active)}'
@@ -520,9 +632,11 @@ def _page(title: str, body: str, active: str = "", subtitle: str = "") -> str:
         '<div class="wrap">\n'
         f"{body}\n"
         "<footer>\n"
-        "<p>rk-harness findings: Runge-Kutta integrators for a Cortex-M0+ microcontroller.</p>\n"
+        "<p>rk-harness findings: Runge-Kutta integrators for a Cortex-M0+ "
+        "microcontroller, with cycle counts from a model rather than from hardware.</p>\n"
         f'<p class="prov">{_esc(BANNER)} <a href="{OVERVIEW_URL}">the rk-overview site</a>.</p>\n'
-        "</footer>\n"
+        + _sha_line()
+        + "</footer>\n"
         "</div>\n</body>\n</html>\n"
     )
 
@@ -610,9 +724,10 @@ class _LogLog:
         self.parts.append(f'<text x="12" y="{_fmt((self.mt + self.h - self.mb) / 2)}" text-anchor="middle" '
                           f'transform="rotate(-90 12 {_fmt((self.mt + self.h - self.mb) / 2)})">{_esc(self.ylabel)}</text>')
 
-    def svg(self, aria: str) -> str:
+    def svg(self, aria: str, describedby: str = "") -> str:
         return (f'<svg viewBox="0 0 {self.w} {self.h}" width="{self.w}" height="{self.h}" '
-                f'role="img" aria-label="{_esc(aria)}">' + "".join(self.parts) + "</svg>")
+                f'role="img" aria-label="{_esc(aria)}"{_describedby(describedby)}>'
+                + "".join(self.parts) + "</svg>")
 
 
 def _phone_pair(wide: str, narrow: str) -> str:
@@ -672,12 +787,14 @@ def _elite_scatter(arch: ArchiveState) -> str:
     xhi = 10 ** math.ceil(math.log10(max(xs)))
     ylo = 10 ** math.floor(math.log10(min(ys)))
     yhi = 10 ** math.ceil(math.log10(max(ys)))
+    shown_base = [(name, cyc, err) for name, cyc, err in base if err is not None]
+
     def draw(w: int, tips: bool = True) -> str:
         pl = _LogLog(w, 340, xlo, xhi, ylo, yhi,
                      "cycles per step (m0plus_fast, n_states=1)", "held-out error")
         pl.frame()
         for order, stg, bucket, rec, cyc, err in elites:
-            title = (f"order {order}, {stg} stages, bucket {bucket}: {_num(err)} held-out at {int(cyc)} cycles "
+            title = (f"order {order}, {_stages(stg)}, bucket {bucket}: {_num(err)} held-out at {int(cyc)} cycles "
                      f"({rec.tier}); {rec.tableau_hash[:12]}")
             tip = f"<title>{_esc(title)}</title>" if tips else ""
             pl.parts.append(
@@ -693,18 +810,41 @@ def _elite_scatter(arch: ArchiveState) -> str:
                 f'<path d="M {_fmt(px)} {_fmt(py - 6)} L {_fmt(px + 6)} {_fmt(py)} L {_fmt(px)} {_fmt(py + 6)} '
                 f'L {_fmt(px - 6)} {_fmt(py)} Z" fill="var(--s2)" class="cellstroke">{tip}</path>')
             pl.parts.append(_side_label(px, py - 6, name, w))
-        return pl.svg("Scatter of held-out error against cycles per step for archive "
-                      "elites and classical baselines")
+        return pl.svg(
+            f"Scatter of held-out error against cycles per step, {len(elites)} archive "
+            + ("elite" if len(elites) == 1 else "elites") + f" and {len(shown_base)} "
+            + ("classical baseline" if len(shown_base) == 1 else "classical baselines"),
+            describedby=_SCATTER_TABLE)
 
     fig = _phone_pair(draw(640), draw(430, tips=False))
+    rows = [(f"archive elite", f"order {order}", _stages(stg), f"bucket {bucket}",
+             f'<a class="hash" href="{_cell_file(order, stg, bucket)}">'
+             f"{_esc(rec.tableau_hash[:12])}</a>", str(int(cyc)), _num(err))
+            for order, stg, bucket, rec, cyc, err in elites]
+    rows += [("classical baseline", "", "", "", _esc(name), str(int(cyc)), _num(err))
+             for name, cyc, err in shown_base]
+    table = _chart_table(
+        _SCATTER_TABLE,
+        f"Every plotted mark, in one table ({len(rows)} "
+        + ("row" if len(rows) == 1 else "rows") + ")",
+        ("mark", "order", "stages", "bucket", "tableau", "cycles per step",
+         "held-out error"),
+        rows, num_cols=(5, 6))
     return ('<figure><figcaption>Blue dots are archive elites and orange diamonds '
             "classical baselines: analytic cycles per step under m0plus_fast against held-out "
             "error at the fixed " + _gloss("cycle-budget", "cycle budget") + ", both log, "
             "so down-left is better. A diamond appears only when its identical tableau is "
-            "archived; each dot links to its cell page.</figcaption>"
+            "archived; each dot links to its cell page, and the table under the chart "
+            "carries every plotted value.</figcaption>"
             + _legend([("var(--s1)", "archive elite (links to its cell)"), ("var(--s2)", "classical baseline")])
-            + fig + _ARCHIVE_SOURCE + "</figure>")
+            + fig + _ARCHIVE_SOURCE + table + "</figure>")
 
+
+# Ids of the two data tables the explicit page's charts point at with aria-describedby.
+# The grids and the scatter draw the same elites, and the page already carried a table of
+# every elite, so the grids point at that one rather than repeating it.
+_SCATTER_TABLE = "scatter-values"
+_ELITE_TABLE = "elite-table"
 
 # The source line under the explicit scatter and the elite grids: both draw the archive.
 _ARCHIVE_SOURCE = ('<p class="note">Source: rk-work/archive, the elite in each cell when '
@@ -743,13 +883,17 @@ def _grid_heatmap(order: int, grid: dict) -> str:
             x, y = ml + cw * j, mt + ch * i
             rec = grid.get((s, b))
             if rec is None:
+                # An empty cell is the absence of a record, not a datum. It keeps its
+                # title for a pointer and is hidden from assistive technology, which
+                # otherwise walks 150 of these across the four grids.
                 parts.append(f'<rect x="{x}" y="{y}" width="{cw}" height="{ch}" rx="4" '
-                             f'fill="var(--surface-1)" stroke="var(--grid)"><title>order {order}, {s} stages, '
+                             f'fill="var(--surface-1)" stroke="var(--grid)" '
+                             f'aria-hidden="true"><title>order {order}, {_stages(s)}, '
                              f"bucket {b}: empty</title></rect>")
                 continue
             err = rec.score.heldout_error
             step = _heat_step(err, lo, hi) if _finite_pos(err) else 1
-            title = (f"order {order}, {s} stages, bucket {b}: {_num(err)} held-out, "
+            title = (f"order {order}, {_stages(s)}, bucket {b}: {_num(err)} held-out, "
                      f"{rec.tier}, {rec.tableau_hash[:12]}")
             # The value takes the ink token paired with its fill step, so it reads on a
             # pale cell and on a deep one in either theme without a halo.
@@ -760,8 +904,10 @@ def _grid_heatmap(order: int, grid: dict) -> str:
                 f'y="{_fmt(y + ch / 2 + 3.5)}" text-anchor="middle">'
                 f'{f"{float(err):.3g}" if _finite_pos(err) else "?"}</text></a>')
     parts.append(f'<text x="{ml}" y="{h - 6}">cycle bucket (m0plus_fast)</text>')
+    cells = len(stage_rows) * len(_HEAT_BUCKETS)
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
-           f'aria-label="Order {order} elite grid heatmap">' + "".join(parts) + "</svg>")
+           f'aria-label="Order {order} elite grid heatmap, {len(grid)} of {cells} cells '
+           f'occupied"{_describedby(_ELITE_TABLE)}>' + "".join(parts) + "</svg>")
     # A panel, not a figure: render_explicit puts the four orders in one figure that
     # carries the shared caption and the source line.
     return f'<p class="ptitle">Order {order}</p>{svg}'
@@ -773,6 +919,9 @@ def _round_top_bar(x: float, y: float, w: float, h: float, fill: str, title: str
          f"L {_fmt(x + w - r)} {_fmt(y)} Q {_fmt(x + w)} {_fmt(y)} {_fmt(x + w)} {_fmt(y + r)} "
          f"L {_fmt(x + w)} {_fmt(y + h)} Z")
     return f'<path d="{d}" fill="{fill}" class="cellstroke"><title>{_esc(title)}</title></path>'
+
+
+_ANCHOR_TABLE = "anchor-cycle-values"
 
 
 def _anchor_bars() -> str:
@@ -802,9 +951,18 @@ def _anchor_bars() -> str:
             parts.append(f'<text class="lbl" x="{_fmt(bx + bar_w / 2)}" y="{_fmt(h - mb - bh - 5)}" '
                          f'text-anchor="middle">{v}</text>')
         parts.append(f'<text x="{_fmt(cx)}" y="{h - mb + 16}" text-anchor="middle">{_esc(name)}</text>')
+    bars = [(name, model, v) for name, fast, slow in vals
+            for model, v in (("m0plus_fast", fast), ("m0plus_slow", slow))]
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
-           'aria-label="Cycles per step for rk4 and rk38 under the fast and slow multiplier models">'
-           + "".join(parts) + "</svg>")
+           'aria-label="Cycles per step for rk4 and rk38 under the fast and slow '
+           f'multiplier models, {len(bars)} '
+           + ("bar" if len(bars) == 1 else "bars")
+           + f'"{_describedby(_ANCHOR_TABLE)}>' + "".join(parts) + "</svg>")
+    table = _chart_table(
+        _ANCHOR_TABLE, f"Every plotted bar, in one table ({len(bars)} "
+        + ("row" if len(bars) == 1 else "rows") + ")",
+        ("method", "cost model", "cycles per step"),
+        [(_esc(n), _esc(m), str(v)) for n, m, v in bars], num_cols=(2,))
     return ("<figure><figcaption>Analytic cycles per step for rk4 and rk38 under the fast and "
             "slow multiplier cost models. Bar height is the per-step cost and the printed "
             "number is the exact cycle count. Which of the two "
@@ -812,7 +970,7 @@ def _anchor_bars() -> str:
             "multiplier models, and that swap is the cost model's main sanity "
             "check.</figcaption>"
             + _legend([("var(--s1)", "m0plus_fast (1-cycle multiplier)"), ("var(--s2)", "m0plus_slow (32-cycle multiplier)")])
-            + svg + "</figure>")
+            + svg + table + "</figure>")
 
 
 def _sweep_chart(name: str, method: dict) -> str:
@@ -851,7 +1009,15 @@ def _sweep_chart(name: str, method: dict) -> str:
         for hv, ev in pts:
             pl.parts.append(f'<circle cx="{_fmt(pl.x(hv))}" cy="{_fmt(pl.y(ev))}" r="4" fill="{sw}" '
                             f'class="cellstroke"><title>{_esc(name)} {key} at h={_num(hv)}: {_num(ev)}</title></circle>')
-    svg = pl.svg(f"{name}: Q15 and float64 error against step size, log-log")
+    table_id = "sweep-" + re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
+    svg = pl.svg(f"{name}: Q15 and float64 error against step size over {len(rows)} step "
+                 + ("size" if len(rows) == 1 else "sizes") + ", log-log",
+                 describedby=table_id)
+    trows = [(_num(r["h"]), _num(r.get("n", r.get("n_steps"))), _num(r.get("q15_error")),
+              _num(r.get("float_error"))) for r in sorted(rows, key=lambda r: -r["h"])]
+    table = _chart_table(table_id, f"{name}: every plotted step size ({len(trows)} rows)",
+                         ("step size h", "steps", "Q15 error", "float64 error"),
+                         trows, num_cols=(0, 1, 2, 3))
     # The reading of the crossover is said once, above the pair, by the section.
     return (f"<figure><figcaption>{_esc(name)}: final-state error against step size h, "
             "log-log, Q15 and float64 over identical steps"
@@ -861,12 +1027,14 @@ def _sweep_chart(name: str, method: dict) -> str:
                + ", are left off so the Q15 curve keeps its scale.")
             + "</figcaption>"
             f'{svg}<p class="note">Source: rk-work/falsification.json; Q15 and float64 as '
-            "labeled.</p></figure>")
+            "labeled.</p>" + table + "</figure>")
 
 
 # Estimated advance width of one character of an 11px semibold .lbl value label,
 # used to keep bar-value labels inside the drawable width. Deliberately conservative.
 _LBL_CHAR_W = 6.6
+
+_PER_PROBLEM_TABLE = "per-problem-values"
 
 
 def _per_problem_bars(sv) -> str:
@@ -900,7 +1068,15 @@ def _per_problem_bars(sv) -> str:
         else:
             parts.append(f'<text class="lbl" x="{_fmt(bar_end + 6)}" y="{_fmt(y + 13)}">{label}</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
-           'aria-label="Per-problem error, log scale">' + "".join(parts) + "</svg>")
+           f'aria-label="Per-problem error on {len(vals)} '
+           + ("problem" if len(vals) == 1 else "problems")
+           + f', log scale"{_describedby(_PER_PROBLEM_TABLE)}>'
+           + "".join(parts) + "</svg>")
+    table = _chart_table(
+        _PER_PROBLEM_TABLE, f"Every plotted bar, in one table ({len(vals)} "
+        + ("row" if len(vals) == 1 else "rows") + ")",
+        ("problem", "final-state error"),
+        [(_esc(k), _num(v)) for k, v in vals], num_cols=(1,))
     return ('<figure><figcaption>Final-state error of this tableau on each problem, integrated '
             "in Q15 under m0plus_fast at the fixed cycle budget. Bar length is error on a log "
             "scale; the printed value is exact. dahlquist, damped_osc and vanderpol_mild are "
@@ -909,7 +1085,7 @@ def _per_problem_bars(sv) -> str:
             "several problems " + _gloss("floor-rounding", "floor rounding") + " dominates the "
             "method choice, so bars can look similar across very different "
             "tableaus.</figcaption>"
-            + svg + "</figure>")
+            + svg + table + "</figure>")
 
 
 # ----------------------------------------------------------------------------
@@ -1162,6 +1338,82 @@ _CLASS_BOUNDARY = (
     "A scored record has room for one explicit tableau and nothing else, so the implicit "
     "and adaptive classes are measured outside the archive and never ranked against it.")
 
+# Read the three cards the same way. Stated once under the row rather than per card,
+# because the thing being explained is what the row's three numbers have in common.
+_CARD_CONVENTION = (
+    "Each card counts its own class's rows in benchmark/results.json. The value is the "
+    "targets reached out of the rows that ran, and the figure beside it is how many of "
+    "the class's rows ran at all: a row that never ran is not a target the class "
+    "missed. Ours on these rows means run by this harness through its own solver path, "
+    "which includes the classical rk4 control, so it does not mean discovered.")
+
+
+def _newest_elite_ct(arch: ArchiveState) -> str:
+    """Display time of the newest elite the archive holds, or "" when it holds none."""
+    stamps = [r.timestamp for grid in arch.grids.values() for r in grid.values()
+              if isinstance(r.timestamp, str) and r.timestamp]
+    return _ct(max(stamps)) if stamps else ""
+
+
+def _archive_stamp(arch: ArchiveState) -> str:
+    """What archive state this page was built from, from values already in hand.
+
+    Stored values only, so two builds of the same archive stay byte-identical. Whether
+    that state is old is the reader's subtraction against their own clock, which is the
+    division of labour rk_harness.status already keeps: a file the container writes
+    cannot report that the container stopped.
+    """
+    if not arch.n_records:
+        return ""
+    bits = (f"Built from cycle {_count(arch.last_cycle_id)} of the run, "
+            f"{_count(arch.n_records)} archive records")
+    newest = _newest_elite_ct(arch)
+    if newest:
+        bits += f". Newest elite recorded {newest}"
+    return f'<p class="when">{_esc(bits)}.</p>'
+
+
+def _doc_stamp(gen, what: str) -> str:
+    """One provenance line for a document a panel quotes: its archive state and hash.
+
+    A page that shows panels from two documents shows two archive states, and the
+    difference has been tens of thousands of records. Each panel says which one it is
+    standing on instead of the page carrying a single date for all of them.
+    """
+    if not isinstance(gen, dict):
+        return ""
+    bits = []
+    n = gen.get("archive_records")
+    if isinstance(n, int) and not isinstance(n, bool):
+        bits.append(f"{_count(n)} archive records")
+    vh = gen.get("verifier_hash")
+    if isinstance(vh, str) and vh:
+        bits.append(f"verifier hash {vh[:8]}")
+    if not bits:
+        return ""
+    return f'<p class="note">{_esc(what + ", built at " + ", ".join(bits))}.</p>'
+
+
+def _benchmark_stamp(benchmark, validation) -> str:
+    """The archive state the three hub cards sit at, which is not the live archive's.
+
+    benchmark/results.json carries no record count of its own. It names the validation
+    document as the source of the tableaus it ran, so the state behind these cards is
+    that document's, and the index shows it next to an epoch panel reading the live run.
+    """
+    if not isinstance(benchmark, dict) or not isinstance(validation, dict):
+        return ""
+    gen = validation.get("generated_from")
+    n = gen.get("archive_records") if isinstance(gen, dict) else None
+    if not isinstance(n, int) or isinstance(n, bool):
+        return ""
+    return ('<p class="note">'
+            + _esc("All three cards read benchmark/results.json, which runs the tableaus "
+                   f"named in validation/results.json. That document was built at "
+                   f"{_count(n)} archive records, so these three numbers stand at that "
+                   "state and not at the archive's current one.")
+            + "</p>")
+
 # The arithmetic behind each class and what checks a result, one line per hub card.
 _CLASS_GLANCE = {
     "explicit": "Q15 fixed point, checked by the pinned verifier.",
@@ -1275,30 +1527,51 @@ def _arith_label(v) -> str:
     return "Q15" if s == "q15" else s
 
 
+def _solver_arith_phrase(rows) -> str:
+    """The solvers behind a card's number, each with the arithmetic it ran in.
+
+    Named rather than called "our solvers", because on these rows ours means run by
+    this harness through its own solver path: the explicit set is two thirds classical
+    rk4, one row of it in float64, and a reader who takes the phrase for "the methods
+    this project found" reads the card backwards. Sorted, so two builds print one
+    order.
+    """
+    pairs = sorted({(_solver_label(r.get("solver")), _arith_label(r.get("arithmetic")))
+                    for r in rows if r.get("solver") and r.get("arithmetic")})
+    bits = [f"{name} in {arith}" for name, arith in pairs]
+    if not bits:
+        return ""
+    if len(bits) == 1:
+        return bits[0]
+    return ", ".join(bits[:-1]) + " and " + bits[-1]
+
+
 def _matched_class_card(cls: str, benchmark, blurb: str):
     """One hub card from this class's own matched-accuracy rows, or None without them.
 
     Every class answers the same question here, whether its own runs reached a fixed
-    error target, and each card names the arithmetic its runs used. None of the three
-    numbers ranks one class against another: the runs differ in method, arithmetic and
-    solver count, which is why the card states its own denominator.
+    error target, and each card names the solvers and arithmetic behind its number.
+    None of the three numbers ranks one class against another: the runs differ in
+    method, arithmetic and solver count, which is why the card states its own
+    denominator.
+
+    Rows that never ran are not targets this class missed, so they stay out of the
+    value's denominator and are counted beside it. That rule alone made the implicit
+    card read 44 of 44 next to 65 of 96, the only flawless number in the row, so all
+    three cards carry the same two figures: reached out of rows that ran, then rows
+    that ran out of rows the class has. The convention is stated once under the row.
     """
     rows = [r for r in _matched_rows(benchmark, cls) if str(r.get("side")) == "ours"]
-    # Rows that never ran are not targets this class missed, so they stay out of the
-    # denominator and are counted beside it instead.
     ran = [r for r in rows if str(r.get("status")) != "skipped"]
     if not ran:
         return None
     hit = sum(1 for r in ran if str(r.get("status")) == "reached")
-    ariths = sorted({_arith_label(r.get("arithmetic")) for r in rows
-                     if isinstance(r.get("arithmetic"), str) and r.get("arithmetic")})
-    what = "matched-accuracy targets our solvers reached"
-    if len(rows) > len(ran):
-        n = len(rows) - len(ran)
-        what += f"; {n} further {'row' if n == 1 else 'rows'} never ran"
-    if ariths:
-        what += "; " + " and ".join(ariths) + " runs"
-    return (cls, f"{hit} of {len(ran)}", what, "benchmark/results.json", blurb)
+    what = "matched-accuracy targets reached"
+    who = _solver_arith_phrase(rows)
+    if who:
+        what += f" by {who}"
+    what += f"; {len(ran)} of {len(rows)} {'row' if len(rows) == 1 else 'rows'} ran"
+    return (cls, f"{hit} of {len(ran)} run", what, "benchmark/results.json", blurb)
 
 
 def render_index(arch: ArchiveState, benchmark: dict | None = None,
@@ -1310,12 +1583,16 @@ def render_index(arch: ArchiveState, benchmark: dict | None = None,
     """
     parts = [
         '<p class="lead">An automated search for Runge-Kutta methods that hold up in '
-        + _gloss("q15", "Q15") + " fixed-point arithmetic on small microcontrollers. This "
-        "site is the run's live record: it is generated from the run's data at the end of "
-        "every cycle, and nobody edits it by hand. "
+        + _gloss("q15", "Q15") + " fixed-point arithmetic on small microcontrollers. Cost "
+        "is counted against a modeled Cortex-M0+ " + _gloss("cycle-budget", "cycle budget")
+        + " rather than measured on the chip. This site is rebuilt from the run's data at "
+        "the end of every cycle, and nobody edits it by hand. "
         f'The <a href="{OVERVIEW_URL}">project overview</a> explains why the project '
         "exists and how it works.</p>"
     ]
+    stamp = _archive_stamp(arch)
+    if stamp:
+        parts.append(stamp)
     parts.append("<h2>The three classes</h2>")
     parts.append(f'<p class="note">{_esc(_CLASS_BOUNDARY)}</p>')
     # Each card carries its own class's number. With a benchmark document that is the
@@ -1348,6 +1625,11 @@ def render_index(arch: ArchiveState, benchmark: dict | None = None,
         rows.append(card if card is not None else _ledger_class_card(cls, sidetrack, blurb))
     rows = [tuple(r) + (_CLASS_GLANCE[r[0]],) for r in rows]
     parts.append(_class_cards(rows))
+    if any(r[3] == "benchmark/results.json" for r in rows):
+        parts.append(f'<p class="note">{_esc(_CARD_CONVENTION)}</p>')
+    bench_stamp = _benchmark_stamp(benchmark, validation)
+    if bench_stamp:
+        parts.append(bench_stamp)
     parts.append("<h2>The three classes side by side</h2>")
     parts.append(_class_side_table())
     parts.append('<p class="note">Numbers from different columns do not compare, so each '
@@ -1359,9 +1641,14 @@ def render_index(arch: ArchiveState, benchmark: dict | None = None,
     # any one class, and a reader arriving here wants the classes first.
     parts.append("<h2>Epoch status</h2>")
     parts.append(_epoch_panel())
-    return _page("rk-harness findings", "\n".join(parts), active="index.html",
+    return _page(SITE_NAME, "\n".join(parts), active="index.html",
                  subtitle="Explicit methods scored in Q15 fixed point, and implicit and "
-                          "adaptive methods measured outside the archive.")
+                          "adaptive methods measured outside the archive.",
+                 doc_title=f"{SITE_NAME}: Runge-Kutta methods in Q15 fixed point",
+                 description="What an automated search found for Runge-Kutta methods in "
+                             "Q15 fixed point at a modeled Cortex-M0+ cycle budget: the "
+                             "archive, the three method classes and the evidence behind "
+                             "them.")
 
 
 _EXPLICIT_CLASS = (
@@ -1429,8 +1716,12 @@ def _elite_table_fold(arch: ArchiveState) -> str:
             + _gloss("verifier-hash", "verifier hash")
             + ("" if len(vhashes) == 1 else "es") + ": " + vlist
             + ". Each record's own hash is on its detail page.</p>")
-    return _fold(f"Every elite in one table ({len(rows)} "
-                 + ("row" if len(rows) == 1 else "rows") + ")", body)
+    # The grids point at this table with aria-describedby, so it carries an id: a chart
+    # with role="img" announces one sentence, and this is where its numbers live.
+    summary = (f"Every elite in one table ({len(rows)} "
+               + ("row" if len(rows) == 1 else "rows") + ")")
+    return (f'<details class="fold" id="{_ELITE_TABLE}"><summary>{_esc(summary)}</summary>'
+            f"<div>{body}</div></details>")
 
 
 def render_explicit(arch: ArchiveState, validation: dict | None = None,
@@ -1443,6 +1734,9 @@ def render_explicit(arch: ArchiveState, validation: dict | None = None,
     """
     parts = [f'<p class="lead">{_esc(_EXPLICIT_CLASS)}</p>', _glance("explicit"),
              _stat_cards(arch)]
+    stamp = _archive_stamp(arch)
+    if stamp:
+        parts.append(stamp)
     parts.append("<h2>Cost against held-out error</h2>")
     parts.append(_chart_block(_elite_scatter(arch)))
     parts.append("<h2>Elite grids</h2>")
@@ -1456,7 +1750,8 @@ def render_explicit(arch: ArchiveState, validation: dict | None = None,
                      "columns are m0plus_fast cycle buckets, and each filled cell prints "
                      "its elite's held-out error. The further a cell's color is from the "
                      "page background, the lower the error within that grid. Click a cell "
-                     "for the record.</figcaption>"
+                     "for the record, or open the table below the grids, which carries "
+                     "every occupied cell as a row.</figcaption>"
                      '<div class="charts grid2">' + "\n".join(grids) + "</div>"
                      + _ARCHIVE_SOURCE + "</figure>")
         parts.append(_explain(
@@ -1481,7 +1776,15 @@ def render_explicit(arch: ArchiveState, validation: dict | None = None,
     parts.extend(_matched_section(benchmark, "explicit"))
     return _page("Explicit methods", "\n".join(parts), active="explicit.html",
                  subtitle="Explicit Runge-Kutta tableaus scored end-to-end in Q15 at a "
-                          "fixed cycle budget.")
+                          "fixed cycle budget.",
+                 doc_title=_doc_title("Explicit methods"),
+                 description="The archive of explicit Runge-Kutta tableaus scored in Q15 "
+                             "at a fixed, modeled Cortex-M0+ cycle budget: the elite of "
+                             "every grid cell, the grids themselves and the "
+                             "matched-accuracy comparison.")
+
+
+_PRACTICAL_TABLE = "practical-values"
 
 
 def _practical_chart(validation) -> str:
@@ -1547,20 +1850,37 @@ def _practical_chart(validation) -> str:
                                   if tips else ""))
         return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
                 'aria-label="Best discovered against best classical Q15 error on each '
-                'non-stiff practical problem, log scale">'
+                f'non-stiff practical problem, log scale, {len(rows)} '
+                + ("problem" if len(rows) == 1 else "problems")
+                + f'"{_describedby(_PRACTICAL_TABLE)}>'
                 + "".join(_hbar_frame(xs, ml, span, mt, base)) + "".join(body) + "</svg>")
 
     svg = _phone_pair(draw(640), draw(430, tips=False))
     model = validation.get("cost_model")
+    trows = []
+    for name, marks in rows:
+        got = {k: (label, v) for k, label, v in marks}
+        disc, cls = got.get("disc"), got.get("cls")
+        trows.append((_esc(name),
+                      _esc(disc[0]) if disc else "none finished",
+                      _num(disc[1]) if disc else "n/a",
+                      _esc(cls[0]) if cls else "none finished",
+                      _num(cls[1]) if cls else "n/a"))
+    table = _chart_table(
+        _PRACTICAL_TABLE, f"Every plotted mark, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem", "best discovered", "Q15 error", "best classical", "Q15 error"),
+        trows, num_cols=(2, 4))
     return ("<figure><figcaption>Final-state Q15 error of the best discovered method and "
             "the best classical anchor on each non-stiff practical problem, log axis, so "
-            "left is better. Every method gets the same cycle budget.</figcaption>"
+            "left is better. Every method gets the same cycle budget, and the table under "
+            "the chart carries both values for every problem.</figcaption>"
             + _key_legend([("var(--s1)", "circle", "best discovered (archive)"),
                            ("var(--s2)", "diamond", "best classical anchor")])
             + svg + '<p class="note">Source: rk-work/validation/results.json, '
             "verdicts.per_problem. Arithmetic: Q15 with floor rounding"
             + (f" under {_soft(model)}" if isinstance(model, str) and model else "")
-            + ".</p></figure>")
+            + ".</p>" + table + "</figure>")
 
 
 def _practical_section(validation, benchmark) -> list[str]:
@@ -1571,12 +1891,29 @@ def _practical_section(validation, benchmark) -> list[str]:
         v = validation.get("verdicts") if isinstance(validation.get("verdicts"), dict) else {}
         won = v.get("practical_problems_won_by_discovered", v.get("problems_won_by_discovered"))
         compared = v.get("practical_problems_compared", v.get("problems_compared"))
-        if isinstance(won, int) and isinstance(compared, int) and compared > 0:
+        ms = [m for m in (validation.get("methods") or []) if isinstance(m, dict)]
+        n_disc = sum(1 for m in ms if str(m.get("kind")) == "discovered")
+        n_cls = sum(1 for m in ms if str(m.get("kind")) == "classical")
+        if isinstance(won, int) and isinstance(compared, int) and compared > 0 \
+                and n_disc and n_cls:
             parts.append(
                 f"<p>On {won} of {compared} practical problems that no search saw, the "
-                "best discovered tableau ends with lower Q15 error than the best classical "
-                'anchor at the same cycle budget. The <a href="validation.html">validation '
-                "tab</a> has every method on every problem, the stiff ones included.</p>")
+                f"best of {n_disc} discovered "
+                + ("tableau" if n_disc == 1 else "tableaus")
+                + " ends with lower Q15 error than the best of "
+                + f"{n_cls} classical "
+                + ("anchor" if n_cls == 1 else "anchors")
+                + " at the same cycle budget. Both sides are a maximum over their own "
+                'set, so the <a href="validation.html">validation tab</a> leads with the '
+                "champion against each anchor instead, and has every method on every "
+                "problem, the stiff ones included.</p>")
+        elif isinstance(compared, int) and compared > 0:
+            # A tally whose two sample sizes the document does not state is a tally this
+            # page cannot explain, so it points at the tab that can.
+            parts.append(
+                f'<p>The <a href="validation.html">validation tab</a> runs {compared} '
+                "practical problems that no search saw, with every method on every "
+                "problem and the stiff ones included.</p>")
         parts.append(_chart_block(_practical_chart(validation)))
     else:
         parts.append('<p class="note">rk-work/validation/results.json has not been written '
@@ -1629,16 +1966,19 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
     ]
     parts.append('<table><tr><th>metric</th><th class="num">value</th></tr>')
     for k, v in score_rows:
-        parts.append(f'<tr><td>{k}</td><td class="num">{_num(v)}</td></tr>')
+        note = f' <span class="note">{_esc(_STABILITY_IMAG_TAG)}</span>' if k == "stability_imag" else ""
+        parts.append(f'<tr><td>{k}{note}</td><td class="num">{_num(v)}</td></tr>')
     parts.append("</table>")
+    parts.append(f'<p class="note">{_esc(_STABILITY_IMAG_NOTE)}</p>')
     parts.append(_explain(
         "measured_order is the slope of a log-log fit of float64 final-state error against step "
         "size on the dahlquist problem, over the longest usable run of points "
         "(order_fit_points of them); it is measured evidence, distinct from the algebraic "
         + _gloss("order", "order") + " that keys the grid. error_constant is the L2 norm of the "
         "order-condition residuals one order past the achieved one, a size estimate for the "
-        "leading truncation term. stability_real and stability_imag are the extents of the "
-        "stability region along the negative real axis and the imaginary axis.",
+        "leading truncation term. stability_real and stability_imag are read off the "
+        "stability region by the bisection described under the table above, along the "
+        "negative real axis and along the imaginary axis.",
         "csd_weight_total sums " + _gloss("csd-weight", "CSD weights") + " over the non-trivial "
         "coefficients, a proxy for coefficient-arithmetic cost. coeff_quant_error is the largest "
         "gap between an exact coefficient and its m/2^s form. search_error and heldout_error are "
@@ -1650,8 +1990,29 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
     parts.append(_per_problem_matrix(sv))
     title = f"Cell p{order} s{stages} b{bucket}"
     return _page(title, "\n".join(parts), active="explicit.html",
-                 subtitle=f"grid order {order}, {stages} stages, cycle bucket {bucket}")
+                 subtitle=f"grid order {order}, {_stages(stages)}, cycle bucket {bucket}",
+                 doc_title=_doc_title(title),
+                 description=f"The full archive record for the elite of grid cell order "
+                             f"{order}, {_stages(stages)}, cycle bucket {bucket}: its "
+                             "tableau, its scores and the pinned code that verified it.",
+                 page_name=_cell_file(order, stages, bucket))
 
+
+# stability_imag is a bisection floor, not a measured extent, and a cell page printed it
+# as though it were one. The scorer samples the stability region at 4000 points and
+# bisects 200 times (evaluator._STABILITY_SAMPLES, _BISECTION_ITERS), so a method whose
+# stability polynomial touches the imaginary axis nowhere still reports the smallest
+# interval that search can resolve rather than zero. Every order-2 record on this site
+# carries the same 0.00168185 for that reason. The scorer is pinned, so this is said at
+# render time: changing the search would move VERIFIER_HASH and every archived score.
+_STABILITY_IMAG_TAG = "(bisection floor)"
+_STABILITY_IMAG_NOTE = (
+    "stability_imag is the smallest imaginary-axis interval the scorer's search can "
+    "resolve, from 4000 samples and 200 bisection steps, so it is a floor rather than a "
+    "measured extent: a method whose stability region meets the imaginary axis only at "
+    "the origin reports that floor and not 0. Read a value at the floor as no resolvable "
+    "interval. stability_real carries no such floor, because the real-axis interval of "
+    "these methods is well inside the sampled range.")
 
 _PROBLEM_ROWS = ("dahlquist", "damped_osc", "vanderpol_mild",
                  "pendulum", "dc_motor", "rc_thermal", "quaternion")
@@ -1748,6 +2109,7 @@ def _hyp_row(group: list[dict]) -> str:
     return f'<details class="led"><summary>{summary}</summary><div>{"".join(body)}</div></details>'
 
 
+_VERDICT_TABLE = "verdict-values"
 _HYP_ORDER = ("supported", "refuted", "inconclusive", "open")
 # Predicates shown per verdict group, newest first. The rest are one line away in the
 # ledger file, as the interpretation and literature logs below already do it. Twenty
@@ -1820,8 +2182,15 @@ def _verdict_chart(counts, totals: tuple[int, int, int] | None = None) -> str:
             parts.append(f'<text class="lbl" x="{_fmt(end + 6)}" y="{_fmt(y + 13)}">'
                          f"{label}</text>")
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
-           'aria-label="Distinct predicates in each verdict group, horizontal bars">'
+           f'aria-label="Distinct predicates in each verdict group, {len(rows)} '
+           + ("group" if len(rows) == 1 else "groups")
+           + f', horizontal bars"{_describedby(_VERDICT_TABLE)}>'
            + "".join(parts) + "</svg>")
+    table = _chart_table(
+        _VERDICT_TABLE, f"Every plotted bar, in one table ({len(rows)} "
+        + ("row" if len(rows) == 1 else "rows") + ")",
+        ("verdict group", "distinct predicates"),
+        [(_esc(k), str(v)) for k, v in rows], num_cols=(1,))
     tally = ""
     if totals is not None:
         n_h, n_p, rep = totals
@@ -1830,7 +2199,8 @@ def _verdict_chart(counts, totals: tuple[int, int, int] | None = None) -> str:
                  f"{'was' if rep == 1 else 'were'} posed more than once.")
     return ("<figure><figcaption>Distinct predicates in each verdict group, with the count "
             "at the end of each bar." + tally + "</figcaption>" + svg
-            + '<p class="note">Source: rk-work/hypotheses.jsonl; exact counts.</p></figure>')
+            + '<p class="note">Source: rk-work/hypotheses.jsonl; exact counts.</p>'
+            + table + "</figure>")
 
 
 _INTERP_SHOWN = 5
@@ -1966,7 +2336,10 @@ def render_hypotheses(hyps: list[dict], digests: list[dict] | None = None,
         "Each row pairs a machine-checkable predicate over per-cell statistics, for example "
         '<span class="mono">slow.p3s4.heldout &lt; slow.p4s4.heldout</span>, with the mechanism '
         "and control the model recorded before the data could answer. p and s name an "
-        "(order, stages) cell, and the leading word picks the cost model.",
+        "(order, stages) cell, the leading word picks the cost model, and heldout in a "
+        "predicate is that cell elite's error on the "
+        + _gloss("held-out-set", "held-out set") + ", which selects elites and so is not "
+        "a clean test set.",
         "Verdicts come from code, never from the model. Once every cell a predicate names "
         "holds min_samples records, the predicate is evaluated against those cells' running "
         "statistics. d is " + _gloss("cohens-d", "Cohen's d") + "; below 0.2 the verdict is "
@@ -2020,7 +2393,11 @@ def render_hypotheses(hyps: list[dict], digests: list[dict] | None = None,
     parts.extend(_literature_section(digests or []))
     return _page("Research log", "\n".join(parts), active="hypotheses.html",
                  subtitle="Predicates resolved by code, and the model's own readings and "
-                          "reading list.")
+                          "reading list.",
+                 doc_title=_doc_title("Research log"),
+                 description="The hypothesis ledger: predicates the harness resolved "
+                             "against the archive by code, with the model's own readings "
+                             "and its reading list.")
 
 
 def _costmodel_section() -> str:
@@ -2108,7 +2485,8 @@ def _falsification_section(data) -> list[str]:
         parts.append("<p>Left of a crossover step size, "
                      + _gloss("floor-rounding", "floor rounding") + " loses more per extra "
                      "step than the smaller step recovers, so the Q15 line turns back up "
-                     "while float64 keeps falling. Hover a point for exact values.</p>")
+                     "while float64 keeps falling. Each chart carries its step sizes and "
+                     "both errors in the table beneath it.</p>")
         parts.append(_legend([("var(--s1)", "Q15 fixed point"),
                               ("var(--s2)", "float64, same steps")]))
         parts.append('<div class="charts">'
@@ -2212,8 +2590,11 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "every product loses up to one LSB, always downward (section 1).",
     )),
     ("held-out-set", "held-out set", (
-        "The four problems that decide archive fitness and that the optimizer never sees: "
-        "pendulum, dc_motor, rc_thermal and quaternion.",
+        "The four problems that decide which tableau a cell keeps: pendulum, dc_motor, "
+        "rc_thermal and quaternion. The inner optimizer scores on the search set alone, "
+        "but elites are selected on held-out error and the outer-loop model is shown one "
+        "held-out figure per occupied cell, so a champion's held-out error carries "
+        "selection bias and is not a clean test-set result.",
     )),
     ("hypothesis-ledger", "hypothesis ledger", (
         "An append-only file of falsifiable statements about the archive, each carrying a "
@@ -2276,8 +2657,10 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "method. On this site every tableau is exact fractions, hashed by content.",
     )),
     ("tiers", "tier names", (
-        "The evidence tier a record gets on entering its cell, heldout_verified, "
-        "search_only or unreplicated, by the rules in section 3. The grid ranks on held-out "
+        "The evidence tier a record gets on entering its cell by the rules in section 3: "
+        "heldout_verified, search_only, no_incumbent for an empty cell, no_improvement "
+        "when an incumbent was there and neither applied, and unreplicated, which "
+        "merged those last two. The grid ranks on held-out "
         "error alone, so the heldout_verified count can fall without anything going wrong.",
     )),
     ("verifier-hash", "verifier hash", (
@@ -2390,14 +2773,34 @@ def _validation_chart(data: dict, subset: str = "", caption: str = "") -> str:
             y += group_pad
         return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
                 f'aria-label="Q15 final-state error per method on each {_esc(group)}validation '
-                'problem, log scale">' + "".join(parts) + "</svg>")
+                f'problem, log scale, {len(results)} runs on {len(problems)} '
+                + ("problem" if len(problems) == 1 else "problems")
+                + f'"{_describedby(table_id)}>' + "".join(parts) + "</svg>")
 
+    table_id = ("validation-" + (re.sub(r"[^a-z0-9]+", "-", subset.lower()).strip("-")
+                                 or "all") + "-values")
     svg = _phone_pair(draw(640), draw(430, tips=False))
     model = data.get("cost_model")
     source = ('<p class="note">Source: rk-work/validation/results.json, results. '
               "Arithmetic: Q15 with floor rounding"
               + (f" under {_esc(model)}" if isinstance(model, str) and model else "")
-              + "; hover a dot for the float64 run over the same steps.</p>")
+              + "; the table below this chart carries each run's float64 error over the "
+              "same steps.</p>")
+    trows = []
+    for prob in problems:
+        for m in method_order:
+            r = by[prob].get(m)
+            if r is None:
+                continue
+            kind = kind_of.get(m, "")
+            trows.append((_esc(prob), _esc(_vlabel(str(m), kind)), _esc(kind),
+                          _num(r.get("q15_error")), _num(r.get("float_error")),
+                          _num(r.get("steps")), _num(r.get("cycles_per_step"))))
+    table = _chart_table(
+        table_id, f"Every plotted run, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem", "method", "kind", "Q15 error", "float64 error", "steps",
+         "cycles/step"), trows, num_cols=(3, 4, 5, 6))
     guide = caption or (
         "One row per method within each problem; the dot is final-state Q15 error at the "
         "shared cycle budget on a log axis, so left is better, and each method takes as many "
@@ -2405,7 +2808,7 @@ def _validation_chart(data: dict, subset: str = "", caption: str = "") -> str:
         "anchor; the ringed dot is the problem's lowest error, printed exactly.")
     return (f"<figure><figcaption>{guide}</figcaption>"
             + _legend([("var(--s1)", "discovered (archive)"), ("var(--s2)", "classical anchor")])
-            + svg + source + "</figure>")
+            + svg + source + table + "</figure>")
 
 
 def _filter_validation(data: dict, names: set[str]) -> dict:
@@ -2418,10 +2821,80 @@ def _filter_validation(data: dict, names: set[str]) -> dict:
     return out
 
 
-def _best_table(names: list[str], per: dict, stiff_cols: bool) -> list[str]:
+# The two filters every published win or loss from the validation suite passes through,
+# with the thresholds the methodology page states. A ratio this close to 1.0 is a tie:
+# servo_load_step's 0.007 percent and enzyme_qssa's 0.44 percent were published as a loss
+# and a win, which is a precision this measurement does not have.
+_TIE_BAND = 0.02
+# A field of finishers this tight is reporting the problem, not the method.
+_DEGENERATE_SPREAD = 0.05
+# An error this close to the reference solution's own norm means the integrator returned
+# approximately nothing. validation/results.json carries that norm per problem, on the
+# same scale as the errors; an older document without the field leaves this criterion
+# quiet rather than inviting a guess.
+_DEGENERATE_NORM = 0.05
+# Below this many finishers a spread says nothing: two methods agreeing is not a field.
+_DEGENERATE_MIN_FINISHERS = 3
+_REFERENCE_NORM_KEY = "reference_norm_over_peak"
+
+
+def _finisher_errors(rows) -> list[float]:
+    """Every finite Q15 error among a problem's result rows, ascending."""
+    return sorted(float(r["q15_error"]) for r in rows
+                  if isinstance(r, dict) and _finite_pos(r.get("q15_error")))
+
+
+def degeneracy(problem, rows) -> tuple[bool, str]:
+    """Is this problem's comparison about the methods, or about the problem?
+
+    Returns (flagged, reason). Two criteria, both stated on the methodology page:
+    the finishers' errors span less than _DEGENERATE_SPREAD from best to worst, or every
+    finisher's error sits within _DEGENERATE_NORM of the reference solution's own norm,
+    which means the integrator returned approximately nothing and the error being
+    reported is the reference. The second reads reference_norm_over_peak from the
+    problem's own entry, normalized the way the errors are. A document written before
+    that field existed carries no norm, and then the criterion stays quiet rather than
+    inventing one.
+
+    A third criterion was proposed and dropped: an identical peak magnitude across
+    methods equal to the initial condition. It flags glucose_minimal, whose largest state
+    is its starting one and whose field spans 306 percent, so it does not separate a dead
+    integration from a healthy decay.
+    """
+    errs = _finisher_errors(rows)
+    if len(errs) >= _DEGENERATE_MIN_FINISHERS and errs[0] > 0:
+        spread = (errs[-1] - errs[0]) / errs[0]
+        if spread < _DEGENERATE_SPREAD:
+            return True, (f"the {len(errs)} finishers' Q15 errors span "
+                          f"{spread * 100:.2f} percent from best to worst, under the "
+                          f"{_DEGENERATE_SPREAD * 100:.0f} percent threshold, so the "
+                          "comparison is reporting the problem rather than the method")
+    norm = problem.get(_REFERENCE_NORM_KEY) if isinstance(problem, dict) else None
+    if _finite_pos(norm) and errs:
+        near = [e for e in errs if abs(e - float(norm)) / float(norm) <= _DEGENERATE_NORM]
+        if len(near) == len(errs):
+            return True, (f"every finisher's error sits within "
+                          f"{_DEGENERATE_NORM * 100:.0f} percent of the reference "
+                          f"solution's norm of {_num(norm)}, so the integrated state "
+                          "went to approximately nothing and the error reported is the "
+                          "reference itself")
+    return False, ""
+
+
+def _is_tie(ratio) -> bool:
+    """A ratio inside the tie band, in either direction."""
+    return isinstance(ratio, (int, float)) and abs(float(ratio) - 1.0) <= _TIE_BAND
+
+
+def _best_table(names: list[str], per: dict, stiff_cols: bool,
+                flagged: frozenset = frozenset()) -> list[str]:
     """The best-per-problem rows for one problem group. With stiff_cols, finisher
     counts join the columns and a problem no discovered method finished renders
-    'none finished' instead of numbers (traceable to the overflow notes below)."""
+    'none finished' instead of numbers (traceable to the overflow notes below).
+
+    A ratio inside the tie band renders as a tie rather than as a winner, and a problem
+    the degeneracy filter flagged says so in the same column, because this table is
+    where a reader checks a tally that those two rules changed."""
     head = ('<div class="scroll"><table><tr><th>problem</th><th>winner</th>'
             '<th>best classical</th><th class="num">Q15 error</th>'
             '<th>best discovered</th><th class="num">Q15 error</th>'
@@ -2451,9 +2924,16 @@ def _best_table(names: list[str], per: dict, stiff_cols: bool) -> list[str]:
             best_cls_err = d.get("winner_q15_error")
         cls_cells = (f"<td>{_esc(str(best_cls)) if best_cls is not None else 'n/a'}</td>"
                      f'<td class="num">{_num(best_cls_err)}</td>')
+        if name in flagged:
+            verdict = ('flagged <span class="when">(left out of the tallies)</span>')
+        elif _is_tie(ratio):
+            verdict = (f'tie <span class="when">(inside the '
+                       f'{_TIE_BAND * 100:.0f} percent band)</span>')
+        else:
+            verdict = f'{_esc(winner)} <span class="when">({_esc(wkind)})</span>'
         row = ("<tr>"
                f"<td>{_esc(name)}</td>"
-               f"<td>{_esc(winner)} <span class=\"when\">({_esc(wkind)})</span></td>"
+               f"<td>{verdict}</td>"
                + cls_cells + disc_cells +
                f'<td class="num">{f"{ratio:.3g}" if isinstance(ratio, (int, float)) else "n/a"}</td>')
         if stiff_cols:
@@ -2468,6 +2948,38 @@ def _fold(summary: str, body: str) -> str:
     """A closed generic fold. summary is plain text, body is trusted HTML."""
     return (f'<details class="fold"><summary>{_esc(summary)}</summary>'
             f"<div>{body}</div></details>")
+
+
+def _describedby(table_id: str) -> str:
+    """The aria-describedby attribute for a chart that has a data table, or nothing."""
+    return f' aria-describedby="{_esc(table_id)}"' if table_id else ""
+
+
+def _chart_table(table_id: str, summary: str, head, rows, num_cols=()) -> str:
+    """A chart's plotted values as a folded table the chart points at.
+
+    Every chart carries role="img", which collapses it to one announced node, so the
+    numbers inside the marks are unreachable to a screen reader and unreachable to
+    anyone on a touch screen, where the wide drawing with the mark titles is not even
+    the one on screen. The table is the path to those numbers: static markup, keyboard
+    reachable, and bound to its chart through aria-describedby (see _describedby).
+
+    head is a sequence of column headings, rows a sequence of already-escaped cell
+    tuples, and num_cols the indexes that align right.
+    """
+    if not rows:
+        return ""
+    th = "".join(f'<th{" class=\"num\"" if i in num_cols else ""}>{_esc(h)}</th>'
+                 for i, h in enumerate(head))
+    body = []
+    for row in rows:
+        body.append("<tr>" + "".join(
+            f'<td{" class=\"num\"" if i in num_cols else ""}>{cell}</td>'
+            for i, cell in enumerate(row)) + "</tr>")
+    return (f'<details class="fold" id="{_esc(table_id)}">'
+            f"<summary>{_esc(summary)}</summary><div>"
+            f'<div class="scroll"><table><tr>{th}</tr>' + "".join(body)
+            + "</table></div></div></details>")
 
 
 # The validation suite's own verdict carries two phrases from the epoch it was written
@@ -2488,6 +3000,171 @@ def _suite_verdict(text) -> str:
     for old, new in _VERDICT_SUBS:
         out = out.replace(old, new)
     return out
+
+
+def _champion_section(data, per, flags, practical_names, stiff_names,
+                      n_disc: int, n_cls: int) -> list[str]:
+    """One fixed discovered method against each fixed anchor, on every problem.
+
+    The page's older primary view took the best of the discovered methods against the
+    best of the classical anchors on each row. Both sides are maxima there, and the
+    discovered side is a maximum over a set that was itself selected on error, so the
+    win rate it reports rises with the number of discovered methods run. This table has
+    no maximum in it: the comparator is the archive champion, fixed before the suite ran,
+    and every anchor gets its own column.
+    """
+    gen = data.get("generated_from") if isinstance(data.get("generated_from"), dict) else {}
+    champ = str(gen.get("champion_hash") or "")
+    methods = [m for m in (data.get("methods") or []) if isinstance(m, dict)]
+    anchors = [str(m.get("name_or_hash")) for m in methods
+               if str(m.get("kind")) == "classical"]
+    names = [str(p.get("name")) for p in (data.get("problems") or [])
+             if isinstance(p, dict)]
+    names += [n for n in list(practical_names) + list(stiff_names) if n not in names]
+    by = {(str(r.get("problem")), str(r.get("method"))): r
+          for r in (data.get("results") or []) if isinstance(r, dict)}
+    if not (champ and anchors and names):
+        return []
+    entry = next((m for m in methods if str(m.get("name_or_hash")) == champ), None)
+    arch = entry.get("archive") if isinstance(entry, dict) else None
+    where = []
+    if isinstance(arch, dict) and arch.get("cycle_id") is not None:
+        where.append(f"at cycle {_num(arch.get('cycle_id'))}")
+    if isinstance(gen.get("archive_records"), int):
+        where.append(f"out of {_count(gen['archive_records'])} archived records")
+    chosen = (" It was picked " + " ".join(where) + ", before this suite ran."
+              if where else "")
+    parts = [
+        "<p>The comparator here is fixed: the archive champion "
+        f'<span class="hash">{_esc(champ[:12])}</span>, the elite with the lowest '
+        + _gloss("held-out-set", "held-out") + " error when the suite was built, with its "
+        "coefficients unchanged." + chosen + f" It runs against each of the {n_cls} "
+        f"classical anchors on all {len(names)} problems. "
+        "Each cell gives that anchor's Q15 error and one word for the champion against "
+        "it: lower, higher, or tie when the two sit inside the "
+        + f"{_TIE_BAND * 100:.0f} percent band.</p>",
+        # The first use of the term on this page, linked, and the place the distinction
+        # bites: the champion was chosen on held-out error, and these problems chose
+        # nothing.
+        '<p class="note">The problems on this page are not the '
+        + _gloss("held-out-set", "held-out set") + ". Those four select the archive's "
+        "elites, so a champion's held-out error carries selection bias; these select "
+        "nothing, which is what makes them the harder test.</p>"]
+
+    def _err(problem: str, method: str):
+        r = by.get((problem, method))
+        return r.get("q15_error") if isinstance(r, dict) else None
+
+    head = ('<div class="scroll"><table><tr><th>problem</th>'
+            '<th class="num">champion Q15 error</th>'
+            + "".join(f'<th class="num">{_esc(a)}</th>' for a in anchors) + "</tr>")
+    body = [head]
+    lower = higher = tied = 0
+    for name in names:
+        ce = _err(name, champ)
+        cells = []
+        for a in anchors:
+            ae = _err(name, a)
+            if not (_finite_pos(ce) and _finite_pos(ae)):
+                cells.append('<td class="num">' + _num(ae) + "</td>")
+                continue
+            ratio = float(ce) / float(ae)
+            if name in flags:
+                word = "flagged"
+            elif _is_tie(ratio):
+                word = "tie"
+                tied += 1
+            elif ratio < 1.0:
+                word = "lower"
+                lower += 1
+            else:
+                word = "higher"
+                higher += 1
+            cells.append(f'<td class="num">{_num(ae)} '
+                         f'<span class="when">({word})</span></td>')
+        champ_cell = (_num(ce) if _finite_pos(ce)
+                      else '<span class="when">no finish</span>')
+        body.append(f"<tr><td>{_esc(name)}</td><td class=\"num\">{champ_cell}</td>"
+                    + "".join(cells) + "</tr>")
+    body.append("</table></div>")
+    parts.append("\n".join(body))
+
+    def _vs_best(group) -> tuple[int, int, int]:
+        """(champion lower, comparisons, ties) against the best anchor per problem."""
+        win = cmp_ = tie = 0
+        for name in group:
+            if name in flags:
+                continue
+            ce = _err(name, champ)
+            errs = [float(_err(name, a)) for a in anchors if _finite_pos(_err(name, a))]
+            if not (_finite_pos(ce) and errs):
+                continue
+            cmp_ += 1
+            ratio = float(ce) / min(errs)
+            if _is_tie(ratio):
+                tie += 1
+            elif ratio < 1.0:
+                win += 1
+        return win, cmp_, tie
+
+    pw, pc, pt = _vs_best(practical_names)
+    sw, sc, st = _vs_best(stiff_names)
+    cells_total = lower + higher + tied
+    bits = []
+    if cells_total:
+        bits.append(f"Of the {cells_total} cells in this table where both methods finish "
+                    f"and the problem is not flagged, the champion has the lower Q15 "
+                    f"error in {lower}, the higher error in {higher}, and {tied} "
+                    + ("is a tie" if tied == 1 else "are ties") + ".")
+    if pc:
+        bits.append(f"Against the best of the {n_cls} anchors on each problem it is lower "
+                    f"on {pw} of {pc} non-stiff problems"
+                    + (f", with {pt} " + ("tie" if pt == 1 else "ties") if pt else "")
+                    + ".")
+    if sc:
+        bits.append(f"On the stiff problems where both sides finish it is lower on "
+                    f"{sw} of {sc}"
+                    + (f", with {st} " + ("tie" if st == 1 else "ties") if st else "")
+                    + ".")
+    bits.append(f"That is 1 discovered method against {n_cls} classical anchors, on "
+                "every row, with no maximum taken on either side.")
+    parts.append("<p>" + " ".join(bits) + "</p>")
+
+    # The champion is not always the discovered method that wins a row. Saying so is the
+    # difference between this table's tally and the max-over-both tally in the fold.
+    others = []
+    for name in practical_names:
+        if name in flags:
+            continue
+        d = per.get(name)
+        if not isinstance(d, dict) or str(d.get("winner_kind")) != "discovered":
+            continue
+        if str(d.get("winner")) and str(d.get("winner")) != champ:
+            others.append(name)
+    if others:
+        one = others[0]
+        d = per.get(one) or {}
+        parts.append(
+            f'<p class="note">On {_esc(one)} the champion is not the discovered method '
+            f"with the lowest error: "
+            f'<span class="hash">{_esc(str(d.get("winner"))[:12])}</span> reaches '
+            f"{_num(d.get('winner_q15_error'))} while the champion reaches "
+            f"{_num(_err(one, champ))}. A row like that counts for the discovered side "
+            "in the maximum-over-both view below and against the champion here, which is "
+            "the whole difference between the two tallies.</p>")
+    if flags:
+        rows = "".join(
+            f"<tr><td>{_esc(n)}</td>"
+            f'<td class="num">{len(_finisher_errors([r for (p, _m), r in by.items() if p == n]))}</td>'
+            f"<td>{_esc(flags[n])}</td></tr>" for n in sorted(flags))
+        parts.append("<h3>Problems left out of the tallies</h3>")
+        parts.append('<div class="scroll"><table><tr><th>problem</th>'
+                     '<th class="num">finishers</th><th>why it is flagged</th></tr>'
+                     + rows + "</table></div>")
+        parts.append('<p class="note">A flagged problem stays in the tables above and out '
+                     "of every count, and the thresholds behind the flag are on the "
+                     '<a href="methodology.html#meth-protocol">methodology page</a>.</p>')
+    return parts
 
 
 def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
@@ -2514,46 +3191,107 @@ def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
         "same " + _gloss("cycle-budget", "cycle budget") + f", {_num(budget)} cycles under "
         f"{_esc(data.get('cost_model'))} with "
         + _gloss("floor-rounding", "floor rounding") + ", and each run is scored by its "
-        "final-state error against an independent reference solution.</p>"
+        "final-state error against an independent reference solution.</p>",
     ]
+    stamp = _doc_stamp(data.get("generated_from"),
+                       "The suite below reads validation/results.json")
+    if stamp:
+        parts.append(stamp)
 
     def _ratio_card(v) -> str:
-        return f"{v:.3g}" if isinstance(v, (int, float)) else "n/a"
+        # Three decimals rather than three significant figures: a median of 1.000069 is
+        # a tie by a hair, and .3g printed it as a flat "1", which reads as a number the
+        # measurement produced rather than as two errors that agree to five decimals.
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return "n/a"
+        return f"{v:.3f}" if 0.001 <= abs(v) < 1000 else f"{v:.3g}"
 
+    # Two filters stand between the stored verdicts and every tally on this page: the tie
+    # band, and the degeneracy flag. They are applied here rather than in validation.py
+    # because that document's numbers only change on a host validation run, and the
+    # arithmetic they change is presentation, not measurement.
+    rows_by_problem: dict[str, list[dict]] = {}
+    for r in results:
+        rows_by_problem.setdefault(str(r.get("problem")), []).append(r)
+    pmeta = {str(p.get("name")): p for p in problems if isinstance(p, dict)}
+    flags: dict[str, str] = {}
+    for name in sorted(set(pmeta) | set(per)):
+        bad, why = degeneracy(pmeta.get(name, {}), rows_by_problem.get(name, []))
+        if bad:
+            flags[name] = why
+    flagged = frozenset(flags)
+    n_disc = sum(1 for m in methods if str(m.get("kind")) == "discovered")
+    n_cls = sum(1 for m in methods if str(m.get("kind")) == "classical")
+
+    def _tally(names) -> tuple[int, int, int, list[float]]:
+        """(won by a discovered method, compared, ties, ratios) after both filters."""
+        won = ties = 0
+        ratios: list[float] = []
+        for nm in names:
+            if nm in flagged:
+                continue
+            d = per.get(nm)
+            if not isinstance(d, dict):
+                continue
+            ratio = d.get("ratio_discovered_over_classical")
+            if not _finite_pos(ratio):
+                continue
+            ratios.append(float(ratio))
+            if _is_tie(ratio):
+                ties += 1
+            elif float(ratio) < 1.0:
+                won += 1
+        return won, len(ratios), ties, ratios
+
+    def _filters_clause(ties: int, names) -> str:
+        out = ""
+        if ties:
+            out += (f"; {ties} of them "
+                    + ("is a tie" if ties == 1 else "are ties")
+                    + f" inside the {_TIE_BAND * 100:.0f} percent band")
+        left = sorted(n for n in names if n in flagged)
+        if left:
+            out += (f"; {len(left)} left out as degenerate (" + ", ".join(left) + ")")
+        return out
+
+    p_won, p_cmp, p_ties, p_ratios = _tally(practical_names)
+    s_won, s_cmp, s_ties, s_ratios = _tally(stiff_names)
     if has_stiff:
         cards = [
-            ("practical problems",
-             f"{_num(verdicts.get('practical_problems_won_by_discovered'))} of "
-             f"{_num(verdicts.get('practical_problems_compared'))}",
-             "non-stiff problems won by a discovered method"),
+            ("practical problems", f"{p_won} of {p_cmp}",
+             f"non-stiff problems where the best of {n_disc} discovered methods ends with "
+             f"a lower Q15 error than the best of {n_cls} classical anchors"
+             + _filters_clause(p_ties, practical_names)),
             ("practical median ratio",
-             _ratio_card(verdicts.get("practical_median_ratio_discovered_over_classical")),
-             "best discovered over best classical; below 1.0 favors discovered"),
-            ("stiff problems",
-             f"{_num(verdicts.get('stiff_problems_won_by_discovered'))} of "
-             f"{_num(verdicts.get('stiff_problems_compared'))}",
-             "won by a discovered method where both sides finish"),
-            ("stiff median ratio",
-             _ratio_card(verdicts.get("stiff_median_ratio_discovered_over_classical")),
-             "over the stiff problems both sides finish"),
+             _ratio_card(_median(p_ratios) if p_ratios else None),
+             "best discovered over best classical on those problems; below 1.0 favors "
+             "discovered"),
+            ("stiff problems", f"{s_won} of {s_cmp}",
+             f"stiff problems where both sides finish, best of {n_disc} discovered "
+             f"against best of {n_cls} classical" + _filters_clause(s_ties, stiff_names)),
+            ("stiff median ratio", _ratio_card(_median(s_ratios) if s_ratios else None),
+             "over the stiff problems both sides finish, after the two filters"),
             ("no discovered finisher",
              f"{_num(verdicts.get('stiff_problems_with_no_discovered_finisher'))} of "
              f"{_num(verdicts.get('stiff_problems_total'))}",
              "stiff problems where every discovered method overflows"),
         ]
     else:
-        won = verdicts.get("problems_won_by_discovered")
-        compared = verdicts.get("problems_compared")
         cards = [
-            ("problems", _num(compared), "from embedded application domains"),
-            ("won by discovered", f"{_num(won)} of {_num(compared)}",
-             "lower Q15 error than every anchor"),
-            ("median error ratio",
-             _ratio_card(verdicts.get("median_ratio_discovered_over_classical")),
+            ("problems", _num(len(practical_names)),
+             "from embedded application domains"),
+            ("won by discovered", f"{p_won} of {p_cmp}",
+             f"the best of {n_disc} discovered methods ends with a lower Q15 error than "
+             f"the best of {n_cls} classical anchors"
+             + _filters_clause(p_ties, practical_names)),
+            ("median error ratio", _ratio_card(_median(p_ratios) if p_ratios else None),
              "best discovered over best classical; below 1.0 favors discovered"),
         ]
     parts.append(_cards(cards))
-    speed = _speed_sentence(benchmark)
+    # The ordering claim only. The head-to-head figures this sentence carries elsewhere
+    # are a screen below in their own section, with the table they come from, so on this
+    # page the long form would state them twice and send the reader to where they are.
+    speed = _speed_sentence(benchmark, full=False)
     if speed:
         parts.append(f"<p>{speed}</p>")
     if has_stiff:
@@ -2574,24 +3312,43 @@ def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
         chart = _validation_chart(data)
         if chart:
             parts.append('<div class="panel">' + chart + "</div>")
-    parts.append("<h2>Best per problem</h2>")
+    parts.append("<h2>The champion against each anchor</h2>")
+    parts.extend(_champion_section(data, per, flags, practical_names, stiff_names,
+                                   n_disc, n_cls))
+    inner: list[str] = []
     if has_stiff:
-        parts.append("<h3>Practical (non-stiff)</h3>")
-        parts.extend(_best_table(practical_names, per, stiff_cols=False))
-        parts.append("<h3>Stiff</h3>")
-        parts.extend(_best_table(stiff_names, per, stiff_cols=True))
+        inner.append("<h3>Practical (non-stiff)</h3>")
+        inner.extend(_best_table(practical_names, per, False, flagged))
+        inner.append("<h3>Stiff</h3>")
+        inner.extend(_best_table(stiff_names, per, True, flagged))
     else:
-        parts.extend(_best_table(practical_names, per, stiff_cols=False))
-    parts.append('<p class="note">ratio is best-discovered over best-classical Q15 error; '
-                 "below 1.0 the discovered method has the lower error.</p>")
+        inner.extend(_best_table(practical_names, per, False, flagged))
+    inner.append('<p class="note">ratio is best-discovered over best-classical Q15 error; '
+                 "below 1.0 the discovered method has the lower error. Each row takes a "
+                 f"maximum over both sides, {n_disc} discovered methods against "
+                 f"{n_cls} classical anchors, so the discovered column has more chances "
+                 "to produce the row's best number and this view reads better for it than "
+                 "the fixed comparison above.</p>")
+    parts.append(_fold(f"Best per problem, a maximum over {n_disc} discovered and "
+                       f"{n_cls} classical methods", "\n".join(inner)))
 
     folds: list[str] = []
     # The suite's own verdict restates the cards in prose, so it waits in a fold and the
     # page reaches its first chart inside one screen.
     overall = verdicts.get("overall")
     if overall:
-        folds.append(_fold("The suite's verdict, in words",
-                           f"<p>{_esc(_suite_verdict(overall))}</p>"))
+        folds.append(_fold(
+            "The suite's verdict, in words",
+            f'<p class="quoted">{_esc(_suite_verdict(overall))}</p>'
+            '<p class="note">'
+            + _esc("That paragraph is quoted from validation/results.json, which counted "
+                   "its wins and losses before the tie band and the degeneracy filter "
+                   f"existed and over a maximum of {n_disc} discovered methods against a "
+                   f"maximum of {n_cls} classical anchors. Where it differs from the "
+                   "tallies above, the tallies above are this page applying both "
+                   "filters; rewriting the stored sentence needs a host validation run, "
+                   "not a site build.")
+            + "</p>"))
     table = []
     floats = [r.get("float_error") for r in results if _finite_pos(r.get("float_error"))]
     maxq = [r.get("max_abs_q") for r in results if isinstance(r.get("max_abs_q"), int)]
@@ -2602,6 +3359,30 @@ def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
             f"magnitude seen anywhere is {max(maxq)} of the int16 limit 32767. Where a "
             "row's float64 error sits far below its Q15 error, the Q15 number measures "
             "quantization, not truncation.</p>")
+    # The same tableau reads 44 cycles per step on one problem and 66 on another, while
+    # the archive publishes 22 for it. The column says why rather than leaving the reader
+    # to reconcile the three.
+    champ_hash = str((data.get("generated_from") or {}).get("champion_hash") or "")
+    nstates = {str(p.get("name")): p.get("n_states") for p in problems
+               if isinstance(p, dict)}
+    per_state: dict[int, int] = {}
+    for r in results:
+        if str(r.get("method")) != champ_hash:
+            continue
+        ns, c = nstates.get(str(r.get("problem"))), r.get("cycles_per_step")
+        if isinstance(ns, int) and isinstance(c, int) and ns > 0 and c % ns == 0:
+            per_state[ns] = c
+    bases = {c // ns for ns, c in per_state.items()}
+    if per_state and len(bases) == 1:
+        basis = bases.pop()
+        shown = " and ".join(f"{c} on the {_num(ns)}-state problems"
+                             for ns, c in sorted(per_state.items()))
+        table.append(
+            f"<p>The cycles/step column is one method's analytic cost for one step of "
+            f"that problem, so a single method shows more than one number here: the cost "
+            f"model prices a step at one state and multiplies by the problem's state "
+            f"count. The champion costs {basis} cycles per step at one state, which is "
+            f"the figure the archive and the frontier chart carry, and {shown}.</p>")
     any_note = any(r.get("note") for r in results)
     table.append('<div class="scroll"><table><tr><th>problem</th><th>method</th><th>kind</th>'
                  '<th class="num">steps</th><th class="num">cycles/step</th>'
@@ -2699,7 +3480,7 @@ def _provenance_dl(gen: dict) -> str:
 
 
 def render_validation(data: dict | None = None, benchmark: dict | None = None,
-                      falsification: dict | None = None) -> str:
+                      falsification: dict | None = None, trace: dict | None = None) -> str:
     """The evidence that spans classes: validation suite, measured speed, premise test.
 
     Written when any of the three sources exists. Each section says so in words when
@@ -2719,6 +3500,8 @@ def render_validation(data: dict | None = None, benchmark: dict | None = None,
                      '<a href="#falsification">falsification experiment</a> that ran '
                      "before any search.</p>")
     parts.extend(_speed_section(benchmark))
+    if trace is not None:
+        parts.extend(_trace_section(trace))
     parts.extend(_falsification_section(falsification))
     prov = []
     if isinstance(data, dict) and isinstance(data.get("generated_from"), dict):
@@ -2732,7 +3515,12 @@ def render_validation(data: dict | None = None, benchmark: dict | None = None,
         parts.append("<h2>Full tables</h2>")
         parts.extend(folds)
     return _page("Validation", "\n".join(parts), active="validation.html",
-                 subtitle="Problems no search saw, measured speed, and the premise test.")
+                 subtitle="Problems no search saw, measured speed, and the premise test.",
+                 doc_title=_doc_title("Validation"),
+                 description="Evidence that spans the method classes: a validation suite "
+                             "of problems from embedded application domains, the measured "
+                             "time per Q15 step, and the falsification experiment that ran "
+                             "before any search.")
 
 
 # ----------------------------------------------------------------------------
@@ -2747,6 +3535,9 @@ def _nice_step(raw: float) -> float:
         if raw <= m * mag:
             return m * mag
     return 10.0 * mag
+
+
+_BENCH_TABLE = "bench-us-values"
 
 
 def _bench_us_chart(sp: dict, methods: list, protocol=None) -> str:
@@ -2801,9 +3592,9 @@ def _bench_us_chart(sp: dict, methods: list, protocol=None) -> str:
         med = float(d["median_us_per_step"])
         bw = med * px_per_us
         parts.append(f'<text x="{ml - 8}" y="{_fmt(y + 15)}" text-anchor="end">{_esc(label)}</text>')
-        title = (f"{label} ({kind}): median {_num(med)} us per Q15 step over "
-                 f"{_num(d.get('n_problems'))} problems; min {_num(d.get('min_us_per_step'))}, "
-                 f"max {_num(d.get('max_us_per_step'))}")
+        title = (f"{label} ({kind}): median {_us(med)} us per Q15 step over "
+                 f"{_num(d.get('n_problems'))} problems; min {_us(d.get('min_us_per_step'))}, "
+                 f"max {_us(d.get('max_us_per_step'))}")
         parts.append(f'<rect x="{ml}" y="{y}" width="{_fmt(max(bw, 2))}" height="20" rx="4" '
                      f'fill="{sw}" fill-opacity="0.35"><title>{_esc(title)}</title></rect>')
         for prob in sorted((d.get("per_problem_us_per_step") or {}).keys()):
@@ -2811,12 +3602,27 @@ def _bench_us_chart(sp: dict, methods: list, protocol=None) -> str:
             if _finite_pos(v):
                 parts.append(f'<circle cx="{_fmt(fx(float(v)))}" cy="{_fmt(y + 10)}" r="4" '
                              f'fill="{sw}" class="cellstroke">'
-                             f'<title>{_esc(f"{label} / {prob}: {_num(v)} us per step")}</title></circle>')
+                             f'<title>{_esc(f"{label} / {prob}: {_us(v)} us per step")}</title></circle>')
         parts.append(f'<text class="lbl" x="{w - 8}" y="{_fmt(y + 15)}" '
-                     f'text-anchor="end">{_num(med)}</text>')
+                     f'text-anchor="end">{_us(med)}</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
-           'aria-label="Measured microseconds per Q15 step, per method">'
-           + "".join(parts) + "</svg>")
+           f'aria-label="Measured microseconds per Q15 step, per method, {len(rows)} '
+           + ("method" if len(rows) == 1 else "methods")
+           + f'"{_describedby(_BENCH_TABLE)}>' + "".join(parts) + "</svg>")
+    trows = []
+    for name, d in rows:
+        label = _vlabel(name, kind_of.get(name, ""))
+        trows.append((_esc(label), "median over its problems",
+                      _us(d.get("median_us_per_step")), _num(d.get("n_problems"))))
+        for prob in sorted((d.get("per_problem_us_per_step") or {}).keys()):
+            v = d["per_problem_us_per_step"][prob]
+            if _finite_pos(v):
+                trows.append((_esc(label), _esc(prob), _us(v), ""))
+    table = _chart_table(
+        _BENCH_TABLE, f"Every plotted value, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("method", "problem", "microseconds per Q15 step", "problems in the median"),
+        trows, num_cols=(2, 3))
     how = ""
     if isinstance(protocol, dict):
         clock, reps, warm = (protocol.get("clock"), protocol.get("n_repeats"),
@@ -2827,15 +3633,15 @@ def _bench_us_chart(sp: dict, methods: list, protocol=None) -> str:
             "axis in microseconds. The faded bar and the number at the right are the "
             "median across the benchmark problems; each dot is one problem. Every method "
             "runs the same pinned solve_q15 path, so row differences isolate tableau cost. "
-            "Blue is a discovered method, orange a classical anchor; hover any mark for "
-            "exact values.</figcaption>"
+            "Blue is a discovered method, orange a classical anchor; the table under the "
+            "chart carries every median and every per-problem value.</figcaption>"
             + _legend([("var(--s1)", "discovered (archive)"), ("var(--s2)", "classical anchor")])
             + svg + '<p class="note">Source: rk-work/benchmark/results.json, '
             "speedup.per_method_us_per_step. Python wall clock of the pinned solve_q15 path "
-            "in Q15" + how + ".</p></figure>")
+            "in Q15" + how + ".</p>" + table + "</figure>")
 
 
-def _speed_sentence(bench) -> str:
+def _speed_sentence(bench, full: bool = True) -> str:
     """One measured-speed sentence for verdict spots, traced to the speedup section.
 
     Returns an empty string when the benchmark file (or any cited field) is absent,
@@ -2856,12 +3662,29 @@ def _speed_sentence(bench) -> str:
     gm = sp.get("geomean_measured_speedup_rk4_over_champion")
     if not (_finite_pos(cm) and _finite_pos(bm) and _finite_pos(gm)):
         return ""
-    return ("Measured wall clock agrees with the cycle model: in the benchmark head-to-head "
-            f"the champion tableau ({_esc(champ[:8])}) runs in {_num(cm)} us per Q15 step "
-            f"against {_num(bm)} us for {_esc(base)} (medians across "
-            f"{_num(sp.get('n_problems_compared'))} problems, geometric-mean per-step "
-            f'speedup {float(gm):.3f}x). Details are in the <a href="validation.html#speed">'
-            "measured speed section</a>.")
+    ordering = ("Python wall clock on a desktop preserves the cycle model's ordering, "
+                "and the cycle counts are modeled rather than measured on a Cortex-M0+.")
+    # The short form is for validation.html, which carries the speed table, the
+    # benchmark's own verdict and the correlation that verdict quotes. Stating the
+    # correlation here as well would print it twice on the one page that explains it.
+    if not full:
+        return ordering
+    corr = bench.get("correlation") if isinstance(bench.get("correlation"), dict) else {}
+    r, n = corr.get("pearson_r"), corr.get("n_points")
+    if _finite_num(r) and isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        lead = (f"Python wall clock on a desktop preserves the cycle model's ordering "
+                f"(Pearson r {float(r):.3f} over {n} fixed-step Q15 runs), and the cycle "
+                "counts are modeled rather than measured on a Cortex-M0+. ")
+    else:
+        lead = ordering + " "
+    return (lead
+            + f"In the benchmark head-to-head the champion tableau ({_esc(champ[:8])}) "
+            f"runs in {_us(cm)} us per Q15 step against {_us(bm)} us for {_esc(base)}, "
+            f"each a median over that method's own {_num(sp.get('n_problems_compared'))} "
+            f"problems. The per-step speedup of {float(gm):.3f}x is the geometric mean of "
+            "the per-problem ratios, so it is not the quotient of those two medians. "
+            'Details are in the <a href="validation.html#speed">measured speed '
+            "section</a>.")
 
 
 def _speed_section(data) -> list[str]:
@@ -2910,8 +3733,8 @@ def _speed_section(data) -> list[str]:
             body.append(
                 "<tr>"
                 f"<td>{_esc(str(r.get('problem')))}</td>"
-                f'<td class="num">{_num(r.get("champion_us_per_step"))}</td>'
-                f'<td class="num">{_num(r.get("rk4_us_per_step"))}</td>'
+                f'<td class="num">{_us(r.get("champion_us_per_step"))}</td>'
+                f'<td class="num">{_us(r.get("rk4_us_per_step"))}</td>'
                 f'<td class="num">{_ratio(r.get("predicted_ratio_rk4_over_champion"))}</td>'
                 f'<td class="num">{_ratio(r.get("measured_ratio_rk4_over_champion"))}</td>'
                 f'<td class="num">{_num(r.get("champion_error"))}</td>'
@@ -2922,22 +3745,28 @@ def _speed_section(data) -> list[str]:
         parts.append("\n".join(body))
     bits = []
     if _finite_pos(gm_m) and _finite_pos(gm_p):
-        # The measured mean is in the sentence at the top of this page, so this line
-        # carries what is new beside it: what the cycle model predicted.
-        bits.append((f"The cycle model predicts {float(gm_p):.3f}."
-                     if _speed_sentence(data) else
-                     f"Geometric mean over the problems: measured {float(gm_m):.3f}, "
-                     f"predicted {float(gm_p):.3f}.")
-                    + " A ratio above 1.0 means the champion needs less time per step.")
+        # Where the headline ratio comes from, next to the table it is taken over. A
+        # reader who divides the chart's two medians gets a third number, because those
+        # medians are each taken over one method's own problems.
+        bits.append(f"Geometric mean over the problems: measured {float(gm_m):.3f}, "
+                    f"predicted {float(gm_p):.3f}. A ratio above 1.0 means the champion "
+                    "needs less time per step. The measured mean is taken over the "
+                    "per-problem ratios in this table, and the chart's two medians are "
+                    "each taken over that method's own problems, so their quotient is a "
+                    "different number again.")
     if isinstance(sp.get("champion_error_lower_count"), int):
         ratio = sp.get("median_error_ratio_champion_over_rk4")
+        # The head-to-head is 1 discovered method against 1 classical baseline, and the
+        # tally says so: every win count on this site carries the size of both sides.
         bits.append(f"At the same budget the champion reaches the lower Q15 error on "
                     f"{_num(sp.get('champion_error_lower_count'))} of "
-                    f"{_num(sp.get('error_comparisons'))} problems, with a median error "
-                    f"ratio (champion over {_esc(base or 'baseline')}) of "
+                    f"{_num(sp.get('error_comparisons'))} problems, 1 discovered method "
+                    f"against 1 classical baseline ({_esc(base or 'baseline')}), with a "
+                    "median error ratio of "
                     + (f"{float(ratio):.3g}" if _finite_pos(ratio) else _num(ratio)) + ".")
     # The benchmark's cycle-model verdict states the correlation with its caveat; the
-    # page composes its own sentence only when that verdict is missing.
+    # page composes its own sentence only when that verdict is missing. The ordering
+    # sentence at the top of this page names no correlation, for that reason.
     if _finite_pos(corr.get("pearson_r")) and not verdicts.get("cycle_model"):
         bits.append(f"Cycle count and measured time correlate with Pearson r = "
                     f"{float(corr['pearson_r']):.3f} over {_num(corr.get('n_points'))} "
@@ -2972,6 +3801,254 @@ def _speed_section(data) -> list[str]:
 
 
 # ----------------------------------------------------------------------------
+# the compiled trace against the cost model (validation.html#trace)
+# ----------------------------------------------------------------------------
+
+# The tolerance band the audit proposed for |analytic - traced| / traced. It is not a
+# threshold the page enforces: rows outside it are published with the diagnosis, which
+# is the point of running the comparison at all.
+_TRACE_BAND = 0.25
+_TRACE_TABLE = "trace-values"
+_TRACE_MODEL = "m0plus_fast"
+
+
+def _trace_rows(doc) -> list[dict]:
+    if not isinstance(doc, dict):
+        return []
+    return [m for m in (doc.get("methods") or []) if isinstance(m, dict)]
+
+
+def _tnum(node, key: str, model: str = _TRACE_MODEL):
+    """One cost-model reading out of a per-method block, or None."""
+    if not isinstance(node, dict):
+        return None
+    inner = node.get(key)
+    if not isinstance(inner, dict):
+        return None
+    v = inner.get(model)
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _trace_assumption_list(doc) -> str:
+    """The TRM assumptions, in the document's own order of keys."""
+    a = doc.get("assumptions") if isinstance(doc.get("assumptions"), dict) else {}
+    if not a:
+        return ""
+    label = {
+        "flash": "flash", "bus": "bus", "interrupts": "interrupts",
+        "branch_taken_cycles": "taken branch", "branch_not_taken_cycles": "branch not taken",
+        "load_cycles": "LDR", "store_cycles": "STR",
+        "muls_cycles_fast_variant": "MULS on the fast multiplier",
+        "muls_cycles_small_variant": "MULS on the small multiplier",
+        "data_processing_cycles": "data processing", "bl_cycles": "BL",
+        "multi_register_cycles": "multi-register transfer",
+    }
+    bits = []
+    for key in sorted(a):
+        v = a[key]
+        name = label.get(key, str(key).replace("_", " "))
+        if isinstance(v, str):
+            shown = _esc(v)
+        else:
+            shown = _num(v) + (" cycle" if v == 1 else " cycles")
+        bits.append(f"<li>{_esc(name)}: {shown}</li>")
+    return "<ul>" + "".join(bits) + "</ul>"
+
+
+def _trace_section(doc) -> list[str]:
+    """The analytic cost model against a compiled, executed, TRM-priced instruction stream.
+
+    Two scopes live in this document and they must never be mixed. cycles_analytic
+    prices the stage and b combinations only: no derivative call, no h times k product,
+    no loop control, no stack frame. The comparison table therefore reads the traced
+    number restricted to that same scope, and the whole-step figures sit in a fold that
+    says what they include.
+    """
+    parts = ['<h2 id="trace">Compiled and traced against the cost model</h2>']
+    rows = _trace_rows(doc)
+    if not rows:
+        parts.append('<p class="note">rk-work/trace/results.json has not been written in '
+                     "this work directory, so the cost model is not compared against a "
+                     "compiled instruction stream here.</p>")
+        return parts
+    tool = doc.get("toolchain") if isinstance(doc.get("toolchain"), dict) else {}
+    acc = doc.get("accuracy") if isinstance(doc.get("accuracy"), dict) else {}
+    verdicts = doc.get("verdicts") if isinstance(doc.get("verdicts"), dict) else {}
+    corr = doc.get("correlation") if isinstance(doc.get("correlation"), dict) else {}
+    compiler = str(tool.get("compiler") or "arm-none-eabi-gcc")
+    emulator = str(tool.get("emulator") or "an instruction-accurate emulator")
+    flags = [str(f) for f in (tool.get("flags") or []) if str(f).startswith("-mcpu")]
+    parts.append(
+        "<p>The " + _gloss("costmodel", "cost model") + " is analytic. It derives an "
+        "instruction sequence from a tableau's sparsity pattern and each coefficient's "
+        "bit pattern and prices it, and no compiler is in that loop. This section is what "
+        "happened when the Q15 step it describes was compiled for "
+        + _esc(flags[0][6:] if flags else "cortex-m0plus") + " with " + _esc(compiler)
+        + " at -O2, executed under " + _esc(emulator) + ", and the executed instructions "
+        "were priced against the Cortex-M0+ technical reference manual's cycle table.</p>")
+    statement = acc.get("statement")
+    if isinstance(statement, str) and statement.strip():
+        parts.append(f"<p>{_esc(statement.strip())}</p>")
+    cases = sum(int(m.get("crosscheck", {}).get("cases") or 0) for m in rows)
+    matched = sum(int(m.get("crosscheck", {}).get("matched") or 0) for m in rows)
+    overflow = sum(int(m.get("crosscheck", {}).get("overflow_cases") or 0) for m in rows)
+    trapped = sum(int(m.get("crosscheck", {}).get("trap_index_matched") or 0) for m in rows)
+    if cases:
+        agree = (f"all {cases} agree" if matched == cases
+                 else f"{matched} of the {cases} agree")
+        traps = ("all of them" if overflow and trapped == overflow
+                 else f"{trapped} of them")
+        parts.append(
+            f"<p>Correctness came before any timing number. The compiled step ran against "
+            f"the pinned Python evaluator over {cases} cases, compared on the exact final "
+            f"int16 state and on every stage input, and {agree}. {overflow} of the cases "
+            f"push the Q15 primitives past the range they check, where they raise instead "
+            f"of wrapping, and the checked build traps at the same operation in "
+            f"{traps}.</p>")
+    scope = verdicts.get("scope")
+    if isinstance(scope, str) and scope.strip():
+        parts.append(f"<p>{_esc(scope.strip())}</p>")
+
+    body = ['<div class="scroll"><table><tr><th>method</th><th class="num">stages</th>'
+            '<th class="num">cycles_analytic</th>'
+            '<th class="num">cycles_traced, matched scope</th>'
+            '<th class="num">ratio</th><th class="num">MULS per step</th>'
+            "<th>outside the band</th></tr>"]
+    outside = []
+    for m in rows:
+        ana = _tnum(m, "cycles_analytic")
+        tr = _tnum(m, "cycles_traced_model_scope")
+        ratio = _tnum(m, "ratio_model_scope")
+        gap = _tnum(m, "relative_gap_model_scope")
+        over = isinstance(gap, (int, float)) and gap > _TRACE_BAND
+        if over:
+            outside.append((str(m.get("name")), gap))
+        body.append(
+            "<tr>"
+            f'<td class="hash">{_esc(str(m.get("name")))}</td>'
+            f'<td class="num">{_num(m.get("stages"))}</td>'
+            f'<td class="num">{_num(ana)}</td><td class="num">{_num(tr)}</td>'
+            f'<td class="num">{f"{ratio:.3f}" if isinstance(ratio, (int, float)) else "n/a"}</td>'
+            f'<td class="num">{_num(m.get("muls_per_step"))}</td>'
+            f"<td>{'yes, gap ' + f'{gap:.3f}' if over else 'no'}</td>"
+            "</tr>")
+    body.append("</table></div>")
+    parts.append("\n".join(body))
+    parts.append('<p class="note">Both columns are at n_states = 1 under '
+                 + _esc(_TRACE_MODEL) + ". The traced column is restricted to what "
+                 "cycle_count prices, which is the stage and b combinations: it excludes "
+                 "the derivative call, the h times k product, loop control and the stack "
+                 "frame. The whole-step figures are in the fold below and do not compare "
+                 "with cycles_analytic.</p>")
+
+    if outside:
+        named = ", ".join(f"{_esc(n)} at {g:.3f}" for n, g in outside)
+        parts.append(
+            f"<p>{len(outside)} of {len(rows)} methods sit outside the "
+            f"{_TRACE_BAND:.2f} band this comparison set for itself, measured as "
+            f"|cycles_analytic minus cycles_traced| over cycles_traced at matched scope: "
+            f"{named}. That is published rather than tuned, and the cause is in the next "
+            "paragraph.</p>")
+    sp = corr.get("spearman_analytic_vs_traced_model_scope_fast")
+    sp_slow = corr.get("spearman_analytic_vs_traced_slow")
+    inversions = [i for i in (corr.get("inversions_model_scope_fast") or [])
+                  if isinstance(i, dict)]
+    lines = []
+    if isinstance(sp, (int, float)):
+        lines.append(f"Ranking the six methods by cost, the analytic order and the traced "
+                     f"order agree to a Spearman correlation of {float(sp):.4f} under "
+                     f"{_TRACE_MODEL}.")
+    for inv in inversions:
+        pair = [str(x) for x in (inv.get("pair") or [])]
+        ana = inv.get("analytic") if isinstance(inv.get("analytic"), dict) else {}
+        tra = inv.get("traced") if isinstance(inv.get("traced"), dict) else {}
+        if len(pair) == 2:
+            lines.append(
+                f"One pair comes out the other way round: the model prices "
+                f"{_esc(pair[0])} at {_num(ana.get(pair[0]))} cycles against "
+                f"{_num(ana.get(pair[1]))} for {_esc(pair[1])}, while the trace gives "
+                f"{_esc(pair[1])} {_num(tra.get(pair[1]))} and {_esc(pair[0])} "
+                f"{_num(tra.get(pair[0]))}.")
+    if isinstance(sp_slow, (int, float)) and not (corr.get("inversions_slow") or []):
+        lines.append("Under the small-multiplier model no pair is inverted and the two "
+                     "orders match exactly.")
+    if lines:
+        parts.append("<p>" + " ".join(lines) + "</p>")
+
+    coeff_muls = [m for m in rows
+                  if isinstance(m.get("muls_in_model_scope"), int)
+                  and m.get("muls_in_model_scope") == 0]
+    champs = [m for m in rows if str(m.get("origin")) == "discovered"]
+    if len(coeff_muls) == len(rows) and rows:
+        parts.append(
+            "<p>Two results, and the load-bearing one is good news. Every MULS in every "
+            "trace is the h times k product, one per stage, and not one of them applies a "
+            "tableau coefficient: the compiler turned the coefficients, dyadic and "
+            "otherwise, into shifts and adds. The other result is the gap above. Because "
+            "the analytic model charges each coefficient the cheaper of a shift-add chain "
+            "and a hardware multiply, and a multiply costs one cycle on the fast "
+            "multiplier variant, it prices a multiply the compiler does not emit, so it "
+            "counts low for coefficient-heavy tableaus. That is why the widest gaps here "
+            "are the four-stage classical methods, and why the ordering under the "
+            "small-multiplier model, where the model picks the shift-add chain, matches "
+            "the compiled code exactly.</p>")
+    if len(champs) == 1:
+        c = champs[0]
+        parts.append(
+            f"<p>For the champion tableau ({_esc(str(c.get('name')))}) the trace contains "
+            f"{_num(c.get('muls_per_step'))} MULS per step, one per stage at "
+            f"{_num(c.get('stages'))} stages, and {_num(c.get('muls_in_model_scope'))} of "
+            "them apply a tableau coefficient. The dyadic-coefficient assumption behind "
+            "its cost holds, and holds more strongly than it was stated.</p>")
+    parts.append(
+        "<p>Correcting the cost model would change every archived cycle count, so it "
+        "moves VERIFIER_HASH and invalidates all scores in the archive. That is an epoch "
+        "decision for the run's owner, not a fix inside a cycle, and this page publishes "
+        "the disagreement in the meantime.</p>")
+
+    assumptions = _trace_assumption_list(doc)
+    fold_body = []
+    if assumptions:
+        fold_body.append("<h3>What the cycle table assumes</h3>" + assumptions)
+    dne = [str(x) for x in (acc.get("does_not_establish") or [])]
+    if dne:
+        fold_body.append("<h3>What this does not establish</h3><ul>"
+                         + "".join(f"<li>{_esc(x)}</li>" for x in dne) + "</ul>")
+    whole = ['<h3>Whole-step counts, which cycles_analytic does not cover</h3>',
+             '<div class="scroll"><table><tr><th>method</th>'
+             '<th class="num">instructions per step</th>'
+             '<th class="num">cycles traced, whole step</th>'
+             '<th class="num">cycles traced, matched scope</th>'
+             '<th class="num">cycles_analytic, small multiplier</th>'
+             '<th class="num">ratio at matched scope, small multiplier</th></tr>']
+    for m in rows:
+        slow_ratio = _tnum(m, "ratio_model_scope", "m0plus_slow")
+        whole.append(
+            "<tr>"
+            f'<td class="hash">{_esc(str(m.get("name")))}</td>'
+            f'<td class="num">{_num(m.get("instructions_per_step"))}</td>'
+            f'<td class="num">{_num(_tnum(m, "cycles_traced"))}</td>'
+            f'<td class="num">{_num(_tnum(m, "cycles_traced_model_scope"))}</td>'
+            f'<td class="num">{_num(_tnum(m, "cycles_analytic", "m0plus_slow"))}</td>'
+            f'<td class="num">'
+            f'{f"{slow_ratio:.3f}" if isinstance(slow_ratio, (int, float)) else "n/a"}</td>'
+            "</tr>")
+    whole.append("</table></div>")
+    fold_body.append("\n".join(whole))
+    parts.append(_fold("The assumptions, the limits and the whole-step counts",
+                       "\n".join(fold_body)))
+    gen = doc.get("generated_from") if isinstance(doc.get("generated_from"), dict) else {}
+    src = ("Source: rk-work/trace/results.json, written on the host by "
+           "rk_harness.tracecheck and pinned by TRACE_HASH")
+    th = gen.get("trace_hash")
+    if isinstance(th, str) and th:
+        src += f" {th[:8]}"
+    src += ". Arithmetic: Q15 with floor rounding, the same pinned step the archive scores."
+    parts.append(f'<p class="note">{_esc(src)}</p>')
+    return parts
+
+
+# ----------------------------------------------------------------------------
 # banned words + build
 # ----------------------------------------------------------------------------
 
@@ -2979,6 +4056,98 @@ def check_banned(html_text: str) -> None:
     m = _BANNED_RE.search(html_text)
     if m is not None:
         raise BannedWordError(f"banned word {m.group(0)!r} at offset {m.start()}")
+
+
+# Two claims this site is not allowed to make again.
+_AGREEMENT_CLAIM = "measured wall clock agrees"
+_CHIP = "Cortex-M0+"
+_CHIP_QUALIFIERS = ("modeled", "simulated")
+_CHIP_WORDS = 10
+
+
+def check_head(name: str, html_text: str) -> None:
+    """Every page ships a title that names the site and a description of its own.
+
+    The titles were the visible headings, so a search result or a shared link read
+    "Validation" or "Cell p4 s4 b2" with nothing to say which project they belong to.
+    A page added later gets caught here rather than shipping bare.
+    """
+    head = html_text.split("</head>", 1)[0]
+    m = re.search(r"<title>([^<]*)</title>", head)
+    if SITE_NAME not in (m.group(1).strip() if m else ""):
+        raise ClaimError(f"{name} has no document title naming {SITE_NAME}")
+    d = re.search(r'<meta name="description" content="([^"]*)"', head)
+    if not (d and d.group(1).strip()):
+        raise ClaimError(f"{name} ships no meta description")
+
+
+_STYLE_RE = re.compile(r"<style>.*?</style>", re.S)
+# A win tally over problems, and the two sample sizes that have to sit beside it.
+_TALLY_RE = re.compile(r"\b\d+ of \d+[^.;]{0,40}?problems?\b", re.I)
+_WIN_WORDS = ("won by", "wins ", "lower q15 error", "lower error", "ahead on")
+_SIZE_RES = (re.compile(r"\b\d+ discovered\b"), re.compile(r"\b\d+ classical\b"))
+_BLOCK_RE = re.compile(r'(?=<p\b)|(?=<div class="card)|(?=<h[1-6]\b)')
+
+
+def check_tallies(name: str, html_text: str) -> None:
+    """A win tally carries the size of both sides, in the block that states it.
+
+    Every such tally on this site is a maximum over one set against a maximum over
+    another, or one fixed method against a set, and the number means nothing without
+    knowing how many methods each side had. The gate is per block, so a sample size
+    three paragraphs away does not satisfy it.
+    """
+    for block in _BLOCK_RE.split(html_text):
+        # A paragraph quoted verbatim from a source document is exempt: the site cannot
+        # add sample sizes to someone else's sentence without misquoting it, and the
+        # note beside every such quote carries them instead.
+        if block.startswith('<p class="quoted">'):
+            continue
+        text = re.sub(r"<[^>]+>", " ", block)
+        low = text.lower()
+        if not (_TALLY_RE.search(text) and any(w in low for w in _WIN_WORDS)):
+            continue
+        if not all(rx.search(text) for rx in _SIZE_RES):
+            raise ClaimError(f"{name} states a win tally without both sample sizes: "
+                             + " ".join(text.split())[:160])
+
+
+def check_hover(name: str, html_text: str) -> None:
+    """No page may name hovering as the way to reach a number.
+
+    Half the readers of a chart cannot hover: the wide drawing, the only one carrying
+    mark titles, is hidden below 640px, and a touch screen has no pointer anyway. Every
+    chart now carries a data table instead, and the captions name it. The stylesheet is
+    exempt: its :hover rules are styling, not an instruction.
+    """
+    if "hover" in _STYLE_RE.sub("", html_text).lower():
+        raise ClaimError(f"{name} tells the reader to hover; name the chart's data table "
+                         "instead, which works on a phone and in a screen reader")
+
+
+def check_claims(name: str, html_text: str) -> None:
+    """Claim gates, run beside check_banned before any page is written.
+
+    The wall-clock sentence said the measurement agreed with the cycle model, on three
+    pages, while the section it linked to said the correlation speaks to ordering and
+    not to absolute scale. The chip gate is the other half: the hub named the target
+    with no word near it saying the cycle counts behind every number are modeled.
+    """
+    if _AGREEMENT_CLAIM in html_text.lower():
+        raise ClaimError(f"{name} says the measured wall clock agrees with the cycle "
+                         "model; the benchmark supports an ordering claim only")
+    if name != "index.html":
+        return
+    words = re.sub(r"<[^>]+>", " ", html_text).split()
+    for i, word in enumerate(words):
+        if _CHIP not in word:
+            continue
+        near = words[max(0, i - _CHIP_WORDS):i + _CHIP_WORDS + 1]
+        if not any(q in w.lower() for w in near for q in _CHIP_QUALIFIERS):
+            raise ClaimError(
+                f"the first {_CHIP} mention on {name} has neither "
+                + " nor ".join(_CHIP_QUALIFIERS) + f" within {_CHIP_WORDS} words")
+        return
 
 
 def _load_hypotheses() -> list[dict]:
@@ -3022,6 +4191,17 @@ def _load_benchmark() -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _load_trace() -> dict | None:
+    """The compiled, emulated, TRM-priced comparison, or None before it has been run.
+
+    Written on the host by rk_harness.tracecheck, never inside a cycle: the site build
+    must stay byte-identical for identical inputs, and a compiler and an emulator inside
+    it would put a subprocess and a clock in that path. The page reads the committed
+    document, which is pinned by TRACE_HASH and admitted by DECISIONS.md D42.
+    """
+    return _load_json_or_none(work_dir() / "trace" / "results.json")
 
 
 def _load_sidetrack() -> dict | None:
@@ -3709,9 +4889,10 @@ class _Axes:
             self.parts.append(f'<text class="lbl" x="{self.ml}" y="{self.mt - 8}">'
                               f"{_soft(_clip(self.title, room))}</text>")
 
-    def svg(self, aria: str) -> str:
+    def svg(self, aria: str, describedby: str = "") -> str:
         return (f'<svg viewBox="0 0 {self.w} {self.h}" width="{self.w}" height="{self.h}" '
-                f'role="img" aria-label="{_soft(aria)}">' + "".join(self.parts) + "</svg>")
+                f'role="img" aria-label="{_soft(aria)}"{_describedby(describedby)}>'
+                + "".join(self.parts) + "</svg>")
 
 
 # Marker shapes, in the order a side's solvers take them. Shape is the second channel
@@ -3908,6 +5089,7 @@ def _matched_chart(rows, cls: str) -> str:
                        "draw. The table below lists every row with its status.")
     xs = _log_scale(min(x for x, _y in allp), max(x for x, _y in allp))
     ys = _log_scale(min(y for _x, y in allp), max(y for _x, y in allp))
+    table_id = f"matched-{re.sub(r'[^a-z0-9]+', '-', str(cls).lower()).strip('-')}-values"
     panels = []
     for prob in problems:
         title = prob + (" (stiff)" if prob in stiff else "")
@@ -3936,8 +5118,11 @@ def _matched_chart(rows, cls: str) -> str:
                        f"{_num(x)} rhs evaluations"
                        + (f"; meets target {met}" if met else ""))
                 pl.parts.append(_mark(shape_of[key], pl.x(x), pl.y(y), fill, tip))
+        n_marks = sum(len(series[key]) for key in solvers if key in series)
         panels.append(pl.svg(f"{prob}: achieved error against rhs evaluations for the "
-                             f"{cls} class at matched accuracy"))
+                             f"{cls} class at matched accuracy, {n_marks} "
+                             + ("mark" if n_marks == 1 else "marks"),
+                             describedby=table_id))
     legend = _key_legend([
         (_SIDE_FILL[key[0]], shape_of[key],
          f"{_solver_label(key[1])} ({key[0]}, "
@@ -3950,6 +5135,20 @@ def _matched_chart(rows, cls: str) -> str:
     dropped = len([key for key in solvers if key not in shape_of])
     extra = (f'<p class="note">{dropped} further solvers appear in the table only.</p>'
              if dropped else "")
+    trows = []
+    for prob in problems:
+        for key in solvers:
+            got = pts.get(prob, {}).get(key, {})
+            for xy in sorted(got):
+                met = ", ".join(_num(t) for t in sorted(
+                    (t for t in got[xy] if _finite_pos(t)), reverse=True))
+                trows.append((_soft(prob), _soft(_solver_label(key[1])), _soft(key[0]),
+                              _num(xy[0]), _num(xy[1]), met or "n/a"))
+    table = _chart_table(
+        table_id, f"Every plotted mark, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem", "solver", "side", "rhs evaluations", "achieved error", "targets met"),
+        trows, num_cols=(3, 4))
     return ("<figure><figcaption>Achieved error against rhs evaluations for each problem, "
             "both axes log (a " + _gloss("work-precision", "work-precision")
             + " view). A mark is the cheapest run that met a target; lower left is better. "
@@ -3958,7 +5157,7 @@ def _matched_chart(rows, cls: str) -> str:
             + "".join(panels) + "</div>"
             + '<p class="note">Source: benchmark/results.json, matched_accuracy '
             f"({_esc(cls)} rows); arithmetic per solver in the legend.</p>"
-            + extra + "</figure>")
+            + extra + table + "</figure>")
 
 
 _MATCHED_HOW = (
@@ -4074,6 +5273,9 @@ def _budget_factor(factor) -> str:
     return f"{_frac(fr)} of the budget"
 
 
+_BUDGET_TABLE = "budget-ladder-values"
+
+
 def _budget_chart(doc: dict) -> str:
     """SDIRK2 error against analytic cycles along the budget ladder, one line per problem.
 
@@ -4116,6 +5318,7 @@ def _budget_chart(doc: dict) -> str:
     ys = _log_scale(min(errs), max(errs))
     drawn = [n for n in names if n in series or any(b[0] == n for b in broke)]
     fill = {name: _series_fill(i) for i, name in enumerate(drawn)}
+    n_rungs = sum(len(v) for v in series.values()) + len(broke)
 
     def draw(w: int, tips: bool = True) -> str:
         pl = _Axes(w, 320, xs, ys, "analytic cycles for the whole run",
@@ -4148,8 +5351,24 @@ def _budget_chart(doc: dict) -> str:
             pl.parts.append(_mark("cross", pl.x(c), pl.mt + 7, "var(--text-2)",
                                   tip if tips else ""))
         return pl.svg("SDIRK2 error against analytic cycles on the budget ladder, one "
-                      "line per stiff problem")
+                      f"line per stiff problem, {n_rungs} "
+                      + ("rung" if n_rungs == 1 else "rungs") + " on "
+                      + f"{len(drawn)} " + ("problem" if len(drawn) == 1 else "problems"),
+                      describedby=_BUDGET_TABLE)
 
+    trows = []
+    for name in drawn:
+        rungs = [(c, rung, _num(err)) for c, err, rung in series.get(name, [])]
+        rungs += [(c, rung, "no error") for bn, c, rung in broke if bn == name]
+        for c, rung, err_text in sorted(rungs, key=lambda t: t[0]):
+            trows.append((_soft(name), _esc(_budget_factor(rung.get("factor"))),
+                          _plain(rung.get("n")), f"{int(round(c)):,}", err_text,
+                          _plain(rung.get("status"))))
+    table = _chart_table(
+        _BUDGET_TABLE, f"Every plotted rung, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem", "rung", "steps", "analytic cycles", "final-state error", "status"),
+        trows, num_cols=(2, 3, 4))
     keys = [(fill[n], "circle", n) for n in drawn]
     if broke:
         keys.append(("var(--text-2)", "cross", "diverged rung"))
@@ -4164,7 +5383,7 @@ def _budget_chart(doc: dict) -> str:
             + '<p class="note">Source: benchmark/results.json, implicit_budget. '
             "Arithmetic: " + (_soft(", ".join(sorted(ariths))) or "not stated")
             + ". Cycle grade: " + (_soft(", ".join(sorted(grades))) or "not stated")
-            + ".</p></figure>")
+            + ".</p>" + table + "</figure>")
 
 
 def _implicit_budget_table(benchmark) -> list[str]:
@@ -4450,6 +5669,10 @@ def _lane_bases_text(rows) -> str:
     return _soft(", ".join(bases)) if bases else "a basis the entries do not state"
 
 
+_LANE_IMPLICIT_TABLE = "lane-implicit-values"
+_LANE_ADAPTIVE_TABLE = "lane-adaptive-values"
+
+
 def _lane_strip_chart(rows, rel: str) -> str:
     """Implicit lane elites: a21 against the median cycles at the elite target.
 
@@ -4495,7 +5718,9 @@ def _lane_strip_chart(rows, rel: str) -> str:
             pl.parts.append(_mark("circle", pl.x(a21) + dx, pl.y(med), fill[pol],
                                   tip if tips else ""))
         return pl.svg("Implicit lane elites: a21 against median cycles at the elite "
-                      "target, by Jacobian policy")
+                      f"target, by Jacobian policy, {len(pts)} "
+                      + ("entry" if len(pts) == 1 else "entries"),
+                      describedby=_LANE_IMPLICIT_TABLE)
 
     gammas = {_lane_field(e, "method", "gamma") for *_x, e in pts}
     one = ""
@@ -4523,6 +5748,16 @@ def _lane_strip_chart(rows, rel: str) -> str:
     where_fold = ("" if not text else
                   _fold("Where the cycle levels sit",
                         "<p>" + _soft(text[:1].upper() + text[1:] + ".") + "</p>"))
+    trows = [(str(rank), f'<span class="hash">{_soft(str(e.get("key") or "")[:16])}</span>',
+              _plain(_lane_field(e, "method", "gamma")),
+              _plain(_lane_field(e, "method", "a21")),
+              _soft(pol.replace("_", " ")), _num(med))
+             for a21, med, pol, rank, e in sorted(pts, key=lambda p: p[3])]
+    table = _chart_table(
+        _LANE_IMPLICIT_TABLE, f"Every plotted entry, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("rank", "key", "gamma", "a21", "Jacobian", "median cycles at the elite target"),
+        trows, num_cols=(0, 5))
     n = len(pts)
     return (f"<figure><figcaption>The {n} {'entry' if n == 1 else 'entries'} plotted here, "
             "each at its a21 against the median modeled cycles it needed at the elite "
@@ -4537,7 +5772,7 @@ def _lane_strip_chart(rows, rel: str) -> str:
             + draw(640)
             + f'<p class="note">Source: {_esc(rel)}. float64 runs, cycles priced on '
             + _lane_bases_text([p[4] for p in pts]) + "; not order-verified.</p>"
-            + where_fold + "</figure>")
+            + where_fold + table + "</figure>")
 
 
 def _lane_scatter_chart(rows, rel: str) -> str:
@@ -4579,15 +5814,25 @@ def _lane_scatter_chart(rows, rel: str) -> str:
         a, b, s = next(iter(gains))
         one = f" Every plotted entry uses controller gains alpha {a}, beta {b} and safety {s}."
     n = len(plotted)
+    trows = [(", ".join(str(i) for i, _e, _err in groups[key]), _num(key[0]),
+              _num(groups[key][0][2]), str(len(groups[key])))
+             for key in sorted(groups)]
+    table = _chart_table(
+        _LANE_ADAPTIVE_TABLE, f"Every plotted mark, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("rank", "median cycles at the elite target", "best achieved error", "entries"),
+        trows, num_cols=(1, 2, 3))
     return (f"<figure><figcaption>The {n} {'entry' if n == 1 else 'entries'} plotted here, "
             "each at its median modeled cycles at the elite target against its best "
             "achieved error (log axis); left is cheaper and lower is more accurate."
             + _soft(one)
             + "</figcaption>"
             + pl.svg("Adaptive lane elites: median cycles at the elite target against best "
-                     "achieved error")
+                     f"achieved error, {n} " + ("entry" if n == 1 else "entries"),
+                     describedby=_LANE_ADAPTIVE_TABLE)
             + f'<p class="note">Source: {_esc(rel)}. float64 runs, cycles priced on '
-            + _lane_bases_text(plotted) + "; not order-verified.</p></figure>")
+            + _lane_bases_text(plotted) + "; not order-verified.</p>"
+            + table + "</figure>")
 
 
 def _lane_elites_section(cls: str, benchmark=None) -> list[str]:
@@ -4727,6 +5972,9 @@ def _stiff_gap(validation) -> tuple[int, int] | None:
     return None
 
 
+_STABILITY_TABLE = "stability-gamma-values"
+
+
 def _stability_chart(docs) -> str:
     """Every gamma the dyadic scan tried against |R(inf)|, A-stable or not.
 
@@ -4770,6 +6018,13 @@ def _stability_chart(docs) -> str:
         pl.parts.append(_mark("circle" if stable else "cross", pl.x(g),
                               pl.y(a if a > 0 else ys.lo),
                               "var(--s1)" if stable else "var(--s2)", tip))
+    trows = [(_plain(r.get("gamma")), _plain(r.get("r_at_infinity")),
+              "yes" if stable else "no", _plain(r.get("measured_order")))
+             for _g, _a, stable, r in sorted(rows, key=lambda t: (t[0], t[1], t[2]))]
+    table = _chart_table(
+        _STABILITY_TABLE, f"Every plotted gamma, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("gamma", "R at infinity", "A-stable", "measured order"), trows, num_cols=(3,))
     tail = ""
     if pos and len(pos) == len(rows):
         low = min(rows, key=lambda t: (t[1], t[0]))
@@ -4782,11 +6037,13 @@ def _stability_chart(docs) -> str:
             + _key_legend([("var(--s1)", "circle", "A-stable"),
                            ("var(--s2)", "cross", "not A-stable")])
             + pl.svg("Stability function at infinity against gamma for every SDIRK the "
-                     "dyadic scan tried")
+                     f"dyadic scan tried, {len(rows)} "
+                     + ("gamma" if len(rows) == 1 else "gammas"),
+                     describedby=_STABILITY_TABLE)
             + '<p class="note">Source: side-track job sdirk.gamma_dyadic_scan, '
             f"{len(docs)} ledger {'point' if len(docs) == 1 else 'points'}, "
             f"{len(rows)} distinct {'gamma' if len(rows) == 1 else 'gammas'} plotted. "
-            "Arithmetic: " + _arith_of(docs) + ".</p></figure>")
+            "Arithmetic: " + _arith_of(docs) + ".</p>" + table + "</figure>")
 
 
 # Where an SDIRK2 step's cycles go, grouped so a stack has four parts at most. A term
@@ -4799,6 +6056,7 @@ _JAC_GROUPS: tuple[tuple[tuple[str, ...] | None, str], ...] = (
     (("fd_jacobian_arith",), "finite-difference Jacobian"),
 )
 _JAC_POLICIES = (("analytic", "analytic"), ("finite_difference", "finite difference"))
+_JACOBIAN_TABLE = "jacobian-cycle-values"
 
 
 def _jacobian_chart(docs) -> str:
@@ -4862,18 +6120,32 @@ def _jacobian_chart(docs) -> str:
     h = int(math.ceil(base + 30))
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            'aria-label="Modeled cycles per SDIRK2 step by where they go, for each '
-           'Jacobian policy on each stiff problem">'
+           f'Jacobian policy on each stiff problem, {len(bars)} '
+           + ("bar" if len(bars) == 1 else "bars")
+           + f'"{_describedby(_JACOBIAN_TABLE)}>'
            + "".join(_hbar_frame(xs, ml, span, mt, base)) + "".join(body) + "</svg>")
     used = [gi for gi in range(len(_JAC_GROUPS))
             if any(s[1] == _SERIES4[gi] for _p, _l, segs, _f in bars for s in segs)]
+    trows = []
+    for prob, label, segs, fevals in sorted(bars, key=lambda b: (b[0], b[1])):
+        total = sum(s[0] for s in segs)
+        for v, _fill, glabel, _ks in segs:
+            trows.append((_soft(prob), _esc(label), _esc(glabel), _num(v), _num(total),
+                          _plain(fevals)))
+    table = _chart_table(
+        _JACOBIAN_TABLE, f"Every plotted segment, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem", "Jacobian", "where the cycles go", "cycles per step",
+         "step total", "rhs evaluations per step"), trows, num_cols=(3, 4, 5))
     return ("<figure><figcaption>Modeled cycles per SDIRK2 step by where they go, for "
             "each Jacobian policy. Neither count includes the rhs or Jacobian evaluations "
-            "themselves; hover a bar's end for the rhs evaluations per step.</figcaption>"
+            "themselves; the table under the chart gives them per step beside each "
+            "bar's total.</figcaption>"
             + _legend([(_SERIES4[gi], _JAC_GROUPS[gi][1]) for gi in used]) + svg
             + '<p class="note">Source: side-track job sdirk.jacobian_cost, '
             f"{len(docs)} {'point' if len(docs) == 1 else 'points'}; cycle model "
             + (_soft(", ".join(sorted(models))) or "not stated") + ". Arithmetic: "
-            + _arith_of(docs) + ".</p></figure>")
+            + _arith_of(docs) + ".</p>" + table + "</figure>")
 
 
 def render_implicit(sidetrack: dict | None = None, validation: dict | None = None,
@@ -4934,7 +6206,11 @@ def render_implicit(sidetrack: dict | None = None, validation: dict | None = Non
     ]))
     return _page("Implicit methods", "\n".join(parts), active="implicit.html",
                  subtitle="SDIRK methods measured off-archive, and the stiff problems "
-                          "that motivate them.")
+                          "that motivate them.",
+                 doc_title=_doc_title("Implicit methods"),
+                 description="Two-stage SDIRK methods measured in float64 outside the "
+                             "archive, with the stiff problems that motivate the class "
+                             "and the limits of what the measurement supports.")
 
 
 # ----------------------------------------------------------------------------
@@ -4950,6 +6226,7 @@ _ADAPTIVE_CLASS = (
 
 
 _SWEEP_PANEL_W, _SWEEP_COLS = 256, 4
+_SWEEP_TOL_TABLE = "sweep-tolerance-values"
 
 
 def _sweep_multiples(docs) -> str:
@@ -4957,8 +6234,9 @@ def _sweep_multiples(docs) -> str:
     per problem on shared axes, four to a row at full width.
 
     The panels share both axes, so they compare by position; each draws only its own
-    problem. The controller's accepted and rejected counts behind every point are in the
-    "Every measured point" fold, which is why no second table repeats them here.
+    problem. The table under the panels carries every plotted point with the rejected-step
+    count behind it, and the "Every measured point" fold below holds the rest of what the
+    controller recorded.
     """
     series: dict[str, list] = {}
     pairs: set[str] = set()
@@ -5001,15 +6279,25 @@ def _sweep_multiples(docs) -> str:
                    f"{_num(x)} rhs evaluations, {_plain(p.get('n_rejected'))} rejected steps")
             pl.parts.append(_mark("circle", pl.x(x), pl.y(y), "var(--s1)", tip))
         panels.append(pl.svg(f"{prob}: achieved error against rhs evaluations across the "
-                             "tolerance sweep"))
+                             f"tolerance sweep, {len(own)} "
+                             + ("point" if len(own) == 1 else "points"),
+                             describedby=_SWEEP_TOL_TABLE))
     pair = (" Pair: " + _soft(", ".join(sorted(pairs))) + "." if pairs else "")
+    trows = [(_soft(prob), _plain(p.get("tol")), _num(x), _num(y),
+              _plain(p.get("n_rejected")))
+             for prob in sorted(drawn) for x, y, p in drawn[prob]]
+    table = _chart_table(
+        _SWEEP_TOL_TABLE, f"Every plotted point, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem", "tolerance", "rhs evaluations", "achieved error", "rejected steps"),
+        trows, num_cols=(1, 2, 3, 4))
     return ("<figure><figcaption>Achieved error against rhs evaluations as the tolerance "
             "tightens, one panel per problem on shared axes, both log." + pair
             + "</figcaption>"
             + _multiples_open(_SWEEP_PANEL_W, _SWEEP_COLS) + "".join(panels) + "</div>"
             + '<p class="note">Source: side-track job adaptive.suite_sweep, '
             f"{len(docs)} {'point' if len(docs) == 1 else 'points'}. Arithmetic: "
-            + _arith_of(docs) + ".</p></figure>")
+            + _arith_of(docs) + ".</p>" + table + "</figure>")
 
 
 def _param_frac(doc, key: str):
@@ -5028,6 +6316,9 @@ def _heat_up(v: float, lo: float, hi: float) -> int:
         return 4
     a = (math.log10(v) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
     return max(1, min(7, 1 + int(round(a * 6))))
+
+
+_GAIN_MAP_TABLE = "gain-map-values"
 
 
 def _gain_map(docs) -> str:
@@ -5103,7 +6394,23 @@ def _gain_map(docs) -> str:
                          f'y="{ty}" text-anchor="middle">{v:.3g}</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            'aria-label="Rejected share of attempted steps for each pair of controller '
-           'gains alpha and beta">' + "".join(parts) + "</svg>")
+           f'gains alpha and beta, {len(cells)} measured gain '
+           + ("pair" if len(cells) == 1 else "pairs")
+           + f'"{_describedby(_GAIN_MAP_TABLE)}>' + "".join(parts) + "</svg>")
+    trows = []
+    for a, b in sorted(cells):
+        e, _d = cells[(a, b)]
+        v = rate(e)
+        s = e.get("summary") if isinstance(e.get("summary"), dict) else {}
+        trows.append((_esc(str(a)), _esc(str(b)),
+                      _num(v) if v is not None else "no run finished",
+                      _plain(s.get("total_rejected")), _plain(s.get("total_accepted")),
+                      _plain(s.get("total_fevals"))))
+    table = _chart_table(
+        _GAIN_MAP_TABLE, f"Every measured cell, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("alpha", "beta", "rejected share", "rejected steps", "accepted steps",
+         "rhs evaluations"), trows, num_cols=(2, 3, 4, 5))
     probs = {tuple(str(p) for p in d.get("problems")) for _e, d in docs
              if isinstance(d.get("problems"), list)}
     tols = {d.get("tolerance") for _e, d in docs if _finite_num(d.get("tolerance"))}
@@ -5119,7 +6426,7 @@ def _gain_map(docs) -> str:
             "the share. n/a means no run finished." + _soft(where) + "</figcaption>" + svg
             + '<p class="note">Source: side-track job adaptive.controller_gains, '
             f"{len(docs)} {'point' if len(docs) == 1 else 'points'}. Arithmetic: "
-            + _arith_of(docs) + ".</p></figure>")
+            + _arith_of(docs) + ".</p>" + table + "</figure>")
 
 
 # The three priced parts of one attempt. The document also lists a branch_allowance, and
@@ -5127,6 +6434,7 @@ def _gain_map(docs) -> str:
 # branch, so the allowance is named in the caption and never drawn on the cycle axis.
 _ATTEMPT_PARTS = (("stage", "stage arithmetic"), ("estimate", "error estimate"),
                   ("controller", "controller"))
+_ATTEMPT_TABLE = "attempt-cycle-values"
 
 
 def _branch_count(r) -> int | None:
@@ -5223,10 +6531,27 @@ def _attempt_cost_chart(benchmark) -> str:
             x += wv
         body.append(_end_label(end, y + bar_h / 2 + 3.5,
                                _n(tot if tot is not None else sum(k[:3])), w))
+    def _size_label(g) -> str:
+        return (" or ".join(str(s) for s in sorted(g["states"])) + "-state problems"
+                if g["states"] else "size not stated")
+
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            'aria-label="Modeled Q15 cycles for one attempted step, split by part, one bar '
-           'per problem size">' + "".join(_hbar_frame(xs, ml, span, mt, base))
-           + "".join(body) + "</svg>")
+           f'per problem size, {len(order)} '
+           + ("bar" if len(order) == 1 else "bars")
+           + f'"{_describedby(_ATTEMPT_TABLE)}>'
+           + "".join(_hbar_frame(xs, ml, span, mt, base)) + "".join(body) + "</svg>")
+    trows = []
+    for k in order:
+        g = groups[k]
+        tot = k[3] if k[3] >= 0 else sum(k[:3])
+        for (_key, name), v in zip(_ATTEMPT_PARTS, k[:3]):
+            trows.append((_esc(_size_label(g)), _esc(name), _n(v), _n(tot), str(g["n"])))
+    table = _chart_table(
+        _ATTEMPT_TABLE, f"Every plotted segment, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("problem size", "part", "cycles per attempt", "attempt total", "rows"),
+        trows, num_cols=(2, 3, 4))
     solvers = sorted({s for g in groups.values() for s in g["solvers"]})
     grades = sorted({s for g in groups.values() for s in g["grades"]})
     ariths = sorted({s for g in groups.values() for s in g["ariths"]})
@@ -5254,7 +6579,7 @@ def _attempt_cost_chart(benchmark) -> str:
             + _legend(keys) + svg + '<p class="note">Source: benchmark/results.json, '
             f"adaptive_matched_tolerance: the {n} rows that carry a per-attempt price. "
             "Arithmetic: " + (_soft(", ".join(_arith_label(a) for a in ariths))
-                              or "not stated") + ".</p></figure>")
+                              or "not stated") + ".</p>" + table + "</figure>")
 
 
 def _pair_error_count(text: str, benchmark) -> str:
@@ -5305,6 +6630,7 @@ def _pair_note(benchmark) -> str:
 _CENSUS_BARS = (("matrices", "matrices"), ("order2_consistent", "order-2 consistent"),
                 ("order3_consistent", "order-3 consistent"),
                 ("both_solvable", "both solvable"))
+_CENSUS_TABLE = "census-values"
 
 
 def _census_chart(docs) -> str:
@@ -5370,8 +6696,16 @@ def _census_chart(docs) -> str:
     h = int(math.ceil(base + 30))
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
            'aria-label="Lattice matrices meeting each embedded-pair condition, by stage '
-           'count and lattice depth">' + "".join(_hbar_frame(xs, ml, span, mt, base))
-           + "".join(body) + "</svg>")
+           f'count and lattice depth, {len(groups)} counted '
+           + ("point" if len(groups) == 1 else "points")
+           + f'"{_describedby(_CENSUS_TABLE)}>'
+           + "".join(_hbar_frame(xs, ml, span, mt, base)) + "".join(body) + "</svg>")
+    trows = [(_soft(label), _esc(name), f"{v:,}")
+             for _key, label, vals in groups for name, v in vals]
+    table = _chart_table(
+        _CENSUS_TABLE, f"Every plotted count, in one table ({len(trows)} "
+        + ("row" if len(trows) == 1 else "rows") + ")",
+        ("stages and lattice depth", "condition", "matrices"), trows, num_cols=(2,))
     note = ""
     capped = [(label, d) for label, d in skipped if str(d.get("status")) == "capped"]
     if capped:
@@ -5392,7 +6726,7 @@ def _census_chart(docs) -> str:
             + "</figcaption>" + svg + note
             + '<p class="note">Source: side-track job adaptive.pair_census, '
             f"{len(docs)} {'point' if len(docs) == 1 else 'points'}. Arithmetic: "
-            + _arith_of(docs) + ".</p></figure>")
+            + _arith_of(docs) + ".</p>" + table + "</figure>")
 
 
 def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None) -> str:
@@ -5454,7 +6788,11 @@ def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None
          "the per-cycle lane log summarised per method class"),
     ]))
     return _page("Adaptive methods", "\n".join(parts), active="adaptive.html",
-                 subtitle="Embedded pairs and step-size control, measured off-archive.")
+                 subtitle="Embedded pairs and step-size control, measured off-archive.",
+                 doc_title=_doc_title("Adaptive methods"),
+                 description="Embedded pairs and step-size control measured outside the "
+                             "archive, mostly in float64, with one fixed pair of "
+                             "controller gains also run in Q15.")
 
 
 # ----------------------------------------------------------------------------
@@ -5535,9 +6873,15 @@ def _methodology_sections(sidetrack) -> tuple[tuple[str, str, str], ...]:
     methodology.py owns the article and never imports this module, so the parts that
     need run data or the pinned cost model are built here and handed over.
     """
+    # methodology.py holds the related-work prose beside the reference list it cites, so
+    # the article's only outside-facing section stays in the article's own module. The
+    # import is local because methodology never imports this module and build() imports
+    # it the same way.
+    from rk_harness import methodology as methodology_mod
     return (
         ("costmodel", "Cost model", _costmodel_section()),
         ("ledger", "Measurement ledger", _ledger_section(sidetrack)),
+        ("related-work", "Related work", methodology_mod.RELATED_WORK),
         ("glossary", "Glossary", _glossary_section()),
     )
 
@@ -5558,14 +6902,24 @@ def _prune(out_dir: Path, pages: dict[str, str]) -> None:
             path.unlink()
 
 
-def build(arch: ArchiveState, out_dir: Path) -> None:
-    global _PRESENT
+def build(arch: ArchiveState, out_dir: Path, commit_shas=None) -> None:
+    """Render every page, check it, then write.
+
+    commit_shas is an optional {repository: commit} mapping for the footer. It arrives
+    as data because the generator reads no environment of its own: the determinism
+    tests build into a directory with no git repository, and the container can see three
+    of the four repositories anyway.
+    """
+    global _PRESENT, _COMMIT_SHAS
     out_dir = Path(out_dir)
+    _COMMIT_SHAS = tuple((str(k), str(v)) for k, v in
+                         sorted((commit_shas or {}).items()) if v)
     validation = _load_validation()
     benchmark = _load_benchmark()
     sidetrack = _load_sidetrack()
     falsification = _load_falsification()
-    evidence = any(x is not None for x in (validation, benchmark, falsification))
+    trace = _load_trace()
+    evidence = any(x is not None for x in (validation, benchmark, falsification, trace))
     _PRESENT = frozenset({"validation.html"}) if evidence else frozenset()
     try:
         pages: dict[str, str] = {}
@@ -5590,16 +6944,34 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
             interpretations=literature_mod.load_interpretations())
         if evidence:
             pages["validation.html"] = render_validation(validation, benchmark=benchmark,
-                                                         falsification=falsification)
+                                                         falsification=falsification,
+                                                         trace=trace)
         try:
             from rk_harness import methodology
         except ImportError:
             pass
         else:
+            def _methodology_page(title, body, active="", subtitle=""):
+                """_page with this build's head strings, for the injected callable.
+
+                methodology.render_page takes a page callable and passes it four
+                positional arguments, so the title and description this site wants for
+                the article are applied here rather than inside _page.
+                """
+                return _page(title, body, active, subtitle,
+                             doc_title=_doc_title(title),
+                             description="How the harness searches, scores and verifies "
+                                         "Runge-Kutta tableaus in Q15: the cost model, "
+                                         "the measurement ledger and the glossary.")
+
             pages["methodology.html"] = methodology.render_page(
-                _page, sections=_methodology_sections(sidetrack))
+                _methodology_page, sections=_methodology_sections(sidetrack))
         for name in sorted(pages.keys()):
             check_banned(pages[name])
+            check_claims(name, pages[name])
+            check_head(name, pages[name])
+            check_hover(name, pages[name])
+            check_tallies(name, pages[name])
         out_dir.mkdir(parents=True, exist_ok=True)
         for name in sorted(pages.keys()):
             with open(out_dir / name, "wb") as fh:
@@ -5607,3 +6979,4 @@ def build(arch: ArchiveState, out_dir: Path) -> None:
         _prune(out_dir, pages)
     finally:
         _PRESENT = frozenset()
+        _COMMIT_SHAS = ()
