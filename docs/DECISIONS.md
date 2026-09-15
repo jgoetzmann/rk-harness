@@ -1917,3 +1917,75 @@ untouched, nothing under `rk-work/archive` is written, and every archived score 
 The tier backfill this entry prepares for is the owner's to apply and is not part of it.
 
 ---
+
+## D45 - Epoch 1 freezes, and epoch 2 prices each coefficient by the instructions GCC 13.2.1 emits for it (2026-09-14, decided, not landed)
+
+**Decision.**
+(a) The rule in the epoch plan section 2, with one corner the validation
+found: an inexact coefficient rounding to plus or minus 1 at shift 0 costs
+0, grounded by compiled probes (`M = +1` emits a bare `adds`, `M = -1` a
+bare `subs`, both priced by the combination add already). Ten archive
+records need the corner; without it the rule raises KeyError.
+(b) `fixtures/m0plus_coeff_ops.json` joins `VERIFIER_FILES`.
+(c) D22(a) is executed: `tableau.py`, `simulate.py` and `fixedpoint.py` are
+pinned; `simulate.py` and `fixedpoint.py` leave `SIDETRACK_FILES`;
+`sidetrack.code_hash` folds in the pinned hash string.
+(d) Epoch separation by relocation to `rk-work/epochs/1`, with the runner
+guard refusing a mixed or foreign-hash archive.
+(e) Epochs are numbered by boundary, so this is epoch 2. EPOCH2-DESIGN and
+EPOCH3-DESIGN keep their filenames as design identifiers.
+(f) The start gate gains G21_, G22_ and G28_.
+(g) The findings site stays off until epoch support lands per
+`docs/handoffs/epoch2-sitegen.md`.
+(h) The residual taxonomy widens instead of the analytic scope: k-reloads
+in the state loop and h-times-k products become named residual classes
+with n-dependent bounds. Spill volume follows register allocation rather
+than the tableau alone, so it cannot be priced from coefficients.
+
+**Why.** The D42 evidence plus the sweep and the validation ledger V0
+through V6: pricing equality exact over 196,600 checks, traced MULS equal
+to predicted on every row, nine anchors zero inversions at Spearman 1.0
+both models, crosscheck matched with identical trace hashes, all 141,364
+tableaus priced. Rejected: always-CSD (collapses the models and still
+inverts twice); dropping the multiply option (identical models, two
+inversions left); h-times-k or load/store in scope; re-scoring the old
+archive; a replay filter (never built; relocation replaces it); a work
+subdirectory. The owner confirmed the rule with the corner and the
+residual ruling in the working session on 2026-09-14, accepting the
+decision brief.
+
+**Numbering note.** The plan reserved D44 for the tier relabelling, but
+D44 was taken by the audit close-out before the plan landed. The tier
+record lives here instead: `scripts/backfill_tiers.py --apply` ran once on
+2026-09-14, rewriting 82,199 `unreplicated` tiers (21 `no_incumbent`,
+82,178 `no_improvement`) with every other byte verified original against
+the pre-apply backup; counts read back from the archive match. This
+supersedes D44 owner item 1.
+
+**Evidence.** The V0-V6 gate reports and numbers, the sweep counts, the
+probe files including the corner disassembly, the fixture candidate with
+its generator, and the backup path, all under `/tmp/epoch-vlab/` with the
+lab script, corpus and preregistration in `lab/`. The owner brief is
+`docs/handoffs/coeff-cost-decision.md`.
+
+**Departs from the handoff.** Section 4.5 `min(csd_cost, mul_cost)` and
+"taking the minimum is the entire point", and C7b. The anchor reversal
+becomes a property of epoch 1's cost rule.
+
+**Consequence.** The champion goes 22 to the fixture value; classical
+anchors take fixture values; slow minus fast is 31 per MULS application
+per state. The 21 pre-pin records stay inside epoch 1. The epoch-1
+overview cannot be rebuilt once the pin moves. Epoch 2 runs with no public
+site at first.
+
+**What it does not establish.** In-context sharing, which the table
+over-prices; other compilers, flags or tunings; AVR; cycle accuracy.
+
+**Closes.** D42's revisit clause and D22(a). It does not close the
+findings halves that sit with the sitegen lane, or the person check.
+
+**Epoch impact.** Decided, not landed: no verifier-pinned file is edited
+and `VERIFIER_HASH` still reads de5bec22 until the boundary commit
+re-pins last.
+
+---
