@@ -184,8 +184,8 @@ def test_ST13_nothing_scored_is_written(only_fake, tmp_path):
     sidetrack.run_until(600.0)
     assert verifier_hash.compute_verifier_hash() == before
     work = sidetrack.work_dir()
-    for forbidden in ("archive", "quarantine", "hypotheses.jsonl", "falsification.json",
-                      "RUNSTATE.json", "EPOCH_STATUS.json"):
+    for forbidden in ("archive", "epochs", "quarantine", "hypotheses.jsonl", "falsification.json",
+                      "RUNSTATE.json", "EPOCH_STATUS.json", "EPOCH.json"):
         assert not (work / forbidden).exists(), f"side-track work created {forbidden}"
     assert sorted(p.name for p in (work / "sidetrack").iterdir()) == [
         "fake.adaptive", "fake.implicit", "ledger.jsonl"]
@@ -365,7 +365,10 @@ def test_ST26_budget_steps_match_the_published_validation_numbers():
 
     assert sidetrack.BUDGET_CYCLES == V.BUDGET_CYCLES
     cl = classical()
-    expected = {"euler": 4369, "heun2": 1680, "midpoint": 1985, "rk4": 661}
+    # Step counts are budget // (cycles * n_states) under the live cost rule: rk4 went
+    # 661 -> 412 when D45 repriced coefficients by emitted instructions (rk4 fast 33
+    # -> 53). The other three carry no MULS-set coefficient and do not move.
+    expected = {"euler": 4369, "heun2": 1680, "midpoint": 1985, "rk4": 412}
     for method, steps in expected.items():
         assert steps_for_budget(cl[method], M0PLUS_FAST, 3,
                                 sidetrack.BUDGET_CYCLES) == steps, method

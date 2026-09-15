@@ -403,7 +403,7 @@ def section_C(results):
     R.check("C1", ok, "; ".join(vals))
     f4, f38 = costmodel.cycle_count(ct["rk4"], costmodel.M0PLUS_FAST, 1), costmodel.cycle_count(ct["rk38"], costmodel.M0PLUS_FAST, 1)
     s4, s38 = costmodel.cycle_count(ct["rk4"], costmodel.M0PLUS_SLOW, 1), costmodel.cycle_count(ct["rk38"], costmodel.M0PLUS_SLOW, 1)
-    R.check("C2", f4 < f38 and s38 < s4, f"fast: rk4 {f4} < rk38 {f38}; slow: rk38 {s38} < rk4 {s4} -> ordering reverses")
+    R.check("C2", f38 < f4 and s38 < s4, f"fast: rk38 {f38} < rk4 {f4}; slow: rk38 {s38} < rk4 {s4} (D45: the reversal was a property of epoch 1's cost rule)")
     ok = all(costmodel.cycle_count(t, m, n) == n * costmodel.cycle_count(t, m, 1)
              for t in ct.values() for m in (costmodel.M0PLUS_FAST, costmodel.M0PLUS_SLOW) for n in (2, 3, 4))
     R.check("C3", ok, "cycle_count(t, m, n) == n * cycle_count(t, m, 1) for all eight, n in 2..4")
@@ -847,7 +847,7 @@ RK_ENV_MAP: dict[str, tuple[str, str]] = {
 
 # The scored paths a side track must never write into: the same list the determinism job in
 # .github/workflows/ci.yml asserts about.
-SCORED_PATHS = ("archive", "quarantine", "hypotheses.jsonl", "RUNSTATE.json", "EPOCH_STATUS.json")
+SCORED_PATHS = ("archive", "epochs", "quarantine", "hypotheses.jsonl", "RUNSTATE.json", "EPOCH_STATUS.json", "EPOCH.json")
 
 _WATCHDOG_ARG_RE = re.compile(
     r"-(?P<flag>[A-Za-z]+)\s+\$\(\[(?P<cast>[a-z]+)\]\(Cfg\s+'watchdog'\s+'(?P<key>[a-z_]+)'\s+(?P<default>[^)]*)\)\)")

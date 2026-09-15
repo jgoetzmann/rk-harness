@@ -204,7 +204,7 @@ def _healthy_sv(**over) -> ScoreVector:
         error_constant=0.0136,
         stability_real=-2.785294,
         stability_imag=2.828427,
-        cycles={"m0plus_fast": 33, "m0plus_slow": 85, "avr_approx": 134},
+        cycles={"m0plus_fast": 53, "m0plus_slow": 53, "avr_approx": 134},
         csd_weight_total=34,
         coeff_quant_error=5.086e-06,
         search_error=1e-4,
@@ -568,8 +568,8 @@ def test_B20_solve_q15_rk4_dahlquist(ct):
 
 
 def test_B21_steps_for_budget(ct):
-    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 65536) == 1985
-    assert steps_for_budget(ct["rk38"], M0PLUS_SLOW, 2, 65536) == 512
+    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 65536) == 1236
+    assert steps_for_budget(ct["rk38"], M0PLUS_SLOW, 2, 65536) == 668
 
 
 @pytest.mark.parametrize("budget", [0, 1, 10, 32])
@@ -579,9 +579,9 @@ def test_B21_steps_for_budget_too_small_is_zero(ct, budget):
 
 
 def test_B21_steps_for_budget_boundary(ct):
-    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 33) == 1
-    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 65) == 1
-    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 66) == 2
+    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 53) == 1
+    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 105) == 1
+    assert steps_for_budget(ct["rk4"], M0PLUS_FAST, 1, 106) == 2
 
 
 def test_B22_solve_q15_overflow_tableau_raises_on_large_h():
@@ -773,8 +773,8 @@ def test_B24_evaluate_rk4_scorevector(ct, sv_rk4):
     sv = sv_rk4
     assert isinstance(sv, ScoreVector)
     assert set(sv.cycles) == {"m0plus_fast", "m0plus_slow", "avr_approx"}
-    assert sv.cycles["m0plus_fast"] == 33
-    assert sv.cycles["m0plus_slow"] == 85
+    assert sv.cycles["m0plus_fast"] == 53
+    assert sv.cycles["m0plus_slow"] == 53
     assert isinstance(sv.cycles["avr_approx"], int)
     assert sv.cycles["avr_approx"] > 0
     assert math.isfinite(sv.search_error) and sv.search_error < 0.5
@@ -830,7 +830,7 @@ def test_B26_evaluate_with_tiny_budget_gives_inf_and_does_not_raise(ct, budget):
     assert sv.heldout_error == math.inf
     for name in ALL_PROBLEM_NAMES:
         assert sv.per_problem[name] == math.inf
-    assert sv.cycles["m0plus_fast"] == 33
+    assert sv.cycles["m0plus_fast"] == 53
 
 
 def test_B27_error_constant_ordering(ct):
@@ -889,7 +889,7 @@ def test_V1_verify_with_score_returns_scorevector_on_pass(ct):
     verdict, sv = verify_with_score(ct["rk4"], 4)
     assert verdict is None
     assert isinstance(sv, ScoreVector)
-    assert sv.cycles["m0plus_fast"] == 33
+    assert sv.cycles["m0plus_fast"] == 53
     assert sv.overflow_margin > 1.0
 
 

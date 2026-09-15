@@ -329,7 +329,8 @@ def _check_lane(lane: str) -> None:
 # about; duplicated here as a guard rather than imported, because scripts/ is not
 # an importable package and a guard that cannot run is not a guard.
 SCORED_PATHS: tuple[str, ...] = (
-    "archive", "quarantine", "hypotheses.jsonl", "RUNSTATE.json", "EPOCH_STATUS.json")
+    "archive", "epochs", "quarantine", "hypotheses.jsonl", "RUNSTATE.json",
+    "EPOCH_STATUS.json", "EPOCH.json")
 
 
 def lane_dir(lane: str) -> Path:

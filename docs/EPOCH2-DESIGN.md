@@ -229,6 +229,11 @@ MAP-Elites shape with these changes:
   epoch 2 opens a fresh dated JSONL series and the epoch-1 files stay as frozen
   evidence per the epoch model.
 
+  Dated note 2026-09-15: the replay filter described above was never built.
+  Epoch separation went to D45 relocation instead: epoch-1 run state moves
+  byte-identical to `rk-work/epochs/1/`, and the runner refuses a mixed or
+  foreign-hash archive outright.
+
 ## 8. Verifier and golden tests
 
 Additions to the pinned verifier at the boundary:

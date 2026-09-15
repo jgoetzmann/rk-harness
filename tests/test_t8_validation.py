@@ -10,7 +10,8 @@ discovered-method selection follows the archive grid rule (synthetic archive,
 no dependence on the live one), and the moderately stiff subset shows the
 stability tax it exists to expose: cheap low-stage methods finish, expensive
 tableaus overflow where their affordable step size leaves the stability
-interval (rk4 and rk38 on robertson_scaled).
+interval (rk4 and rk38 on robertson_scaled, and rk4 on servo_load_step under
+the D45 step counts).
 """
 from __future__ import annotations
 
@@ -54,10 +55,14 @@ _T_B = make_tableau([["0", "0"], ["1/4", "0"]], ["-1", "2"])
 _T_C = make_tableau([["0", "0"], ["1/3", "0"]], ["1/2", "1/2"])
 
 _NONSTIFF = tuple(n for n in V.VALIDATION_NAMES if not V.STIFF[n])
-# rk4 finishes everywhere except robertson_scaled, where its 661 affordable
-# steps put h*lambda_fast near 3.5 late in the window, outside its stability
-# interval, and the Q15 run overflows (asserted below).
-_RK4_FINISHERS = tuple(n for n in V.VALIDATION_NAMES if n != "robertson_scaled")
+# rk4 finishes everywhere except robertson_scaled and servo_load_step. On
+# robertson_scaled its 412 affordable steps leave h*lambda_fast outside its
+# stability interval, and the Q15 run overflows (asserted below). On
+# servo_load_step the D45 count drops its affordable steps from 993 to 618;
+# the larger step puts h*lambda_fast near 4.1, outside the interval, so the
+# run that finished at max_abs_q 14013 under the old count overflows now.
+_RK4_FINISHERS = tuple(n for n in V.VALIDATION_NAMES
+                       if n not in ("robertson_scaled", "servo_load_step"))
 
 
 @pytest.fixture(scope="module")
@@ -248,7 +253,7 @@ def test_stiff_cheap_classical_methods_finish(cls, name):
 
 
 def test_stability_tax_rk4_rk38_overflow_on_robertson(cls):
-    """rk4 affords 661 steps on the 3-state robertson_scaled and rk38 606; the
+    """rk4 affords 412 steps on the 3-state robertson_scaled and rk38 445; the
     fast eigenvalue grows to about 11.7 late in the window, h*lambda leaves
     their stability interval and the Q15 run overflows. This is the stability
     tax the stiff subset exists to expose."""
@@ -260,11 +265,11 @@ def test_stability_tax_rk4_rk38_overflow_on_robertson(cls):
 
 
 def test_steps_match_fixture_convention(cls):
-    # fixtures/classical.json: euler 5 cycles/state, rk4 33 cycles/state (fast)
+    # fixtures/classical.json: euler 5 cycles/state, rk4 53 cycles/state (fast)
     assert steps_for_budget(cls["euler"], M0PLUS_FAST, 2, V.BUDGET_CYCLES) == 65536 // 10
     assert steps_for_budget(cls["euler"], M0PLUS_FAST, 3, V.BUDGET_CYCLES) == 65536 // 15
-    assert steps_for_budget(cls["rk4"], M0PLUS_FAST, 2, V.BUDGET_CYCLES) == 65536 // 66
-    assert cycle_count(cls["rk4"], M0PLUS_FAST, 1) == 33
+    assert steps_for_budget(cls["rk4"], M0PLUS_FAST, 2, V.BUDGET_CYCLES) == 65536 // 106
+    assert cycle_count(cls["rk4"], M0PLUS_FAST, 1) == 53
 
 
 # --------------------------------------------------------------------------- anchors and selection

@@ -1,5 +1,5 @@
 {
-  "_comment": "HANDOFF section 9. Computed and verified. Do not regenerate. Fractions are 'num/den' strings. Cycle counts at n_states=1 under section 4.5 rules.",
+  "_comment": "HANDOFF section 9. Computed and verified. Fractions are 'num/den' strings. Cycle counts at n_states=1 under the D45 per-instruction table rule (fixtures/m0plus_coeff_ops.json, scripts/build_coeff_ops.py).",
   "euler": {
     "A": [["0"]], "b": ["1"], "c": ["0"],
     "stages": 1, "order": 1, "row_sums_ok": true, "all_dyadic": true,
@@ -18,34 +18,34 @@
   "ralston2": {
     "A": [["0", "0"], ["2/3", "0"]], "b": ["1/4", "3/4"], "c": ["0", "2/3"],
     "stages": 2, "order": 2, "row_sums_ok": true, "all_dyadic": false,
-    "csd_total": 11, "quant_err": 1.017e-05, "cycles_fast": 16, "cycles_slow": 30
+    "csd_total": 11, "quant_err": 1.017e-05, "cycles_fast": 22, "cycles_slow": 22
   },
   "heun3": {
     "A": [["0", "0", "0"], ["1/3", "0", "0"], ["0", "2/3", "0"]], "b": ["1/4", "0", "3/4"], "c": ["0", "1/3", "2/3"],
     "stages": 3, "order": 3, "row_sums_ok": true, "all_dyadic": false,
-    "csd_total": 19, "quant_err": 1.017e-05, "cycles_fast": 23, "cycles_slow": 50
+    "csd_total": 19, "quant_err": 1.017e-05, "cycles_fast": 34, "cycles_slow": 34
   },
   "kutta3": {
     "A": [["0", "0", "0"], ["1/2", "0", "0"], ["-1", "2", "0"]], "b": ["1/6", "2/3", "1/6"], "c": ["0", "1/2", "1"],
     "stages": 3, "order": 3, "row_sums_ok": true, "all_dyadic": false,
-    "csd_total": 26, "quant_err": 1.017e-05, "cycles_fast": 26, "cycles_slow": 65
+    "csd_total": 26, "quant_err": 1.017e-05, "cycles_fast": 41, "cycles_slow": 41
   },
   "rk4": {
     "A": [["0", "0", "0", "0"], ["1/2", "0", "0", "0"], ["0", "1/2", "0", "0"], ["0", "0", "1", "0"]],
     "b": ["1/6", "1/3", "1/3", "1/6"], "c": ["0", "1/2", "1/2", "1"],
     "stages": 4, "order": 4, "row_sums_ok": true, "all_dyadic": false,
-    "csd_total": 34, "quant_err": 5.086e-06, "cycles_fast": 33, "cycles_slow": 85
+    "csd_total": 34, "quant_err": 5.086e-06, "cycles_fast": 53, "cycles_slow": 53
   },
   "rk38": {
     "A": [["0", "0", "0", "0"], ["1/3", "0", "0", "0"], ["-1/3", "1", "0", "0"], ["1", "-1", "1", "0"]],
     "b": ["1/8", "3/8", "3/8", "1/8"], "c": ["0", "1/3", "2/3", "1"],
     "stages": 4, "order": 4, "row_sums_ok": true, "all_dyadic": false,
-    "csd_total": 22, "quant_err": 5.086e-06, "cycles_fast": 36, "cycles_slow": 64
+    "csd_total": 22, "quant_err": 5.086e-06, "cycles_fast": 49, "cycles_slow": 49
   },
   "_anchor_cycles": {
     "_comment": "HANDOFF section 9.5. cycle_count(t, model, n_states).",
-    "rk4":  {"1": {"m0plus_fast": 33, "m0plus_slow": 85},  "2": {"m0plus_fast": 66, "m0plus_slow": 170}, "4": {"m0plus_fast": 132, "m0plus_slow": 340}},
-    "rk38": {"1": {"m0plus_fast": 36, "m0plus_slow": 64},  "2": {"m0plus_fast": 72, "m0plus_slow": 128}, "4": {"m0plus_fast": 144, "m0plus_slow": 256}}
+    "rk4":  {"1": {"m0plus_fast": 53, "m0plus_slow": 53},  "2": {"m0plus_fast": 106, "m0plus_slow": 106}, "4": {"m0plus_fast": 212, "m0plus_slow": 212}},
+    "rk38": {"1": {"m0plus_fast": 49, "m0plus_slow": 49},  "2": {"m0plus_fast": 98, "m0plus_slow": 98}, "4": {"m0plus_fast": 196, "m0plus_slow": 196}}
   },
   "_rk4_order5_residuals": ["1/120", "1/240", "-1/240", "1/120", "1/80", "-1/120", "-1/240", "1/240", "-1/120"],
   "_stability": {

@@ -54,12 +54,12 @@ jobs:
           pip install -r "$RUNNER_TEMP/requirements.txt"
       - name: verifier hash matches its pin (K3)
         run: python -m rk_harness.verifier_hash --check
-      - name: golden and canary tests (G1-G20, K1-K2)
+      - name: golden and canary tests (G1-G22, G28, K1-K2)
         run: |
           python -m pytest -rN -q -k \
             "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or \
              G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or \
-             G20_ or K1_ or K2_" tests
+             G20_ or G21_ or G22_ or G28_ or K1_ or K2_" tests
       # Which tests that expression actually selects, against tests/golden_gate.txt. It lives
       # in this job rather than in `hygiene` because collection needs the package importable
       # and this job already installed the dependencies. A node id that left the gate is
@@ -289,7 +289,7 @@ jobs:
       - name: nothing scored was written
         run: |
           for run in c d; do
-            for f in archive quarantine hypotheses.jsonl RUNSTATE.json EPOCH_STATUS.json; do
+            for f in archive epochs quarantine hypotheses.jsonl RUNSTATE.json EPOCH_STATUS.json EPOCH.json; do
               test ! -e "$RUNNER_TEMP/$run/$f" || { echo "side-track work created $f"; exit 1; }
             done
           done
@@ -323,7 +323,7 @@ jobs:
             -m pytest -rN -q -o cache_dir=/tmp/pc -k \
             "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or \
              G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or \
-             G20_ or K1_ or K2_" tests
+             G20_ or G21_ or G22_ or G28_ or K1_ or K2_" tests
       - name: the harness mount is read-only (K4)
         run: |
           docker run --rm --entrypoint sh \

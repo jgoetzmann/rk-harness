@@ -134,10 +134,10 @@ def _sv(fast: int, slow: int, search: float, heldout: float, measured=4.0) -> Sc
 
 
 def _rec(t: Tableau, sv: ScoreVector, tier: str, cycle_id: int, directive_id,
-         hypothesis_id=None, vh: str = VH) -> Record:
+         hypothesis_id=None, vh: str | None = None) -> Record:
     return Record(
         tableau_hash=content_hash(t), tableau=t, score=sv, tier=tier, cycle_id=cycle_id,
-        seed=0, verifier_hash=vh, directive_id=directive_id, hypothesis_id=hypothesis_id,
+        seed=0, verifier_hash=(vh or compute_verifier_hash()), directive_id=directive_id, hypothesis_id=hypothesis_id,
         timestamp=CLOCK,
     )
 
@@ -595,12 +595,12 @@ def test_B55_open_hypotheses_appear_in_replay_until_resolved(monkeypatch, tmp_pa
 
 GOOD_SRC = "import math\n\ndef f(t, y):\n    return (math.sin(y[0]),)\n"
 BAD_OS_SRC = "import os\n\ndef f(t, y):\n    return y\n"
-DECAY_SRC = (
+LOGISTIC_SRC = (
     "import math\n\n"
-    "def f(t, y):\n    return (-y[0],)\n\n"
-    "def reference(t):\n    return (math.exp(-t),)\n"
+    "def f(t, y):\n    return (y[0]*(1.0-y[0]),)\n\n"
+    "def reference(t):\n    return (1.0/(1.0+math.exp(-t)),)\n"
 )
-DECAY_SPEC = {"name": "decay2", "family": "linear", "n_states": 1, "y0": [1.0], "t_end": 5.0,
+LOGISTIC_SPEC = {"name": "logistic2", "family": "nonlinear", "n_states": 1, "y0": [0.5], "t_end": 5.0,
               "scale": 0.25, "peak": 1.0, "max_at_2x": 0.5}
 
 
@@ -614,7 +614,7 @@ def test_K11_check_source_rejects_os_import():
 def test_K11_check_source_accepts_math_only():
     assert check_source("import math\ndef f(t, y): return (math.sin(y[0]),)") == []
     assert check_source(GOOD_SRC) == []
-    assert check_source(DECAY_SRC) == []
+    assert check_source(LOGISTIC_SRC) == []
 
 
 @pytest.mark.parametrize("src", [
@@ -669,30 +669,30 @@ def test_B56_admitted_problems_is_empty_on_a_fresh_work_dir(monkeypatch, tmp_pat
 
 def test_B56_admit_accepts_a_clean_deterministic_bounded_in_range_problem(monkeypatch, tmp_path):
     _setup_env(monkeypatch, tmp_path)
-    stage("decay2", DECAY_SRC)
-    ok, reasons = admit("decay2", DECAY_SPEC)
+    stage("logistic2", LOGISTIC_SRC)
+    ok, reasons = admit("logistic2", LOGISTIC_SPEC)
     assert isinstance(ok, bool) and isinstance(reasons, list)
     assert ok is True
     assert reasons == []
     probs = admitted_problems()
     names = [p.name for p in probs]
-    assert "decay2" in names
-    p = probs[names.index("decay2")]
+    assert "logistic2" in names
+    p = probs[names.index("logistic2")]
     assert p.n_states == 1
     assert p.scale == 0.25
     assert p.t_end == 5.0
-    assert p.family == "linear"
-    assert abs(p.reference(5.0)[0] - math.exp(-5.0)) < 1e-9
-    # Problem.f is a Q15 rhs: y = 0.25 (physical 1.0) -> f = -1.0 physical -> -0.25 in Q15
-    assert p.y0 == (8192,)
-    assert p.f(0.0, (8192,)) == (-8192,)
+    assert p.family == "nonlinear"
+    assert abs(p.reference(5.0)[0] - 1.0/(1.0+math.exp(-5.0))) < 1e-9
+    # Problem.f is a Q15 rhs: y = 0.125 (physical 0.5) -> f = 0.25 physical -> 0.0625 in Q15
+    assert p.y0 == (4096,)
+    assert p.f(0.0, (4096,)) == (2048,)
 
 
 def test_B56_admit_rejects_a_problem_that_leaves_the_q15_range(monkeypatch, tmp_path):
     _setup_env(monkeypatch, tmp_path)
     stage("growth", "import math\n\ndef f(t, y):\n    return (y[0],)\n\n"
                     "def reference(t):\n    return (math.exp(t),)\n")
-    ok, reasons = admit("growth", {**DECAY_SPEC, "name": "growth", "peak": 148.41, "max_at_2x": 74.2})
+    ok, reasons = admit("growth", {**LOGISTIC_SPEC, "name": "growth", "peak": 148.41, "max_at_2x": 74.2})
     assert ok is False
     assert len(reasons) >= 1
     assert all(p.name != "growth" for p in admitted_problems())
@@ -703,7 +703,7 @@ def test_B56_admit_rejects_a_banned_import(monkeypatch, tmp_path):
     try:
         stage("evil", "import os\n\ndef f(t, y):\n    return (-y[0],)\n\n"
                       "def reference(t):\n    return (1.0,)\n")
-        ok, reasons = admit("evil", {**DECAY_SPEC, "name": "evil"})
+        ok, reasons = admit("evil", {**LOGISTIC_SPEC, "name": "evil"})
     except QuarantineError:
         ok, reasons = False, ["QuarantineError"]
     assert ok is False
@@ -717,7 +717,7 @@ def test_B56_admit_rejects_an_unbounded_time_problem(monkeypatch, tmp_path):
     stage("slowf", "import math\n\ndef f(t, y):\n    s = 0.0\n    for i in range(5000):\n"
                    "        s += math.sin(i)\n    return (-y[0] + 0.0 * s,)\n\n"
                    "def reference(t):\n    return (math.exp(-t),)\n")
-    ok, reasons = admit("slowf", {**DECAY_SPEC, "name": "slowf"})
+    ok, reasons = admit("slowf", {**LOGISTIC_SPEC, "name": "slowf"})
     assert ok is False
     assert len(reasons) >= 1
     assert all(p.name != "slowf" for p in admitted_problems())
@@ -1168,8 +1168,10 @@ def test_B61_costmodel_section_has_the_anchor_numbers_and_avr_note(monkeypatch, 
     cm = (out / "methodology.html").read_text(encoding="utf-8")
     assert '<h2 id="costmodel">Cost model</h2>' in cm
     section = cm.split('<h2 id="costmodel">', 1)[1].split("<h2 ", 1)[0]
-    for n in ("33", "85", "36", "64", "66", "170", "72", "128", "132", "340", "144", "256"):
-        assert n in section, n
+    classical = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "classical.json").read_text(encoding="utf-8"))
+    for name in ("euler", "midpoint", "heun2", "ralston2", "heun3", "kutta3", "rk4", "rk38"):
+        for key in ("cycles_fast", "cycles_slow"):
+            assert str(classical[name][key]) in section, (name, key)
     assert AVR_NOTE in section and "avr_approx" in section
     assert "rk4" in section and "rk38" in section
     for name in ("euler", "midpoint", "heun2", "ralston2", "heun3", "kutta3"):
@@ -1177,7 +1179,7 @@ def test_B61_costmodel_section_has_the_anchor_numbers_and_avr_note(monkeypatch, 
     assert BANNER in cm
     assert 'class="caption"' not in cm          # the undefined class is gone
     direct = sg._costmodel_section()
-    assert AVR_NOTE in direct and "33" in direct and "64" in direct
+    assert AVR_NOTE in direct and str(classical["rk4"]["cycles_fast"]) in direct and str(classical["rk38"]["cycles_slow"]) in direct
     check_banned(direct)
 
 

@@ -882,10 +882,15 @@ def test_C1_count_sequence_known_sequence_avr_from_mapping():
 
 
 def test_C2_rk4_slow_strictly_greater_than_fast():
+    # D45: no coefficient rk4 uses is in the compiler's MULS set, so the two
+    # M0+ models agree on rk4. They differ exactly where GCC multiplies, e.g.
+    # the 43/64 tableau below (fast 3, slow 34 per coefficient application).
     rk4 = classical()["rk4"]
-    assert cycle_count(rk4, M0PLUS_SLOW, 1) > cycle_count(rk4, M0PLUS_FAST, 1)
+    assert cycle_count(rk4, M0PLUS_SLOW, 1) == cycle_count(rk4, M0PLUS_FAST, 1)
     inline = _inline_classical()["rk4"]
-    assert cycle_count(inline, M0PLUS_SLOW, 1) > cycle_count(inline, M0PLUS_FAST, 1)
+    assert cycle_count(inline, M0PLUS_SLOW, 1) == cycle_count(inline, M0PLUS_FAST, 1)
+    muls = _tab([[F(0)], [F(43, 64)]], [F(0), F(1)], [F(0), F(43, 64)])
+    assert cycle_count(muls, M0PLUS_SLOW, 1) > cycle_count(muls, M0PLUS_FAST, 1)
 
 
 def test_C2_cost_model_constants_and_registry():
@@ -902,10 +907,43 @@ def test_C2_cost_model_constants_and_registry():
 
 
 def test_C3_low_csd_weight_is_strictly_cheaper_under_slow_model():
-    assert coeff_cost(F(1, 2), M0PLUS_SLOW) < coeff_cost(F(16385, 32768), M0PLUS_SLOW)
-    assert coeff_cost(F(1, 2), M0PLUS_FAST) < coeff_cost(F(16385, 32768), M0PLUS_FAST)
-    # The slow-model gap is the thesis: CSD expansion beats a 32-cycle multiply.
-    assert coeff_cost(F(1, 3), M0PLUS_SLOW) > coeff_cost(F(1, 3), M0PLUS_FAST)
+    assert coeff_cost(F(1, 2), M0PLUS_SLOW) < coeff_cost(F(43, 64), M0PLUS_SLOW)
+    assert coeff_cost(F(1, 2), M0PLUS_FAST) < coeff_cost(F(43, 64), M0PLUS_FAST)
+    # The thesis under D45: the models differ exactly where the compiler
+    # multiplies. 43/64 is movs+muls+asrs (fast 3, slow 34); 1/2 is one
+    # shift in both models, and 1/3 is shift-add in both.
+    assert coeff_cost(F(43, 64), M0PLUS_FAST) == 3
+    assert coeff_cost(F(43, 64), M0PLUS_SLOW) == 34
+    assert coeff_cost(F(1, 2), M0PLUS_SLOW) == coeff_cost(F(1, 2), M0PLUS_FAST)
+
+
+_COEFF_OPS = None
+
+
+def _coeff_ops():
+    global _COEFF_OPS
+    if _COEFF_OPS is None:
+        doc = json.loads((FIXTURES_DIR / "m0plus_coeff_ops.json").read_text(encoding="utf-8"))
+        tuples = [tuple(t) for t in doc["tuples"]]
+        _COEFF_OPS = {
+            key: [None if i is None else tuples[i] for i in doc[key]]
+            for key in ("shifted", "unshifted")
+        }
+    return _COEFF_OPS
+
+
+def _price_from_pinned_fixture(x, model):
+    """Independent derivation of the D45 price straight from the fixture file."""
+    ops = _coeff_ops()
+    r = to_rep(F(x))
+    if x == 0 or x == 1 or x == -1 or r.m == 0 or (r.s == 0 and abs(r.m) == 1):
+        return 0
+    key = "shifted" if r.s > 0 else "unshifted"
+    entry = ops[key][r.m + 32767]
+    assert entry is not None
+    mul, shift, add, load = entry
+    cyc = model.cycles
+    return mul * cyc["mul"] + shift * cyc["shift"] + add * cyc["add"] + load * cyc["load"]
 
 
 @pytest.mark.parametrize(
@@ -914,18 +952,22 @@ def test_C3_low_csd_weight_is_strictly_cheaper_under_slow_model():
         (F(1, 2), M0PLUS_SLOW, 1),
         (F(1, 2), M0PLUS_FAST, 1),
         (F(1, 2), AVR_APPROX, 8),
+        (F(43, 64), M0PLUS_FAST, 3),
+        (F(43, 64), M0PLUS_SLOW, 34),
         (F(16385, 32768), M0PLUS_SLOW, 3),
-        (F(16385, 32768), M0PLUS_FAST, 2),
+        (F(16385, 32768), M0PLUS_FAST, 3),
+        (F(16385, 32768), AVR_APPROX, 18),
         (F(3, 8), M0PLUS_SLOW, 3),
-        (F(3, 8), M0PLUS_FAST, 2),
+        (F(3, 8), M0PLUS_FAST, 3),
         (F(3, 8), AVR_APPROX, 18),
         (F(3, 4), M0PLUS_SLOW, 3),
-        (F(1, 3), M0PLUS_SLOW, 15),
-        (F(1, 3), M0PLUS_FAST, 2),
+        (F(1, 3), M0PLUS_SLOW, 7),
+        (F(1, 3), M0PLUS_FAST, 7),
         (F(1, 3), AVR_APPROX, 22),
-        (F(-1, 3), M0PLUS_SLOW, 15),
-        (F(1, 6), M0PLUS_SLOW, 15),
-        (F(2, 3), M0PLUS_SLOW, 15),
+        (F(-1, 3), M0PLUS_SLOW, 8),
+        (F(-1, 3), M0PLUS_FAST, 8),
+        (F(1, 6), M0PLUS_SLOW, 7),
+        (F(2, 3), M0PLUS_SLOW, 7),
         (F(2), M0PLUS_SLOW, 1),
         (F(2), M0PLUS_FAST, 1),
         (F(2), AVR_APPROX, 8),
@@ -933,10 +975,16 @@ def test_C3_low_csd_weight_is_strictly_cheaper_under_slow_model():
     ],
     ids=lambda v: (v.name if isinstance(v, CostModel) else str(v)),
 )
-def test_C3_coeff_cost_is_min_of_csd_and_multiply_paths(x, model, expected):
+def test_C3_coeff_cost_follows_the_pinned_table(x, model, expected):
+    # Every M0+ row is taken from fixtures/m0plus_coeff_ops.json: the pinned
+    # literal must equal the price derived straight from the fixture file, and
+    # the showcase rows match the lab disassembly sequences (headlines.json).
+    # AVR rows keep the min(csd, mul) rule, unchanged by D45.
     got = coeff_cost(x, model)
     assert got == expected
     assert isinstance(got, int) and not isinstance(got, bool)
+    if model.name in ("m0plus_fast", "m0plus_slow"):
+        assert got == _price_from_pinned_fixture(x, model)
 
 
 @pytest.mark.parametrize("model", [M0PLUS_FAST, M0PLUS_SLOW, AVR_APPROX], ids=lambda m: m.name)
@@ -965,21 +1013,23 @@ def test_C7_rk38_cheaper_than_rk4_under_slow_model():
     cl = classical()
     slow_rk38 = cycle_count(cl["rk38"], M0PLUS_SLOW, 1)
     slow_rk4 = cycle_count(cl["rk4"], M0PLUS_SLOW, 1)
-    assert slow_rk38 == 64
-    assert slow_rk4 == 85
+    assert slow_rk38 == 49
+    assert slow_rk4 == 53
     assert slow_rk38 < slow_rk4
 
 
-def test_C7b_rk4_cheaper_than_rk38_under_fast_model_reversal():
+def test_C7c_rk38_cheaper_than_rk4_under_both_models_as_traced():
+    # D45 retires the C7b reversal: under the pinned table rk38 is cheaper
+    # than rk4 under both M0+ models, matching the traced model scope.
     cl = classical()
     fast_rk4 = cycle_count(cl["rk4"], M0PLUS_FAST, 1)
     fast_rk38 = cycle_count(cl["rk38"], M0PLUS_FAST, 1)
-    assert fast_rk4 == 33
-    assert fast_rk38 == 36
-    assert fast_rk4 < fast_rk38
-    # And the same reversal from the inline HANDOFF coefficients.
+    assert fast_rk4 == 53
+    assert fast_rk38 == 49
+    assert fast_rk38 < fast_rk4
+    # And the same ordering from the inline HANDOFF coefficients.
     inline = _inline_classical()
-    assert cycle_count(inline["rk4"], M0PLUS_FAST, 1) < cycle_count(inline["rk38"], M0PLUS_FAST, 1)
+    assert cycle_count(inline["rk38"], M0PLUS_FAST, 1) < cycle_count(inline["rk4"], M0PLUS_FAST, 1)
     assert cycle_count(inline["rk38"], M0PLUS_SLOW, 1) < cycle_count(inline["rk4"], M0PLUS_SLOW, 1)
 
 
@@ -1069,10 +1119,12 @@ def test_G21_anchor_cycles(name, n, model_name, expected):
     assert cycle_count(_fixture_tableau(name), model, n) == expected
 
 
-def test_G21_anchor_ordering_reverses_between_models_at_every_n():
+def test_G21_anchor_ordering_matches_the_trace():
+    # D45 retires the reversal: rk38 is cheaper than rk4 under both models at
+    # every state count, matching the traced model scope (rk38 59, rk4 67).
     cl = classical()
     for n in (1, 2, 4):
-        assert cycle_count(cl["rk4"], M0PLUS_FAST, n) < cycle_count(cl["rk38"], M0PLUS_FAST, n)
+        assert cycle_count(cl["rk38"], M0PLUS_FAST, n) < cycle_count(cl["rk4"], M0PLUS_FAST, n)
         assert cycle_count(cl["rk38"], M0PLUS_SLOW, n) < cycle_count(cl["rk4"], M0PLUS_SLOW, n)
 
 
@@ -1083,6 +1135,166 @@ def test_G22_classical_cycles_at_n1_match_fixture(name, model_key, fixture_key):
     model = COST_MODELS[model_key]
     assert cycle_count(classical()[name], model, 1) == expected
     assert cycle_count(_inline_classical()[name], model, 1) == expected
+
+
+# ---------------------------------------------------------------------------
+# G28: the pinned per-multiplier table (D45)
+
+_EVIDENCE_DIR = PACKAGE_DIR.parent / "docs" / "evidence" / "coeff-ops"
+
+
+def _raw_coeff_ops_fixture():
+    return json.loads((FIXTURES_DIR / "m0plus_coeff_ops.json").read_text(encoding="utf-8"))
+
+
+def test_G28_table_price_equals_trm_price():
+    """Every pinned count tuple prices the same through the model's own table
+    and through tracecheck.instruction_cycles over the lab disassembly (D45 V1).
+
+    The class order of the tuples is checked against the TRM pricing of one
+    representative mnemonic per class, and every evidence showcase row's
+    fixture entry must equal its recorded tuple while the tuple price equals
+    the sum of instruction_cycles over its recorded disassembly sequence.
+    """
+    tc = _tc()
+    doc = _raw_coeff_ops_fixture()
+    reps = {"mul": ("MULS", "r0, r1"), "shift": ("LSLS", "r0, r0, #1"),
+            "add": ("ADDS", "r0, r0, r1"), "load": ("LDR", "r0, [pc, #4]")}
+    for model in (M0PLUS_FAST, M0PLUS_SLOW):
+        per_class = {cls: tc.instruction_cycles(mn, ops, model, False)
+                     for cls, (mn, ops) in reps.items()}
+        assert per_class == {k: model.cycles[k] for k in ("mul", "shift", "add", "load")}
+    show = json.loads((_EVIDENCE_DIR / "headlines.json").read_text(encoding="utf-8"))
+    rows = show["showcase"]["rows"]
+    assert len(rows) == 52
+    tuples = doc["tuples"]
+    shifted = doc["shifted"]
+    checked = 0
+    for row in rows:
+        assert row["templates_agree"]
+        entry = tuples[shifted[row["m"] + 32767]]
+        assert entry == row["byval_tuple"], row["m"]
+        for model in (M0PLUS_FAST, M0PLUS_SLOW):
+            mul, shift, add, load = entry
+            price = (mul * model.cycles["mul"] + shift * model.cycles["shift"]
+                     + add * model.cycles["add"] + load * model.cycles["load"])
+            ops = {"muls": "r0, r1", "ldr": "r0, [pc, #4]"}
+            traced = sum(tc.instruction_cycles(mn, ops.get(mn, "r0, r0, r1"), model, False)
+                         for mn in row["byval_seq"])
+            assert traced == price, (row["m"], row["s"], model.name)
+            checked += 1
+    assert checked == 104
+
+
+def test_G28_table_meta_matches_tracecheck_flags_and_toolchain():
+    """The fixture _meta names the pinned compiler, flags and templates (D45 V0)."""
+    tc = _tc()
+    meta = _raw_coeff_ops_fixture()["_meta"]
+    assert meta["cflags"] == list(tc.CFLAGS)
+    assert meta["compiler"].startswith("arm-none-eabi-gcc")
+    assert "13.2.1" in meta["compiler"]
+    assert "2.42" in meta["objdump"]
+    assert meta["decision"] == "D45"
+    assert meta["tuple_order"] == ["mul", "shift", "add", "load"]
+    assert meta["key_domains"] == {"shifted": "odd m in [-32767, 32767]",
+                                   "unshifted": "m with 2 <= |m| <= 32767"}
+    # The templates compile exactly the term costmodel emits (costmodel.py:120).
+    assert "(int32_t){m}) >> {s}" in meta["shifted_template"]
+    assert "(int32_t){m}) >> 0" in meta["unshifted_template"]
+    assert meta["shifted_canonical_s"] == 16
+    assert meta["n_keys"] == 98300
+    script = PACKAGE_DIR.parent / "scripts" / "build_coeff_ops.py"
+    assert script.is_file()
+    digest = hashlib.sha256(script.read_bytes()).hexdigest()
+    assert meta["generator_sha256"] == digest
+
+
+def test_G28_table_covers_every_rep_to_rep_can_return():
+    """Totality: every multiplier to_rep can return has a table entry (D45 V0/V6).
+
+    Shifted slots are filled for every odd m, unshifted slots for every m with
+    2 <= |m| <= 32767, and pricing the coefficients of the eight classical
+    anchors plus the lab corpus synthetics raises no KeyError.
+    """
+    ops = _coeff_ops()
+    for m in range(-32767, 32768, 2):  # odd m only: -32767 is odd
+        assert ops["shifted"][m + 32767] is not None, m
+    for m in range(-32767, 32768):
+        if abs(m) >= 2:
+            assert ops["unshifted"][m + 32767] is not None, m
+        else:
+            assert ops["unshifted"][m + 32767] is None, m
+    # The D45 corner slots stay empty so the rule fails closed without it.
+    assert ops["unshifted"][1 + 32767] is None
+    assert ops["unshifted"][-1 + 32767] is None
+    seen = set()
+    for name in CLASSICAL_NAMES:
+        t = classical()[name]
+        for row in list(t.A) + [t.b]:
+            for x in row:
+                seen.add(x)
+                for model in (M0PLUS_FAST, M0PLUS_SLOW):
+                    assert isinstance(coeff_cost(x, model), int)
+    corpus = json.loads((_EVIDENCE_DIR / "corpus.json").read_text(encoding="utf-8"))
+    for row in corpus["rows"]:
+        for entries in (row["tableau"]["A"], [row["tableau"]["b"]]):
+            for entry in entries:
+                for v in (entry if isinstance(entry, list) else [entry]):
+                    x = F(v)
+                    seen.add(x)
+                    for model in (M0PLUS_FAST, M0PLUS_SLOW):
+                        assert isinstance(coeff_cost(x, model), int)
+    assert len(seen) > 20
+
+
+def test_G28_slow_minus_fast_is_31_per_muls_application():
+    """The slow variant is priced from the same binary as fast: slow - fast is
+    31 per MULS-kind coefficient application per state (D45 section 2.2)."""
+    assert M0PLUS_SLOW.cycles["mul"] - M0PLUS_FAST.cycles["mul"] == 31
+    assert coeff_cost(F(43, 64), M0PLUS_SLOW) - coeff_cost(F(43, 64), M0PLUS_FAST) == 31
+    t = _tab([[F(43, 64)]], [F(1)], [F(43, 64)])
+    for n in (1, 2, 4):
+        assert cycle_count(t, M0PLUS_SLOW, n) - cycle_count(t, M0PLUS_FAST, n) == 31 * n
+    rk4 = classical()["rk4"]
+    for n in (1, 2, 4):
+        assert cycle_count(rk4, M0PLUS_SLOW, n) == cycle_count(rk4, M0PLUS_FAST, n)
+
+
+def test_G28_nine_traced_methods_have_no_muls_entry():
+    """No coefficient of the nine traced methods is in the MULS set, so fast
+    and slow agree on every one of them (D45 V2 premise)."""
+    tc = _tc()
+    assert len(tc.DEFAULT_METHODS) == 9
+    corpus = json.loads((_EVIDENCE_DIR / "corpus.json").read_text(encoding="utf-8"))
+    anchors = {row["key"]: row for row in corpus["rows"] if row["key"].startswith("anchor:")}
+    assert len(anchors) == 9
+    ops = _coeff_ops()
+    for name in tc.DEFAULT_METHODS:
+        row = anchors["anchor:" + name]
+        coefs = [F(v) for r in row["tableau"]["A"] for v in r] + [F(v) for v in row["tableau"]["b"]]
+        assert coefs, name
+        for x in coefs:
+            if x == 0 or x == 1 or x == -1:
+                continue
+            r = to_rep(x)
+            if r.m == 0 or (r.s == 0 and abs(r.m) == 1):
+                continue
+            entry = ops["shifted" if r.s > 0 else "unshifted"][r.m + 32767]
+            assert entry is not None, (name, x)
+            assert entry[0] == 0, (name, x, entry)
+
+
+def test_G28_avr_keeps_min_rule():
+    """avr_approx still prices min(csd_cost, mul_cost) from CSD weight (D45)."""
+    w = to_rep(F(1, 3)).csd_weight
+    assert w == 8
+    cyc = AVR_APPROX.cycles
+    assert coeff_cost(F(1, 3), AVR_APPROX) == min(w * cyc["shift"] + (w - 1) * cyc["add"],
+                                                 cyc["mul"] + cyc["shift"])
+    assert coeff_cost(F(1, 3), AVR_APPROX) == 22
+    assert coeff_cost(F(1, 2), AVR_APPROX) == 8
+    assert coeff_cost(F(3, 8), AVR_APPROX) == 18
+    assert coeff_cost(F(2), AVR_APPROX) == 8
 
 
 @pytest.mark.parametrize("line", ["FOO r0", "NOP", "MOV r0, r1", "BX lr", "    foo r0"])
@@ -1366,14 +1578,14 @@ def _expected_ops_per_step(t):
 
 
 def test_B95_the_trace_pin_is_its_own_and_never_joins_the_verifier_pin():
-    """CLAUDE.md rule 1: VERIFIER_FILES is the ten-file tuple whose sha256 every archived
+    """CLAUDE.md rule 1: VERIFIER_FILES is the fourteen-file tuple whose sha256 every archived
     record carries. Adding to it is an epoch boundary. The trace gets the same guarantee
     from a second pin that costs no score."""
     from rk_harness import trace_hash
     from rk_harness.verifier_hash import VERIFIER_FILES
     assert trace_hash.TRACE_FILES == ("rk_harness/tracecheck.py", "rk_harness/trace_hash.py")
     assert not set(trace_hash.TRACE_FILES) & set(VERIFIER_FILES)
-    assert len(VERIFIER_FILES) == 10
+    assert len(VERIFIER_FILES) == 14
     for rel in trace_hash.TRACE_FILES:
         assert (PACKAGE_DIR.parent / rel).is_file(), rel
     assert trace_hash.compute_trace_hash() == trace_hash.pinned_trace_hash()

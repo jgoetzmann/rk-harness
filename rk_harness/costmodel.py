@@ -1,13 +1,22 @@
 """Analytic cycle-cost model — HANDOFF §4.5, SPEC ### rk_harness/costmodel.py.
 
-Three cost models, a per-coefficient cost driven by CSD weight (never by the
-denominator), a per-tableau cycle count, an assembly-line counter for the
-fixtures/known_sequence.s cross-check, and a reference C emitter that is a
-string for human review only and is never executed.
+Three cost models, a per-coefficient cost, a per-tableau cycle count, an
+assembly-line counter for the fixtures/known_sequence.s cross-check, and a
+reference C emitter that is a string for human review only and is never
+executed.
+
+Per-coefficient pricing (DECISIONS D45): under the two M0+ models each
+coefficient costs what ``arm-none-eabi-gcc 13.2.1`` at ``tracecheck.CFLAGS``
+emits for exactly the term ``_c_term`` writes, counted by op class from the
+pinned fixture ``fixtures/m0plus_coeff_ops.json``. Under ``avr_approx`` each
+coefficient costs the cheaper of a shift-add chain and a hardware multiply,
+driven by CSD weight (never by the denominator).
 """
 from __future__ import annotations
 
+import json
 from fractions import Fraction
+from pathlib import Path
 
 from rk_harness.coeffrep import to_rep
 from rk_harness.types import CostModel, Tableau
@@ -39,17 +48,71 @@ _MNEMONIC_CLASS: dict[str, str] = {
     "SUBS": "add",
 }
 
+_M0PLUS_OPS_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "m0plus_coeff_ops.json"
+_M0PLUS_OPS_OFFSET = 32767
+_m0plus_ops_cache: dict[str, list] | None = None
+
+
+def _m0plus_ops() -> dict[str, list]:
+    """Pinned per-multiplier op-class counts, loaded lazily once (D45).
+
+    Returns {"shifted": [...], "unshifted": [...]} where each list is indexed
+    by m + 32767 and each slot holds a (mul, shift, add, load) tuple or None
+    where the multiplier is outside that array's domain. Reads only the pinned
+    fixture through Path(__file__), so pinned code imports nothing unpinned.
+    """
+    global _m0plus_ops_cache
+    if _m0plus_ops_cache is None:
+        doc = json.loads(_M0PLUS_OPS_PATH.read_text(encoding="utf-8"))
+        tuples = [tuple(t) for t in doc["tuples"]]
+        _m0plus_ops_cache = {
+            key: [None if i is None else tuples[i] for i in doc[key]]
+            for key in ("shifted", "unshifted")
+        }
+    return _m0plus_ops_cache
+
+
+def _m0plus_table_cost(r, cyc: dict[str, int]) -> int:
+    """Price one coefficient representation from the pinned table (D45).
+
+    `r` is a CoeffRep with r.m != 0. The shifted array covers every odd m
+    (to_rep returns odd m whenever s > 0); the unshifted array covers every m
+    with 2 <= |m| <= 32767. A multiplier outside both domains raises KeyError,
+    so the rule fails closed.
+    """
+    ops = _m0plus_ops()
+    key = "shifted" if r.s > 0 else "unshifted"
+    slot = r.m + _M0PLUS_OPS_OFFSET
+    entry = ops[key][slot] if 0 <= slot < len(ops[key]) else None
+    if entry is None:
+        raise KeyError(f"coefficient multiplier m={r.m} s={r.s} has no {key} table entry")
+    mul, shift, add, load = entry
+    return mul * cyc["mul"] + shift * cyc["shift"] + add * cyc["add"] + load * cyc["load"]
+
 
 def coeff_cost(x: Fraction, model: CostModel) -> int:
     """Cycles to apply one coefficient to one Q15 value under `model`.
 
     0 -> 0 (term omitted); +-1 -> 0 (copy, sign folds into ADDS/SUBS);
-    otherwise min(csd_cost, mul_cost) with w = to_rep(x).csd_weight.
+    a representation with m == 0 -> 0 (|x| below 2**-20: nothing to apply);
+    s == 0 and |m| == 1 -> 0 (D45 corner: M = +-1 emits a bare adds/subs,
+    which is the combination add already).
+    Otherwise under the two M0+ models the pinned per-multiplier table price
+    (D45), and under avr_approx min(csd_cost, mul_cost) with
+    w = to_rep(x).csd_weight (unchanged).
     """
     x = Fraction(x)
     if x == _ZERO or x == _ONE or x == _MINUS_ONE:
         return 0
     cyc = model.cycles
+    if model.name != AVR_APPROX.name:
+        r = to_rep(x)
+        if r.m == 0:
+            # Representation collapsed to m == 0: nothing to shift-add.
+            return 0
+        if r.s == 0 and abs(r.m) == 1:
+            return 0
+        return _m0plus_table_cost(r, cyc)
     w = to_rep(x).csd_weight
     if w <= 0:
         # Representation collapsed to m == 0 (|x| below 2**-20): nothing to shift-add.

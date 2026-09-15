@@ -75,6 +75,11 @@ hour and logs an advisory when the freeze threshold is met, and the epoch panels
 sites show its verdict; actually freezing now requires the owner (set
 watchdog.auto_freeze true in config.json, or run stop.ps1).
 
+Dated note 2026-09-15: epochs are numbered by boundary, so the correction
+lands as epoch 2 (D45). The anchor reversal above is a property of epoch
+1's cost rule; EPOCH2-DESIGN and EPOCH3-DESIGN keep their filenames as
+design identifiers.
+
 ## Out-of-band track (any time, no epoch break)
 
 - **Practical validation suite** (`rk_harness/validation.py`): real-application equations

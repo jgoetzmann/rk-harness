@@ -1,7 +1,7 @@
 """Checkout hygiene and the acceptance-evidence plumbing: scripts/hygiene.py,
 scripts/merge_junit.py, and preflight's evidence-dated report.
 
-Ids C30-C39. Two of these are tripwires rather than ordinary tests. C33 pins the exact node
+Ids C30-C40. Two of these are tripwires rather than ordinary tests. C33 pins the exact node
 ids the container's `-k` gate collects and C35 byte-compares the shipped workspace scripts
 against the workspace root, so both go red the moment either moves. That is the point: the
 gate's collected set and the restorable copies are things you want to hear about, not things
@@ -95,7 +95,7 @@ def test_C32_the_golden_gate_expression_is_identical_in_entrypoint_and_ci():
 
     # A planted third variant is caught: one term dropped from one of the two ci.yml copies.
     text = (HARNESS / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    planted = text.replace("G20_ or K1_ or K2_", "G20_ or K1_", 1)
+    planted = text.replace("G28_ or K1_ or K2_", "G28_ or K1_", 1)
     assert planted != text
     variants = hygiene.gate_expressions(planted)
     assert len(set(variants)) == 2, variants
@@ -112,13 +112,20 @@ def test_C33_the_golden_gate_collects_the_declared_tests():
                 (HARNESS / hygiene.GOLDEN_GATE).read_text(encoding="ascii").splitlines() if ln.strip()]
     assert recorded == sorted(recorded), "golden_gate.txt is stored sorted"
     prefixes = {re.sub(r"^test_([GK][0-9]+)_.*", r"\1", nid.split("::")[-1]) for nid in recorded}
-    # Only the prefixes the gate expression is meant to select. G21-G27 and K7-K16 exist in
+    # Only the prefixes the gate expression is meant to select. G23-G27 and K7-K16 exist in
     # the suite and are deliberately outside the gate, so this asserts coverage of the gate's
     # intended set and never of every prefix under tests/.
-    meant = {f"G{n}" for n in range(1, 21)} | {"K1", "K2"}
-    assert prefixes == meant, (
+    meant = {f"G{n}" for n in range(1, 23)} | {"G28", "K1", "K2"}
+    # G28 joins the gate with the pinned set's new table tests; until those land the widened
+    # expression selects the prefix but collects nothing under it, so the missing prefix is
+    # allowed for G28 only. Anything else missing, or anything extra collected, is the same
+    # red it always was.
+    assert prefixes <= meant, (
+        f"the gate collects prefixes outside its intended set {sorted(meant)}: "
+        f"{sorted(prefixes - meant)}")
+    assert meant - prefixes <= {"G28"}, (
         f"the gate is meant to select exactly {sorted(meant)}; golden_gate.txt records "
-        f"{sorted(prefixes)}. G21-G27 and K7-K16 are outside the gate on purpose.")
+        f"{sorted(prefixes)}. G23-G27 and K7-K16 are outside the gate on purpose.")
 
     # The failure message has to name what moved, in both directions, and keep recording the
     # gate apart from widening it. Driven through collect_gate rather than by editing the
@@ -142,7 +149,7 @@ def test_C33_the_golden_gate_collects_the_declared_tests():
 
 def test_C34_verifier_files_manifest_matches_the_pinned_tuple(tmp_path):
     declared = hygiene.read_verifier_files(HARNESS)
-    assert len(declared) == 10
+    assert len(declared) == 14  # D45: ten plus tableau/simulate/fixedpoint plus m0plus_coeff_ops
     manifest = HARNESS / "VERIFIER_FILES.txt"
     raw = manifest.read_bytes()
     assert b"\r" not in raw and raw.endswith(b"\n")
@@ -168,11 +175,11 @@ def test_C34_verifier_files_manifest_matches_the_pinned_tuple(tmp_path):
 
     # A manifest with an extra line must fail, and say what kind of change it would be.
     strayed = tmp_path / "VERIFIER_FILES.txt"
-    strayed.write_bytes(raw + b"rk_harness/tableau.py\n")
+    strayed.write_bytes(raw + b"rk_harness/runner.py\n")
     ok, detail = hygiene.check_verifier_manifest(HARNESS, strayed)
     assert not ok
     assert "epoch boundary" in detail, detail
-    assert "rk_harness/tableau.py" in detail, detail
+    assert "rk_harness/runner.py" in detail, detail
 
 
 # ------------------------------------------------------------------------------------ C35
@@ -403,6 +410,26 @@ def test_C38c_the_evidence_job_expects_exactly_the_shard_matrix():
 # ------------------------------------------------------------------------------------ C39
 
 _KEY_FINDINGS = WORKSPACE / "rk-overview" / "tools" / "key_findings.json"
+
+
+def _frozen_epoch_hashes() -> dict:
+    """epoch -> verifier_hash for the frozen epochs in root rk-work/EPOCH.json.
+
+    {} when the file is absent (epoch 1 never wrote one) or unreadable: the caller
+    then treats every non-live hash as a failure, which is the strict direction.
+    """
+    try:
+        doc = json.loads((WORKSPACE / "rk-work" / "EPOCH.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    frozen = doc.get("frozen", []) if isinstance(doc, dict) else []
+    if not isinstance(frozen, list):
+        return {}
+    out = {}
+    for block in frozen:
+        if isinstance(block, dict) and block.get("verifier_hash"):
+            out[str(block.get("epoch"))] = block["verifier_hash"]
+    return out
 _WEIGHTINGS = (("magnitude", None),
                ("equal_median_anchor", "median_anchor"),
                ("equal_reference_norm", "reference_norm"))
@@ -432,8 +459,19 @@ def test_C39_the_counterfactual_shares_sum_to_one_and_its_aggregates_reconstruct
     # evaluator produced is a ratio between two different things.
     assert n["provenance"]["trace_hash"] == (HARNESS / "TRACE_HASH").read_text(
         encoding="ascii").strip()
-    assert n["provenance"]["verifier_hash"] == (HARNESS / "VERIFIER_HASH").read_text(
-        encoding="ascii").strip()
+    live_pin = (HARNESS / "VERIFIER_HASH").read_text(encoding="ascii").strip()
+    kf_hash = n["provenance"]["verifier_hash"]
+    if kf_hash == live_pin:
+        pass  # strict: a live overview is scored under the live pin, nothing more to say
+    else:
+        # Frozen overview after a re-pin: key_findings.json keeps the hash of the epoch it
+        # was built under, because the epoch-1 overview cannot be rebuilt once the pin moves
+        # (D45). That hash must be a frozen epoch's hash in root rk-work/EPOCH.json, never an
+        # arbitrary string.
+        frozen = _frozen_epoch_hashes()
+        assert kf_hash in set(frozen.values()), (
+            f"key_findings.json verifier_hash {kf_hash!r} is neither the live pin "
+            f"{live_pin!r} nor any frozen epoch hash in rk-work/EPOCH.json ({frozen})")
     assert not n["excluded"]["state_counts_without_a_traced_price"], (
         "a state count the problem set uses has no traced price, so something in the grid "
         "was priced by extrapolation")
@@ -733,3 +771,97 @@ def test_C39c_the_overview_rms_tables_keep_their_share_columns():
                                          lambda r: set_of[r[col["problem"]]]))
     assert _share_faults(head, [r[:i] + ["n/a"] + r[i + 1:] for r in body], i,
                          (lambda r: r[col["method"]],))
+
+# ------------------------------------------------------------------------------------ C40
+
+def _c40_record(verifier_hash_value: str) -> str:
+    """One minimal but schema-valid archive record carrying the given hash.
+
+    Built through the real serializer so the guard reads exactly what the archive would
+    hold; the tableau is the real euler tableau and the score is a constant. No verifier
+    or evaluator call, so this stays fast.
+    """
+    from rk_harness import archive
+    from rk_harness import tableau as tableau_mod
+    from rk_harness.types import Record, ScoreVector
+    t = tableau_mod.classical()["euler"]
+    score = ScoreVector(
+        measured_order=1.0, order_fit_points=4, error_constant=0.1,
+        stability_real=2.0, stability_imag=0.0,
+        cycles={"m0plus_fast": 5, "m0plus_slow": 5, "avr_approx": 10},
+        csd_weight_total=3, coeff_quant_error=0.0,
+        search_error=0.01, heldout_error=0.02, overflow_margin=2.0,
+        per_problem={"dahlquist": 0.01},
+    )
+    rec = Record(
+        tableau_hash=tableau_mod.content_hash(t), tableau=t, score=score,
+        tier="no_incumbent", cycle_id=0, seed=0,
+        verifier_hash=verifier_hash_value, directive_id=None,
+        hypothesis_id=None, timestamp="2026-09-15T00:00:00Z",
+    )
+    return json.dumps(archive.record_to_json(rec))
+
+
+def test_C40_the_runner_guard_refuses_a_mixed_or_foreign_hash_archive_and_accepts_an_empty_one():
+    """Fail-closed epoch backstop (D45): epoch separation is by relocation, so an archive
+    file whose last parsable record carries any other hash refuses the run instead of
+    mixing two epochs' scores, and both refuse paths exit 0 so on-failure:5 does not loop.
+    An empty archive passes: it is the state the runner is built to start from.
+    """
+    from rk_harness import archive
+    from rk_harness import runner
+    from rk_harness import verifier_hash as vh_mod
+    from rk_harness.paths import archive_dir, work_dir
+    vh = vh_mod.compute_verifier_hash()
+    foreign = "0" * 64
+    assert foreign != vh
+    work_dir().mkdir(parents=True, exist_ok=True)
+
+    # An empty archive passes.
+    assert runner.archive_epoch_mismatches() == []
+    assert runner.refuse_on_epoch_mismatch() is False
+
+    # Records under the live pin pass.
+    archive_dir().mkdir(parents=True, exist_ok=True)
+    today = archive.today_path()
+    today.write_text(_c40_record(vh) + "\n", encoding="utf-8")
+    assert runner.archive_epoch_mismatches() == []
+    assert runner.refuse_on_epoch_mismatch() is False
+
+    # A foreign-hash record as the newest file's last record refuses, and a crash-torn
+    # trailing line cannot hide it: the guard reads the last PARSABLE record.
+    planted = _c40_record(foreign)
+    with open(today, "a", encoding="utf-8") as fh:
+        fh.write(planted + "\n")
+    assert runner.archive_epoch_mismatches() == [(today.name, foreign)]
+    with open(today, "a", encoding="utf-8") as fh:
+        fh.write('{"tableau_hash": "torn"\n')
+    assert runner.archive_epoch_mismatches() == [(today.name, foreign)]
+
+    # The refusal logs epoch_mismatch_refused naming what moved, and a cycle start exits
+    # 0 without doing any work.
+    assert runner.refuse_on_epoch_mismatch() is True
+    events = (work_dir() / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    refusals = [json.loads(ln) for ln in events if '"epoch_mismatch_refused"' in ln]
+    assert refusals, "the refusal must be logged"
+    assert refusals[-1]["expected"] == vh
+    assert refusals[-1]["mismatches"] == [
+        {"file": today.name, "verifier_hash": foreign}]
+    state = runner.load_state()
+    with pytest.raises(SystemExit) as exc:
+        runner.run_cycle(state)
+    assert exc.value.code == 0
+    assert runner.main(["--once"]) == 0
+
+    # A mixed archive refuses from the oldest file too: newest back under the pin,
+    # oldest carrying the foreign epoch.
+    today.write_text(_c40_record(vh) + "\n", encoding="utf-8")
+    old = archive_dir() / "2020-01-01.jsonl"
+    old.write_text(planted + "\n", encoding="utf-8")
+    assert runner.archive_epoch_mismatches() == [(old.name, foreign)]
+
+    # An empty file is not a foreign epoch: an oldest file with no parsable record
+    # passes beside a newest file under the pin.
+    old.unlink()
+    (archive_dir() / "2020-01-02.jsonl").write_text("", encoding="utf-8")
+    assert runner.archive_epoch_mismatches() == []

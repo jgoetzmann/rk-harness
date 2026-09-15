@@ -8,3 +8,7 @@ fixtures/classical.json
 fixtures/problems.json
 fixtures/q15.json
 fixtures/known_sequence.s
+rk_harness/tableau.py
+rk_harness/simulate.py
+rk_harness/fixedpoint.py
+fixtures/m0plus_coeff_ops.json

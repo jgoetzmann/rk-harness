@@ -22,11 +22,13 @@ Two write rules keep the results trustworthy:
   unseeded randomness. Reproducing a point means running it again and getting the
   same bytes.
 * Every ledger line carries `code_hash`, a digest over this module, the
-  prototypes it drives (the pair census and the Q15 adaptive prototype included)
-  and the two unpinned arithmetic modules the Q15 job measures, `simulate.py` and
-  `fixedpoint.py`. A point counts as measured only under the code that measured
-  it, so editing any of them re-opens its points instead of leaving stale numbers
-  on the site.
+  prototypes it drives (the pair census and the Q15 adaptive prototype included),
+  the other unpinned modules its jobs read, and the pinned verifier hash string.
+  `simulate.py` and `fixedpoint.py` left this digest for `VERIFIER_FILES` when
+  D45 executed D22(a); the folded pin is what re-opens their numbers now, since
+  any edit to a pinned file moves the pin. A point counts as measured only under
+  the code that measured it, so editing any of them re-opens its points instead
+  of leaving stale numbers on the site.
 
 CLI, in the style of rk_harness.saturation:
 
@@ -61,20 +63,27 @@ SIDETRACK_FILES: tuple[str, ...] = (
     "rk_harness/prototypes/adaptive_q15.py",
     "rk_harness/prototypes/pair_census.py",
     "rk_harness/prototypes/sdirk.py",
-    # Not prototypes, and not pinned either: the Q15 job measures the arithmetic
-    # these two define, so a change to either invalidates its numbers exactly the
-    # way a change to a prototype does. Neither is in verifier_hash.VERIFIER_FILES
-    # (test_ST12 holds that), but fixedpoint.py is on the scored path, so editing
-    # it was always a large act.
-    "rk_harness/simulate.py",
     # Added 2026-09-08 with J8 and J11. enumeration.lattice defines the exact space
     # the pair census counts over, and validation.ANALYTIC_JACOBIAN supplies the
     # matrices the Jacobian-cost job prices. Both decide published numbers and
     # neither is pinned, so both belong in the digest.
     "rk_harness/enumeration.py",
     "rk_harness/validation.py",
-    "rk_harness/fixedpoint.py",
 )
+# simulate.py and fixedpoint.py were here until D45 executed D22(a) and pinned
+# them: keeping them would put pinned files in an unpinned digest and trip ST12.
+# Their invalidation now comes from the folded pin in code_hash below, since any
+# edit to a pinned file moves the pin.
+
+
+def _pinned_verifier_hash() -> str:
+    """The VERIFIER_HASH pin string, stripped. Empty when unreadable, which only
+    re-opens points (the safe direction: sidetrack never fails a cycle)."""
+    try:
+        return (HARNESS_DIR / "VERIFIER_HASH").read_text(
+            encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
 
 
 def code_hash() -> str:
@@ -82,6 +91,11 @@ def code_hash() -> str:
     for rel in SIDETRACK_FILES:
         with open(HARNESS_DIR / rel, "rb") as fh:
             h.update(fh.read())
+    # The pinned hash string (D45): a move of any pinned file, including the
+    # newly pinned simulate.py and fixedpoint.py, re-opens every point, so
+    # invariant I11 holds without listing pinned files above.
+    h.update(b"\x00verifier_hash=")
+    h.update(_pinned_verifier_hash().encode("ascii", errors="replace"))
     return h.hexdigest()[:16]
 
 

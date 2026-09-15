@@ -288,6 +288,72 @@ def _rejected_hashes(current_vh: str | None = None) -> set[str]:
 
 
 # ----------------------------------------------------------------------------
+# epoch backstop
+# ----------------------------------------------------------------------------
+
+def _last_parsable_verifier_hash(path: Path) -> str | None:
+    """The verifier_hash of the last parsable record in one archive file.
+
+    Lines are walked from the bottom, so a crash-torn trailing line cannot hide
+    the record before it. None when the file holds no parsable record at all:
+    an empty file is not a foreign epoch.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw in reversed(text.split("\n")):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            rec = archive.record_from_json(json.loads(line))
+        except (ValueError, archive.RecordSchemaError):
+            continue
+        return rec.verifier_hash
+    return None
+
+
+def archive_epoch_mismatches() -> list[tuple[str, str]]:
+    """(filename, verifier_hash) pairs that refuse this archive under the live pin.
+
+    The fail-closed epoch backstop (D45): epoch separation is by relocation, so an
+    archive file whose last parsable record carries any other hash is a forgotten
+    relocation (the newest file still holds epoch 1 under the new pin) or a botched
+    restore (the oldest file sits beside the new epoch) mixing two epochs' scores.
+    Only the boundary files are read: the newest supersedes everything between
+    them, and a restored epoch-1 tree would sit at the oldest name. An empty
+    archive passes, which is exactly the state the runner is built to start from:
+    seed_baselines writes the eight anchors under the new hash.
+    """
+    try:
+        files = sorted((p for p in archive_dir().iterdir()
+                        if p.is_file() and p.name.endswith(".jsonl")),
+                       key=lambda p: p.name)
+    except OSError:
+        return []
+    if not files:
+        return []
+    current = verifier_hash.compute_verifier_hash()
+    boundary = (files[0], files[-1]) if len(files) > 1 else (files[0],)
+    return [(p.name, h) for p in boundary
+            if (h := _last_parsable_verifier_hash(p)) is not None and h != current]
+
+
+def refuse_on_epoch_mismatch() -> bool:
+    """Log epoch_mismatch_refused when the archive mixes hashes. True means refuse."""
+    bad = archive_epoch_mismatches()
+    if not bad:
+        return False
+    log_event("epoch_mismatch_refused",
+              expected=verifier_hash.compute_verifier_hash(),
+              mismatches=[{"file": name, "verifier_hash": h} for name, h in bad])
+    print("archive verifier hash differs from the live pin; "
+          "refusing to run (epoch_mismatch_refused)", file=sys.stderr)
+    return True
+
+
+# ----------------------------------------------------------------------------
 # LLM
 # ----------------------------------------------------------------------------
 
@@ -1141,6 +1207,11 @@ def _run_lane_cycle(state: RunState, new_cycle_id: int, arch, lane: str,
 
 
 def _run_cycle(state: RunState) -> RunState:
+    # Fail-closed epoch backstop (D45): a foreign-hash archive never reaches the
+    # replay below. SystemExit, not _abandon, so the run stops with exit 0 instead
+    # of abandoning one cycle and starting the next against the same mixed archive.
+    if refuse_on_epoch_mismatch():
+        raise SystemExit(0)
     new_cycle_id = state.cycle_id + 1
     phase = state.phase
     cycle_started = time.monotonic()
@@ -1382,6 +1453,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     heartbeat()
     state = load_state()
+    if refuse_on_epoch_mismatch():
+        return 0
     done = 0
     limit = 1 if args.once else args.cycles
     # Auto-stop limits (config.json run.auto_stop_cycles / run.auto_stop_minutes -> env).
@@ -1414,6 +1487,11 @@ def main(argv: list[str] | None = None) -> int:
         if env_minutes > 0 and (time.monotonic() - t_start) >= env_minutes * 60:
             log_event("stopped_by_time_limit", minutes=env_minutes, cycles=done, cycle_id=state.cycle_id)
             print(f"auto-stop: {env_minutes} minutes elapsed", file=sys.stderr)
+            return 0
+        # Each cycle start re-checks the backstop: the archive is a shared checkout
+        # and a relocation or restore can land between two cycles. The check inside
+        # _run_cycle is the same one; this one stops before a cycle starts.
+        if refuse_on_epoch_mismatch():
             return 0
         state = run_cycle(state)
         done += 1

@@ -257,10 +257,30 @@ def check(now: datetime.datetime | None = None) -> dict:
     return out
 
 
+def _epoch_number() -> int:
+    """The epoch this freeze record belongs to.
+
+    Read from EPOCH.json at the work root, defaulting to 1 when the run predates
+    epochs: epoch 1 never wrote one, and the findings panel reads the status with
+    int(status.get("epoch", 1)). A missing, corrupt or non-numeric value falls
+    back rather than raising, because a freeze record that cannot be written is
+    worse than one stamped with the default.
+    """
+    try:
+        with open(work_dir() / "EPOCH.json", "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        if not isinstance(doc, dict):
+            return 1
+        n = int(doc.get("epoch", 1))
+    except (OSError, ValueError, TypeError):
+        return 1
+    return n if n >= 1 else 1
+
+
 def mark_frozen(reason: str, now: datetime.datetime | None = None) -> dict:
     now = now or _now()
     status = {
-        "epoch": 1,
+        "epoch": _epoch_number(),
         "frozen_at": now.isoformat(),
         "reason": reason,
         "metrics": scan_progress(),

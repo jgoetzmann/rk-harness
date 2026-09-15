@@ -1,0 +1,34 @@
+Validation-lab gates V1-V5: pre-registration (PLAN.md section 3).
+
+No traced run of gates_v1v5.py run-gates may start until this file exists
+with the two sha256 values below. Any change to corpus.json or to the gate
+script afterwards voids the run (run-gates re-verifies both before tracing).
+
+corpus_sha256: aafe138eaf90acd58a498f61aa5d451588dfea1a1cef44a8445d1b1729cf9616
+script_sha256: a3bb8b0dc8e761f68a6b293cdd243b38f8936a33f34d8cfca41b809383666b96
+fixture_sha256: 01e4e901ab68e31909c023440467628da5f92301fc3f1647f85f5615906bc2f2
+
+corpus: 44 rows (9 anchors incl. 11e898cb, 12 archive <=4 stages by stride,
+  6 five/six-stage incl. 42863b93 8e9f832c per-step-only, 17 synthetic).
+scratch RK_WORK_DIR: lab/work (archive/corpus.jsonl: 36 copied records only).
+candidate rule: delegation 2.1 + RECOMMENDED CORNER (s==0,|m|==1 costs 0),
+  flagged for D45. models: costmodel.py:15-16 fast/slow.
+toolchain recorded by the lab run itself: arm-none-eabi-gcc 13.2.1 -O2
+  cortex-m0plus flags from tracecheck.CFLAGS, unicorn 2.1.4.
+
+Pre-PREREG engineering (disclosed, not evidence): lab/probe/probe1.py
+(euler + 43/64 synth at n=1..2), probe2/3 (disassembly inspection),
+pre_freeze_check.py (V2/V3 on 6 rows at n=1), pre_freeze_v45.py (V5 slice
+euler n=1, toy spearman/inversions). Corpus selection and synthetic
+definitions come from the delegation spec; probe outcomes only shaped the
+V3 bucket implementation pinned above.
+
+Run history (voided runs disclosed, no evidence carried silently):
+- run 1 under script d4c5dd4e: 176/176 traces completed, then died on a
+  NameError (crosscheck_one defined after the __main__ guard; module import
+  in probes had masked it). V1/V2/V4 verdicts computed but void with the run.
+- script fix 1 (def reorder, no logic change) then fix 2 (V3 class-C4 alias
+  names sb/sl/fp/ip; evaluation only, trace path untouched). Trace
+  checkpoints from run 1 (176 files) are reused by run 2 after a 3-row
+  fresh re-trace byte-compare (see run2.log); all 152 crosschecks and every
+  gate evaluation run under this PREREG.

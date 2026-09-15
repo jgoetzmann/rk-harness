@@ -1,0 +1,1666 @@
+{
+  "cflags": [
+    "-mcpu=cortex-m0plus",
+    "-mthumb",
+    "-O2",
+    "-ffreestanding",
+    "-nostdlib"
+  ],
+  "domain_probe": {
+    "checked": 38561,
+    "ok": true,
+    "violations": []
+  },
+  "gcc": "arm-none-eabi-gcc (15:13.2.rel1-2) 13.2.1 20231009",
+  "objdump": "GNU objdump (2.42-1ubuntu1+23) 2.42",
+  "showcase": {
+    "rows": [
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 3,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 3,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 3,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 3,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -3,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -3,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -3,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -3,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 43,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 43,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 43,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 43,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -43,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -43,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -43,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -43,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 77,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 77,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 77,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "m": 77,
+        "ptr_seq": [
+          "movs",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -77,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -77,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -77,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "m": -77,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "lsls",
+          "subs",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          4,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": -255,
+        "ptr_seq": [
+          "lsls",
+          "subs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 257,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 257,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 257,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "m": 257,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          2,
+          1,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "m": 10923,
+        "ptr_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "m": 10923,
+        "ptr_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "m": 10923,
+        "ptr_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "byval_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "m": 10923,
+        "ptr_seq": [
+          "ldr",
+          "muls",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "m": -10923,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "m": -10923,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "m": -10923,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "m": -10923,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "m": 21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "m": 21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "m": 21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "m": 21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          3,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "m": -21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "s": 1,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "m": -21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "s": 6,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "m": -21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "s": 16,
+        "templates_agree": true
+      },
+      {
+        "byval_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "byval_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "m": -21845,
+        "ptr_seq": [
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "lsls",
+          "adds",
+          "negs",
+          "asrs"
+        ],
+        "ptr_tuple": [
+          0,
+          4,
+          4,
+          0
+        ],
+        "s": 20,
+        "templates_agree": true
+      }
+    ],
+    "showcase_s_independent": true,
+    "template_agreement": [
+      52,
+      52
+    ]
+  },
+  "sweep": {
+    "match": true,
+    "n_keys": 16383,
+    "n_muls": 12978,
+    "n_shiftadd": 3405,
+    "o2_muls_set_equal": true,
+    "o2_seq_mismatch_examples": [],
+    "o2_seq_mismatches": 0,
+    "plan_claim": {
+      "n_muls": 12978,
+      "n_shiftadd": 3405
+    }
+  }
+}

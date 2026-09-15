@@ -507,6 +507,12 @@ not in the gate, so a test that demanded total coverage would fail the moment it
 **Epoch impact.** (a) epoch boundary. (b) none: `entrypoint.sh` is not in `VERIFIER_FILES`, though
 it is a rule-1 file that needs a stated reason, which this record is.
 
+**D22 amendment (dated 2026-09-15, R3).** (a) was executed under D45:
+`tableau.py`, `simulate.py` and `fixedpoint.py` joined the pin;
+`simulate.py` and `fixedpoint.py` left `SIDETRACK_FILES`; `code_hash`
+folds the pinned string, and ST12 passes unchanged. (b), the F tokens, is
+still open.
+
 ---
 
 ## D23 - Tier stays an insertion-time label, and the elite grid keeps ranking on held-out error alone (2026-09-07)
@@ -1666,6 +1672,10 @@ not closed here.
 **Epoch impact.** None. No verifier-pinned file is edited, `VERIFIER_HASH` is untouched, nothing
 under `rk-work/archive` is read as authoritative or written, and every archived score keeps its
 meaning. The counterfactual re-prices steps in a document beside the archive and never in it.
+
+**D43 note (dated 2026-09-15, R3).** Its numbers are epoch 1's, scored
+under de5bec22 on the analytic basis. The whole-step budget denominator
+stays admitted; whole step as a numerator stays forbidden.
 
 ---
 

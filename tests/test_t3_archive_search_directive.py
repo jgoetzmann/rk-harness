@@ -198,7 +198,7 @@ def _sv(
         error_constant=0.0123,
         stability_real=stability_real,
         stability_imag=stability_imag,
-        cycles=cycles if cycles is not None else {"m0plus_fast": 33, "m0plus_slow": 85, "avr_approx": 150},
+        cycles=cycles if cycles is not None else {"m0plus_fast": 53, "m0plus_slow": 53, "avr_approx": 150},
         csd_weight_total=csd,
         coeff_quant_error=quant,
         search_error=search,
@@ -214,10 +214,10 @@ def _sv_for(t: Tableau, search: float = 0.01, heldout: float = 0.02) -> ScoreVec
         content_hash(_euler()): ({"m0plus_fast": 5, "m0plus_slow": 5, "avr_approx": 20}, 0, 0.0, 0.98),
         content_hash(_midpoint()): ({"m0plus_fast": 11, "m0plus_slow": 11, "avr_approx": 40}, 1, 0.0, 2.0),
         content_hash(_heun2()): ({"m0plus_fast": 13, "m0plus_slow": 13, "avr_approx": 45}, 2, 0.0, 2.01),
-        content_hash(_heun3()): ({"m0plus_fast": 23, "m0plus_slow": 50, "avr_approx": 90}, 19, 1.017e-05, 3.0),
-        content_hash(_kutta3()): ({"m0plus_fast": 26, "m0plus_slow": 65, "avr_approx": 100}, 26, 1.017e-05, 3.04),
-        content_hash(_rk4()): ({"m0plus_fast": 33, "m0plus_slow": 85, "avr_approx": 150}, 34, 5.086e-06, 4.07),
-        content_hash(_rk38()): ({"m0plus_fast": 36, "m0plus_slow": 64, "avr_approx": 140}, 22, 5.086e-06, 4.06),
+        content_hash(_heun3()): ({"m0plus_fast": 34, "m0plus_slow": 34, "avr_approx": 90}, 19, 1.017e-05, 3.0),
+        content_hash(_kutta3()): ({"m0plus_fast": 41, "m0plus_slow": 41, "avr_approx": 100}, 26, 1.017e-05, 3.04),
+        content_hash(_rk4()): ({"m0plus_fast": 53, "m0plus_slow": 53, "avr_approx": 150}, 34, 5.086e-06, 4.07),
+        content_hash(_rk38()): ({"m0plus_fast": 49, "m0plus_slow": 49, "avr_approx": 140}, 22, 5.086e-06, 4.06),
     }
     cycles, csd, quant, mo = table[content_hash(t)]
     return _sv(search=search, heldout=heldout, cycles=dict(cycles), csd=csd, quant=quant, measured_order=mo)
@@ -711,7 +711,7 @@ def test_B36_rk4_and_rk38_share_cell_4_2_and_lower_heldout_wins(monkeypatch, tmp
     assert abs(cs.mean - 0.0175) < 1e-12
     cyc = arch.cell_stats[(4, 4)]["fast.cycles"]
     assert cyc.n == 2
-    assert cyc.min == 33
+    assert cyc.min == 49
 
 
 def test_B36_elites_matches_replay_grid(monkeypatch, tmp_path):
@@ -741,8 +741,8 @@ def test_B36_records_of_different_orders_land_in_different_grids(monkeypatch, tm
     arch = replay()
     assert arch.n_records == 3
     assert list(arch.grids[2].keys()) == [(2, 0)]        # heun2: 13 fast cycles -> bucket 0
-    assert list(arch.grids[3].keys()) == [(3, 1)]        # kutta3: 26 fast cycles -> bucket 1
-    assert list(arch.grids[4].keys()) == [(4, 2)]        # rk4: 33 fast cycles -> bucket 2
+    assert list(arch.grids[3].keys()) == [(3, 2)]        # kutta3: 41 fast cycles -> bucket 2
+    assert list(arch.grids[4].keys()) == [(4, 2)]        # rk4: 53 fast cycles -> bucket 2
     assert arch.grids[1] == {}
 
 
@@ -764,8 +764,8 @@ def test_B36_metric_value_resolves_model_and_metric():
     assert metric_value(sv, "slow", "search") == 0.044
     assert metric_value(sv, "avr_approx", "heldout") == 0.055
     assert metric_value(sv, "avr_approx", "search") == 0.066
-    assert metric_value(sv, "fast", "cycles") == 33
-    assert metric_value(sv, "slow", "cycles") == 85
+    assert metric_value(sv, "fast", "cycles") == 53
+    assert metric_value(sv, "slow", "cycles") == 53
     assert metric_value(sv, "avr_approx", "cycles") == 150
     assert metric_value(sv, "fast", "order") == 4.07
     assert metric_value(_sv(measured_order=None), "fast", "order") is None
@@ -826,8 +826,8 @@ def test_B39_features_of_rk4():
     assert len(f) == 12
     assert f[0] == 4          # stages
     assert f[1] == 34         # csd_weight_total
-    assert f[3] == 33         # fast cycles, n=1
-    assert f[4] == 85         # slow cycles, n=1
+    assert f[3] == 53         # fast cycles, n=1
+    assert f[4] == 53         # slow cycles, n=1
     assert f[5] == 1.0        # sum(b)
     assert f[11] == 4         # achieved_order_symbolic
 
@@ -1122,7 +1122,7 @@ def test_G26_cheapest_phase0_under_slow_is_midpoint_at_11_cycles():
     assert len(ch) == 16
     assert ch[0][0] == 11
     assert content_hash(ch[0][1]) == content_hash(_midpoint())
-    assert [c for c, _ in ch[:5]] == [11, 13, 13, 13, 15]
+    assert [c for c, _ in ch[:5]] == [11, 13, 13, 14, 15]
     assert [c for c, _ in ch] == sorted(c for c, _ in ch)
 
 
@@ -1134,7 +1134,7 @@ def test_G26_five_cheapest_match_the_fixture_table():
         (Fraction(-1, 2), (Fraction(2), Fraction(-1))),
         (Fraction(1), (Fraction(1, 2), Fraction(1, 2))),
         (Fraction(1, 4), (Fraction(-1), Fraction(2))),
-        (Fraction(-1), (Fraction(3, 2), Fraction(-1, 2))),
+        (Fraction(1, 16), (Fraction(-7), Fraction(8))),
     }
     assert got == expected
 
@@ -1167,11 +1167,11 @@ def test_G26_cheapest_of_empty_list_is_empty():
 
 
 def test_G26_cheapest_orders_by_cycle_count_under_the_given_model():
-    ch_fast = cheapest([_rk38(), _rk4(), _heun2()], M0PLUS_FAST)
-    assert [c for c, _ in ch_fast] == [13, 33, 36]
-    assert content_hash(ch_fast[1][1]) == content_hash(_rk4())
-    ch_slow = cheapest([_rk38(), _rk4(), _heun2()], M0PLUS_SLOW)
-    assert [c for c, _ in ch_slow] == [13, 64, 85]
+    ch_fast = cheapest([_rk38(), _rk4(), _midpoint()], M0PLUS_FAST)
+    assert [c for c, _ in ch_fast] == [11, 49, 53]
+    assert content_hash(ch_fast[1][1]) == content_hash(_rk38())
+    ch_slow = cheapest([_rk38(), _rk4(), _midpoint()], M0PLUS_SLOW)
+    assert [c for c, _ in ch_slow] == [11, 49, 53]
     assert content_hash(ch_slow[1][1]) == content_hash(_rk38())
 
 

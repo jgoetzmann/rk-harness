@@ -1,6 +1,6 @@
 """Verifier hash — HANDOFF §4.11. Hand-written (HANDOFF §16.1).
 
-sha256 over the concatenation, in this exact order, of ten files. A change to any of
+sha256 over the concatenation, in this exact order, of fourteen files. A change to any of
 them silently changes every score in the archive, so the pinned value is checked at
 container start (test K3) and every record carries the hash that produced it.
 """
@@ -22,6 +22,10 @@ VERIFIER_FILES: tuple[str, ...] = (
     "fixtures/problems.json",
     "fixtures/q15.json",
     "fixtures/known_sequence.s",
+    "rk_harness/tableau.py",
+    "rk_harness/simulate.py",
+    "rk_harness/fixedpoint.py",
+    "fixtures/m0plus_coeff_ops.json",
 )
 
 PIN_FILE = HARNESS_DIR / "VERIFIER_HASH"

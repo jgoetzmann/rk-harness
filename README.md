@@ -382,8 +382,8 @@ out of the container.
 
 ## Rules for changing code
 
-1. **The ten pinned files are an epoch boundary, not an edit.** Changing one invalidates every
-   score in the archive. The container refuses to start on a mismatch, and CI fails. Re-pinning
+1. **The fourteen pinned files are an epoch boundary, not an edit.** Changing one invalidates every
+   score in the archive. The list lives in `VERIFIER_FILES.txt`. The container refuses to start on a mismatch, and CI fails. Re-pinning
    is never a routine step. The sequence is: freeze the epoch, edit the pinned files and any
    golden values the change is meant to move, run `python -m rk_harness.verifier_hash --pin`
    last, rebuild the image, and start a new archive. Some golden values sit in `fixtures/`,
