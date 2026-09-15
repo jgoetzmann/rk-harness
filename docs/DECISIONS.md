@@ -1524,4 +1524,396 @@ scored record is read or written, and every archived score keeps its meaning. Th
 imports `costmodel.emit_c` and never modifies it. The new pin is separate by construction,
 which is the whole point of it.
 
+**Amended 2026-09-12: the coverage above is extended, and `TRACE_HASH` moves once to pay for
+it.** The entry's numbers describe a run over six methods at one and two states. `CASES` and
+`TRACE_CASES` now reach every state count the scored problems use, adding rc_thermal at three
+states and quaternion at four with a step ladder and a rail probe each, and `DEFAULT_METHODS`
+adds ralston2, heun3 and kutta3 so that all eight classical anchors carry a trace row rather
+than five of them. The reason for the second half is the anchor set rather than the coverage:
+anything pricing steps from this document re-chooses its best classical anchor by minimum, and
+a minimum over five traced anchors is not comparable with a published one taken over eight.
+`TRACE_HASH` is repinned to `61f3a1bc` and the document regenerated; every one-state and
+two-state number in it is byte-identical to the run described above, the cross-check is now
+144 of 144 comparable cases with 25 trapping at the same operation index, and `state_scaling`
+carries n1 through n4. Two published readings move with the wider field and are not errors in
+it: the Spearman correlation under `m0plus_fast` is 0.9833 over nine methods where it was
+0.9429 over six, and under `m0plus_slow` the two orderings no longer agree on every pair, so
+any page saying they do is now stating something this document does not.
+
+**Amended 2026-09-14: the multiply sentence is scoped to the nine traces.** The entry's
+"What would reopen this" said `coeff_cost` prices a multiply the compiler does not emit.
+The epoch plan's recount showed that holds only for the nine traced methods: at the same
+flags GCC emits a hardware multiply for 12,978 of 16,383 positive odd multipliers, and
+negative coefficients compile differently again (recomputed independently for this entry:
+`n_muls` 12978 over 16383 keys, zero sequence mismatches, s-invariance clean). Both sites
+now say "in these nine traces" (`rk_harness/sitegen.py:4729`,
+`rk-overview/tools/generate.py:3131`, asserted in
+`tests/test_t4_ledger_runner_site.py:3528`). The correction itself stays an epoch boundary
+behind D45 and is not part of this amendment.
+
+---
+
+## D43 - The counterfactual grid is published in full, and whole step is admitted as a budget basis and nothing else (2026-09-12)
+
+**Decision.** `rk-overview/tools/counterfactual.py` rescores the eight classical anchors and the
+champion under two cost bases and three weightings, re-ranks the whole archive under equal
+weighting, and writes the result into `rk-overview/tools/key_findings.json` as the
+`counterfactual` finding. That file is already on the traceability list, so this admits no new
+document. Every number taken from it is rendered with three labels: the cost basis it was scored
+under, the scope of that basis (the whole `rk_step`, the derivative routine's own body excluded),
+and the fact that the prices behind it come from an emulator that is instruction accurate and not
+cycle accurate. Nothing pinned is edited; `costmodel`, `evaluator`, `problems` and `simulate` are
+imported and used as they are, no archived score is read as authoritative or rewritten, and the
+module refuses to run unless the trace document's `verifier_hash` and `trace_hash` both equal the
+pins on disk.
+
+**Whole step as a budget basis, and not as a model-error ratio.** CLAUDE.md and D42 forbid quoting
+a whole-step traced count against `cycles_analytic`. That prohibition stands and this entry does
+not soften it: most of the gap between 5 and 32 cycles for euler is work the analytic model
+excludes on purpose, so the ratio reports a scope difference as a model error. The counterfactual
+puts the traced number somewhere else, under the division that turns a budget into steps:
+`steps = 65,536 // cycles`. A real part pays the derivative call, the h times k product, loop
+control and the stack frame out of that same budget, so pricing steps at the compiled cost asks
+what the archive would have scored on a part. It does not ask how wrong the cost model is, and it
+cannot answer that question. The two uses are told apart by which side of the division the number
+sits on. Printing `ratio 6.400` beside `analytic 5` stays forbidden. Printing that euler takes
+1,598 steps at two states where the model gave it 6,553, and then printing the error that follows,
+is what this entry permits. Neither basis is the whole cost either: the analytic model prices less
+than the traced count and the traced count prices less than an application step, so the two
+together are a bracket rather than a correction, and a page that quotes one quotes the bracket.
+
+**What the counterfactual found, because it is not a confirmation.** Under the published weighting,
+moving from the analytic basis to the traced whole-step basis takes the champion's lead over the
+best classical anchor from 2.95x to 1.01x. The best anchor changes identity from midpoint to
+heun3, which is exactly the anchor that had no trace row before the extension above, and on three
+of the four reduced held-out sets the anchor is ahead rather than behind: dropping rc_thermal
+leaves 0.61x where the published number is 1.92x. Finding 2 moves further. On the analytic basis
+euler holds rank 1 of the four published methods on search-set RMS at 0.0129; on the traced basis
+it holds rank 4 at 0.0265 and rk38 holds rank 1 at 0.0095. The direction could not have been
+reasoned out in advance, because Q15 error is not monotone in step count, and it was measured at
+every state count the problem set uses rather than modelled at two of them: the whole-step cost is
+markedly non-linear in state dimension, and the affine fit from one and two states would have
+underpriced four states by 1.46x for rk4 up to 2.43x for midpoint.
+
+The weighting moves the same headline by more than the cost does. Held-out error is an RMS, which
+sums squares, so rc_thermal carries 64.8 percent of the champion's held-out sum of squares and 85.1
+percent of midpoint's while pendulum carries 0.7 and 0.00002 percent. Dividing each problem by the
+median error of the eight anchors takes 2.95x to 1.10x, with the best anchor ahead on three of the
+four reduced sets (0.94x, 0.81x, 0.99x), and moves rank 1 on the search set from euler to heun2.
+
+**Why two scales and not one.** The audit proposed either the reference norm or the median error
+across the anchor set as the divisor. They disagree, and the disagreement is the result. Dividing
+by the reference norm takes 2.95x to 3.36x, a wider lead than the published one, because
+rc_thermal's norm of 0.159 is the smallest of the four held-out problems: normalizing by it
+concentrates weight rather than spreading it, and rc_thermal's share of the champion's sum of
+squares rises from 64.8 percent to 98.7 percent and midpoint's from 85.1 to 99.6. So the
+reference-norm scale does not implement equal weighting here, it implements a sharper rc_thermal
+score. The median-anchor scale is the equal-weighting answer and is named as such wherever both
+appear; the reference-norm scale is published beside it, never alone, as the demonstration that
+the choice of divisor decides the outcome. Both scales are constants of the analytic basis, so a
+weighting comparison and a cost comparison never move together.
+
+**The archive re-ranking, which the ratio alone cannot answer.** The champion was selected under
+magnitude weighting, so an equal-weighted ratio for that same champion describes the metric and
+not the search. Every archived record already stores its four held-out errors, so re-aggregating
+all 141,364 of them under equal weighting needs no simulation. Under the published weighting the
+champion is rank 1 of 141,364. Under the median-anchor scale it is rank 9,974, and the tableau
+that would have won is a 6-stage elite at 73 cycles per step. Under the reference-norm scale it is
+rank 15, and the winner is a 2-stage elite at 17 cycles. No classical anchor is ahead of the
+champion under any of the three. What the search would have kept under equal weighting is
+therefore a different method, and the page says that rather than implying the champion survives a
+metric it was not selected under.
+
+**The alternative this rejects.** "Report the counterfactual only where it is favourable, or fold
+it into a sentence about robustness." Three of the six cells in the grid put a classical anchor
+ahead of the champion. A grid published with two cells removed is a different claim from the grid,
+and the project has published against itself before: three of six methods outside the tolerance
+band in D42, the Spearman inversion named rather than dropped. The whole grid ships, including the
+cell where the median-anchor ratio on the traced basis falls to 0.05, which is the metric
+magnifying pendulum rather than the champion losing twentyfold, and which the document explains in
+a generated sentence beside the number.
+
+**What it does not establish.** Not that the cost model is wrong, and not by how much: that is the
+model-error question D42 answered at matched scope and this entry does not reopen. Not what the
+search would have found under a different cost basis, which would need the archive replayed rather
+than re-aggregated. Not anything about a physical part, since no number here was measured on one.
+Not that equal weighting is the better metric; it is a different metric, and the site publishes
+both with the shares that tell them apart.
+
+**Evidence.** `rk-overview/tools/counterfactual.py`, the harness and the driver;
+`rk-overview/tools/key_findings.json`, key `counterfactual`, which carries `invariants` recomputed
+at build time: the leave-one-out rows reproduce the published ones to 0.0, rebuilding search and
+held-out error from the per-problem values reproduces the published aggregates to 0.0, the 28
+floor cells of `tools/floor_round.json` reproduce to 0.0 relative, all 108 published share sets sum
+to one within 2.2e-16, and every step count is still a budget division.
+`rk-overview/tools/key_findings.py` `_check_counterfactual`, where those invariants fail the build
+instead of publishing. Prices from `rk-work/trace/results.json` `state_scaling`, joined by tableau
+content hash rather than by name, under `TRACE_HASH` 61f3a1bc and `VERIFIER_HASH` de5bec22.
+
+**Consequence.** A page may state the counterfactual ratios, the search-set ranks, the weight
+shares and the archive re-ranking, each with its basis and its weighting named in the same
+sentence, because six cells of a grid are only readable if each one says which cell it is. A page
+may not state that the cost model is wrong by a factor, may not compare a counterfactual error
+with an archived score without both labels, which is the comparability rule D24 set, and may not
+publish one weighting scale without the other. The fifteen discovered cell elites that hold a cell
+but were never compiled and traced are named as excluded rather than priced by a fit, and every
+state count the problem set uses is priced, so nothing in the grid is extrapolated.
+
+**Closes.** The audit's G1 acceptance conditions 3 and 4 and G3 acceptance conditions 1, 3, 5 and
+7. The page halves of G1 acceptance 2 and G3 acceptances 2, 4 and 6 belong to the renderers and are
+not closed here.
+
+**Epoch impact.** None. No verifier-pinned file is edited, `VERIFIER_HASH` is untouched, nothing
+under `rk-work/archive` is read as authoritative or written, and every archived score keeps its
+meaning. The counterfactual re-prices steps in a document beside the archive and never in it.
+
+---
+
+## D44 - The round-2 audit closes on fifteen recorded defaults, and one check is left for a person (2026-09-13)
+
+**Decision.** The round-2 audit of the two sites left a set of items that only the owner could
+decide. The close-out's acceptance ledger holds 159 acceptances, and its completeness critic
+listed 25 owner items among and around them. The orchestrator of the close-out took fifteen
+defaults on the owner's behalf, D-a to D-o, and the fix lanes built against them. This entry
+records each default with its reason, gives every owner item a disposition, answers the audit on
+three G2 points, and names the one check a build cannot run. The owner can reverse any default.
+A reversal is a new entry; this one stays as written, the way D41 left the records it superseded.
+
+**The defaults, and why each was taken.**
+
+D-a. No page asserts a design intent that no document records. G1 acceptance 5 asks the
+methodology page to say why the aggregate is magnitude-weighted. Nothing in this file, in
+`rk-harness/docs/`, in `docs/rk/` or in `docs/handoffs/` records a reason, and writing one now would put a
+decision on the page that nobody made. A page may say what the aggregate does: it is a root mean
+square, so a problem's influence goes as the square of its error, and both weightings are
+published beside it (D43). It may not call the choice deliberate, or give a reason for it, until
+an entry records one.
+
+D-b. Tests check invariants and pin no snapshot. G1 acceptance 6 asks a test to reproduce the
+audit's share values for the current snapshot. The archive grows every cycle and
+`key_findings.json` is rebuilt from it, so a pinned value turns red on a correct refresh, and a
+test people expect to turn red gets repinned or skipped instead of read. An invariant holds at
+every snapshot and fails on the fault itself. C39 checks that every share set sums to one and
+every aggregate rebuilds from its rows, C39b that every counterfactual table prints the rows the
+document holds, and C39c that every overview table feeding an RMS keeps a share column that adds
+up.
+
+D-c. The overview build carries an equal-weight phrase gate that lets negations and labelled
+counterfactuals through. The false sentence G1 found, that each held-out problem "carries a
+quarter of the ratio above", passed because no gate read for it. `_check_weighting_phrases` reads
+every visible sentence and fails the build on an equal-weight claim. A sentence that negates the
+claim ahead of the match passes, and so does one that names the median-anchor scale, because that
+counterfactual is where the site correctly says equal weighting. A gate that blocked it would
+block a true sentence with the false one. The gate reads wording and is a backstop, not a proof.
+The findings half belongs to the session that owns `sitegen.py`.
+
+D-d. rc-table in finding 4 gains a share column. The table prints each method's rc_thermal
+error, and that error is one term of the method's held-out RMS. That puts it inside the scope
+SPEC2 set for G1 acceptance 2, although the scout's inventory of thirteen tables left it out. The
+column is rc_thermal's share of the method's held-out sum of squares, under magnitude weighting on
+the analytic basis, read from `counterfactual.series.per_method`.
+
+D-e. The reference-norm scale is never labelled equal. Dividing by the reference norm moves
+weight onto rc_thermal: its share of the champion's held-out sum of squares goes from 64.8 to
+98.7 percent (D43). A label reading "equal, reference norm" said the opposite of what the scale
+does. The median-anchor scale keeps the name equal weighting, as D43 set, and the phrase gate
+also fails the build on the reference-norm scale labelled equal.
+
+D-f. A degenerate problem is marked where its error is printed, with one note naming the field.
+A verdict column on every table that prints a per-problem error would repeat the same seven
+verdicts in each of them. The marker " (flagged)" beside the problem's name, plus a note saying
+which field the verdict was computed over, keeps the verdict next to the number. The field has to
+be named because the verdict moves with it: rc_thermal is flagged over finding 2's four methods
+and over the nine the counterfactual scores on the analytic basis, and not over the same nine on
+the traced whole-step basis.
+
+D-g. The overview keeps "rank 1" and "rank 4 of 4". G3 acceptance 2 asks the page to say, in the
+audit's words, whether euler's place in finding 2 survives traced costs. A rank with its
+denominator says the same thing more exactly, matches the rank columns in the tables under it,
+and keeps a word the findings site bans out of shared phrasing. The clause after it is generated
+from the document and reads "survives" or "does not survive" the compiled cost basis, so the
+wording the acceptance asks for is there and is computed.
+
+D-h. The finding 1 and finding 2 lead sentences carry their own weighting, basis and survival
+clause. The lead is the sentence that gets quoted without its paragraph, and a qualifier added
+after it leaves the unqualified claim readable on its own, which G3 acceptance 6 exists to stop.
+CLAUDE.md asks a counterfactual number to name its basis, weighting and scope in the same
+sentence, and the published number it qualifies needs the same treatment. `HEADLINE_VERDICT` now
+opens under magnitude weighting on the analytic cost basis and carries a generated survival
+sentence, and finding 2's lead is generated whole.
+
+D-i. The traced held-out aggregate of every scored method is printed, in a table carrying the D43
+labels. The grid shows only the champion and the best anchor per cell, so the traced held-out
+error of every other anchor appeared nowhere, and a per-problem fold would have left the reader
+to compute the RMS. `cf-heldout-table` prints each scored method's held-out RMS under magnitude
+weighting on both bases, says what each basis prices, and never divides one column by the other.
+
+D-j. The charts on results.html stay static, and the page says the table is the keyboard and tap
+path. CLAUDE.md allows JavaScript on the overview only in `demo.html` and the index widget. The
+table folded under each chart already holds every plotted number and needs neither a pointer nor
+script, and one sentence on the page says so. Links from marks to table rows were not added: a
+tab stop per mark would lead to a table the reader can open directly.
+
+D-k. demo.html and the index hero get a full keyboard path, an aria-live readout, and a tap away
+that dismisses the readout and keeps a pinned selection. Both pages already run sanctioned script
+and invite interaction, so a reader without a mouse has to reach every mark and a screen reader
+has to hear what the mark shows. On the demo a pinned selection is the method loaded into the
+trajectory, and a stray tap should not unload it.
+
+D-l. The staleness badge turns stale at 7 days, and says what a snapshot cannot tell. F16
+acceptance 2 asks for a threshold, and no document records a cadence for regenerating the
+overview, which D21 keeps a deliberate act. Seven days is the default taken here. It is
+`STALE_DAYS` in `demo_page.py`, `check_hero.js` asserts the same value, and the two move together.
+F16 acceptance 3 asks that a paused run be told apart from a broken build. A static snapshot holds
+no signal that separates them, so at any age the badge says it cannot tell, and points to the
+findings site, which is rebuilt every cycle and carries its own build stamp. The findings half
+belongs to the session that owns `sitegen.py`.
+
+D-m. og:image stays absent, and every overview page other than the index is titled
+"<Page> | rk-harness overview". SPEC2 section 1 left og:image out because neither repository
+holds an image asset, and this entry does not reopen that. A bare title such as "Architecture"
+cannot be told apart from a tab of the findings site, and the suffix names the site.
+`_check_titles` fails the build on a page without it or with an og:title that differs.
+
+D-n. No tier chart comes back; one generated sentence or compact table gives the tier counts. The
+tier distribution chart went out in the overview's restructure, and its split rows depend on the
+tier backfill, which has not been applied. A chart drawn now would show 82,199 records under
+unreplicated and go stale the day the backfill runs. The counts and the tier words are read from
+`rk-work/archive` at build time, so the rebuild after the backfill states the split with no code
+change, and unreplicated keeps a definition because it stays a legal stored tier.
+
+D-o. held-out is not renamed, and its earliest use on each page links to the definition. The
+round-1 AUDIT-SPEC ruled against renaming it. A reader who does not know the term gets a link to
+`methodology.html#held-out-set` at its earliest visible use, and `_check_first_use` fails the build
+when that use on the index, architecture, design decisions or results page is not the link. The
+demo page links the term in its own limits paragraph.
+
+**The owner items, and their round-2 dispositions.** Numbered as the critic listed them.
+
+1. The tier backfill, `scripts/backfill_tiers.py`, is open and the owner's. It had not been
+   applied when this was written. It moves 82,199 records, 21 to no_incumbent and 82,178 to
+   no_improvement, and forces a full replay at the next container start. D-n readies the pages
+   for it. It gates F10 acceptances 2 and 3 and F10 round-1 rows 2 and 3.
+2. Correcting coeff_cost under m0plus_fast is open and the owner's. It is an epoch boundary that
+   moves `VERIFIER_HASH`, and D42's "What would reopen this" stands.
+3. G1 acceptance 5, the reason for magnitude weighting: D-a.
+4. G1 acceptance 6, the snapshot values: D-b. C39 and C39b stand in for a snapshot pin.
+5. G1 acceptance 1, the phrase gate: D-c on the overview; the findings half is sitegen's.
+6. G1.A2i, rc-table: D-d.
+7. C1, the reference-norm label and the headline "narrow or reverse": D-e. The phrase no longer
+   appears in the overview tools.
+8. G2 acceptances 2d and 2e and G2 fix 2: the reply below.
+9. G2 acceptances 3f and 3g, verdicts on the speed table and the step-size sweep: D-f, a marker
+   and a note rather than a column.
+10. G3 acceptance 2d: D-g.
+11. G3 acceptances 6b and 6d: D-h. The appended qualifier and the later heading were not
+    accepted in place of rewritten leads.
+12. G3 acceptance 3c: D-i.
+13. G3.W1, whether the findings validation page's trace section points to the overview
+    counterfactual: not decided here. It is a sitegen change and stays with the owner.
+14. G3.S3, the validation.html small-multiplier table that prints whole-step traced counts beside
+    `cycles_analytic` without a ratio: not decided here. D43 draws its line at the division and
+    no ratio is printed; whether the adjacent columns invite one is the owner's judgement.
+15. F3 acceptance 3a, renaming held-out: D-o.
+16. F12 acceptances 1c and 2b, the findings charts: the round-1 AUDIT-SPEC ruling that bars
+    tap-to-pin and arrow traversal on the findings site stands. This entry does not reverse it,
+    and those charts belong to the session that owns `sitegen.py`.
+17. F12 acceptances 1d and 2c, the results.html charts: D-j.
+18. F12 acceptance 2d, a tap away on demo.html: D-k.
+19. F12 acceptance 4 and F12 round-1 row 2: they need a person, below.
+20. F16 acceptance 2, the threshold: D-l, 7 days. F16 acceptance 3, paused against broken: D-l,
+    stated as a limit of a snapshot. The findings half, a clockless clause beside
+    `_archive_stamp`, stays with the session that owns `sitegen.py`.
+21. F18 round-1 row 1, the skipped-row convention: the round-1 AUDIT-SPEC ruling to keep it
+    stands.
+22. F23 acceptance 5, og:image: D-m, absent as SPEC2 set. F23 round-1 row 1, descriptive titles:
+    D-m, set per page.
+23. F26 acceptances 1 and 2, the "Ours" definition on the findings index and where it sits: not
+    decided here. Both are sitegen changes and stay with the owner.
+24. F13 round-1 row 4, an axe or Lighthouse pass: not decided here, and none has been run.
+25. Commit and publish belong to the main session under CLAUDE.md rule 9. The CLAUDE.md text D43
+    asked for was uncommitted when this was written. The overview imports `sitegen.py`, so it is
+    published only from a guarded rebuild taken after the tier backfill and the sitegen session's
+    changes have landed.
+
+**The reply to the audit on G2.**
+
+robertson_scaled is not degenerate under any sound criterion (G2 acceptance 2d). In
+`rk-work/validation/results.json` it has 3 finishers out of 8 rows, their Q15 errors span 117.37
+percent from best to worst, and none of the three is within 5 percent of its reference norm of
+0.7088. The spread rule needs a span under 5 percent and both norm rules need finishers near the
+norm, so nothing fires, and `sitegen.degeneracy` returns the clean rule for it. Only the dropped
+peak-magnitude criterion reaches it. The audit's predicted flag set also mixed two problem sets:
+enzyme_qssa and robertson_scaled are validation problems, not two of the seven archive problems its
+own fix 4 names. On current data the detector flags enzyme_qssa alone among the validation
+problems, on the spread rule (6 finishers within 2.68 percent), and dahlquist and rc_thermal among
+the archive problems over finding 2's four methods.
+
+The criterion-2 inference was invalid (G2 acceptance 2e). "If dahlquist does not flag, criterion 2
+is not implemented correctly" assumed criterion 2 was missing. It had already shipped, reading
+`reference_norm_over_peak`, and the methodology page described it. It missed dahlquist because it
+required every finisher to sit within 5 percent of the norm: three of finding 2's four methods sit
+on the norm, and rk4 sits one LSB further out, at 3.689 times it. That one method defeats the
+spread rule too. The fix was the audit's own fix 3, now the detector's third rule: any two
+finishers within 5 percent of each other and both within 5 percent of the norm. It flags
+dahlquist. The audit's premise that one non-collapsing method rescues the problem does not hold
+either. Each of the nine methods the counterfactual scores ends within 2 Q15 steps of zero on
+dahlquist, and the champion ends furthest out.
+
+Criterion 3 stays dropped (G2 fix 2). The peak-magnitude rule flags glucose_minimal, whose 8
+finishers span 305.99 percent, and damped_osc, whose eleven-method field spans 1,206 percent
+(measured 2026-09-12). Both problems are healthy, so the rule does not separate a dead integration
+from a healthy decay. The docstring of `sitegen.degeneracy` records both, so a later proposal
+meets the evidence.
+
+**What needs a person.** F12 acceptance 4 and F12 round-1 row 2 cannot be met by a build. Someone
+has to open the pages on a physical phone and check that tapping a line on the index hero pins it,
+then make a keyboard-only pass over one chart of each type: the index hero, the demo board and its
+Pareto chart, a results.html chart with its folded table, and one findings-site chart with its
+table. For each, record the device, the operating system, the browser and its version, the date,
+and the result, with what failed if anything did, as an amendment to this entry.
+`check_hero.js` and `check_demo.js` drive the same paths through the pages' own handlers, and the
+demo lane also ran them in headless Chrome. Neither is a phone or a person at a keyboard, so
+neither closes this.
+
+**The alternative this rejects.** "Leave every owner item open until the owner answers." The fix
+lanes needed something to build against, and the tier backfill has to land before a publish. A
+default recorded with its reason can be reversed by a later entry. An item left open while lanes
+write code gets answered anyway, in code, with no record of why.
+
+**What it does not establish.** The defaults are the orchestrator's, taken for the owner, and none
+of them says what the owner would have chosen. Nothing here says the sites meet every round-2
+acceptance: owner items 13, 14, 23 and 24 are open, the findings halves sit with the sitegen
+session, and the person check has not been run. The phrase gate and `sitegen.check_ratio_claim`
+read wording, so a claim written in other words passes both.
+
+**Evidence.** `rk-overview/tools/generate.py`: `_check_weighting_phrases`, `_EQUAL_CLAIM_RE`,
+`_NEGATION_RE`, `_MEDIAN_LABEL_RE` and `_REFNORM_EQUAL_RE` (D-c, D-e); `rc_chart` (D-d);
+`_FLAG_MARK`, and `_cf_degeneracy`, whose build claim holds the four-method flag set at dahlquist
+and rc_thermal (D-f); the generated survival clauses in `_cf_ctx` (D-g, D-h); `_cf_heldout_table`
+(D-i); `_check_titles` (D-m); `_TIER_RULE` and `_tier_ctx` (D-n); `_FIRST_USE` and
+`_check_first_use` (D-o); `_check_ratio_claims`, which runs `sitegen.check_ratio_claim` over every
+page with the trace document passed in. `rk-overview/tools/pages_text.py`: `RESULTS_CHARTS_NOTE`
+(D-j), `HEADLINE_VERDICT` and `F_FLIP_INTERP` (D-h). `rk-overview/tools/demo_page.py`:
+`STALE_DAYS` and the `boardlive`, `paretolive` and `flipread` live regions, checked by
+`check_hero.js` and `check_demo.js` (D-k, D-l). `rk_harness/sitegen.py`: `degeneracy`, its rule
+ids and its docstring (the G2 reply). `tests/test_t5_hygiene.py`: C39, C39b and C39c (D-b). The
+ledger, the critic's owner items and the audit handoff are working notes of the close-out and are
+not in the repository.
+
+**Consequence.** A page may say what an aggregate does and may not say why it was chosen. A table
+that prints a per-problem error marks a flagged problem and names the field. A counterfactual lead
+sentence carries its weighting, basis and survival clause within itself. The reference-norm scale
+is never called equal. Tier words and counts on the overview are read at build time. A test checks
+an invariant of the current documents and does not pin a value from one snapshot of them.
+
+**Closes.** The owner items settled by D-a to D-o and by the G2 reply above; the ledger's G3.AUTO,
+through C39b; and the overview half of G1.AUTO2, through C39c. It does not close owner items 1, 2,
+13, 14, 23, 24 and 25, the findings halves that sit with the sitegen session, or F12 acceptance 4
+and its round-1 row.
+
+**Epoch impact.** None. No verifier-pinned file is edited, `VERIFIER_HASH` and `TRACE_HASH` are
+untouched, nothing under `rk-work/archive` is written, and every archived score keeps its meaning.
+The tier backfill this entry prepares for is the owner's to apply and is not part of it.
+
 ---

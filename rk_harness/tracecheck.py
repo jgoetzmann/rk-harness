@@ -69,7 +69,13 @@ class TraceCheckError(Exception):
 
 # --------------------------------------------------------------------------- configuration
 
-DEFAULT_METHODS: tuple[str, ...] = ("euler", "midpoint", "heun2", "rk4", "rk38", "11e898cb")
+#: All eight classical anchors plus the champion. The anchor set is the whole of
+#: fixtures/classical.json, in the fixture's own order, because a counterfactual that prices
+#: steps from this document re-chooses its best anchor by minimum over every anchor: pricing
+#: five of the eight and calling the winner the best classical method would compare a
+#: denominator drawn from one set against a published one drawn from another.
+DEFAULT_METHODS: tuple[str, ...] = ("euler", "midpoint", "heun2", "ralston2", "heun3",
+                                    "kutta3", "rk4", "rk38", "11e898cb")
 
 #: Compiler flags. Fixed, and recorded in the output document.
 CFLAGS: tuple[str, ...] = ("-mcpu=cortex-m0plus", "-mthumb", "-O2", "-ffreestanding", "-nostdlib")
@@ -77,10 +83,21 @@ CFLAGS: tuple[str, ...] = ("-mcpu=cortex-m0plus", "-mthumb", "-O2", "-ffreestand
 DEBUG_FLAGS: tuple[str, ...] = ("-g",)
 
 #: Cases run through both the Python evaluator and the compiled step. Deterministic, fixed.
-#: Step counts are above t_end on both problems, because h_q is q15_from_float(h) and a step
-#: of 1.0 or more has no Q15 representation. An overflow probe drives h_q to the rail so the
-#: trap contract is exercised rather than assumed; it is a contract probe, not an integration
-#: any of these methods would run.
+#: One problem per state count in the problem set, so every state count a scored problem uses
+#: is compiled and checked rather than extrapolated to.
+#:
+#: Step counts are above t_end on every problem, because h_q is q15_from_float(h) and a step
+#: of 1.0 or more has no Q15 representation. rc_thermal divides its step by its DERIV_SCALE of
+#: 0.125 before quantizing it, so its count has to clear 32 rather than 4. quaternion stops at
+#: 120 rather than 144 because the recorded stage-input log holds steps times stages times
+#: states int16 values, and a four-stage method at four states overruns K_CAP at 144.
+#:
+#: An overflow probe drives h_q to the rail so the trap contract is exercised rather than
+#: assumed; it is a contract probe, not an integration any of these methods would run. The
+#: rc_thermal probe holds every state at 32000 rather than alternating their signs, which is
+#: what the two-state probe does: alternating signs there drives the stiff row's derivative
+#: out of int16 before any primitive is reached, and a case that fails inside the right-hand
+#: side has nothing for the C to reproduce.
 CASES: tuple[dict, ...] = (
     {"id": "dahlquist_48", "problem": "dahlquist", "steps": 48, "kind": "solve"},
     {"id": "dahlquist_96", "problem": "dahlquist", "steps": 96, "kind": "solve"},
@@ -88,10 +105,20 @@ CASES: tuple[dict, ...] = (
     {"id": "damped_osc_48", "problem": "damped_osc", "steps": 48, "kind": "solve"},
     {"id": "damped_osc_96", "problem": "damped_osc", "steps": 96, "kind": "solve"},
     {"id": "damped_osc_144", "problem": "damped_osc", "steps": 144, "kind": "solve"},
+    {"id": "rc_thermal_48", "problem": "rc_thermal", "steps": 48, "kind": "solve"},
+    {"id": "rc_thermal_96", "problem": "rc_thermal", "steps": 96, "kind": "solve"},
+    {"id": "rc_thermal_144", "problem": "rc_thermal", "steps": 144, "kind": "solve"},
+    {"id": "quaternion_48", "problem": "quaternion", "steps": 48, "kind": "solve"},
+    {"id": "quaternion_96", "problem": "quaternion", "steps": 96, "kind": "solve"},
+    {"id": "quaternion_120", "problem": "quaternion", "steps": 120, "kind": "solve"},
     {"id": "dahlquist_rail", "problem": "dahlquist", "steps": 2, "kind": "overflow_probe",
      "y0": (32000,), "h_q": 32767},
     {"id": "damped_osc_rail", "problem": "damped_osc", "steps": 2, "kind": "overflow_probe",
      "y0": (32000, -32000), "h_q": 32767},
+    {"id": "rc_thermal_rail", "problem": "rc_thermal", "steps": 2, "kind": "overflow_probe",
+     "y0": (32000, 32000, 32000), "h_q": 32767},
+    {"id": "quaternion_rail", "problem": "quaternion", "steps": 2, "kind": "overflow_probe",
+     "y0": (32000, -32000, 32000, -32000), "h_q": 32767},
 )
 
 #: The runs the histogram is read from. A small state and a small step keep every method's
@@ -100,9 +127,13 @@ CASES: tuple[dict, ...] = (
 #: that: rk_step is straight-line code with no data-dependent branch, so which instructions
 #: execute does not depend on the values, and LINEARITY_STEPS is what checks that claim
 #: rather than assuming it.
+#: There is exactly one case per state count that CASES reaches, because _trace_per_step
+#: picks a case by n_states and a state count with no case has no histogram.
 TRACE_CASES: tuple[dict, ...] = (
     {"id": "trace_n1", "problem": "dahlquist", "y0": (1000,), "h_q": 2048},
     {"id": "trace_n2", "problem": "damped_osc", "y0": (1000, 500), "h_q": 2048},
+    {"id": "trace_n3", "problem": "rc_thermal", "y0": (1000, 500, 250), "h_q": 2048},
+    {"id": "trace_n4", "problem": "quaternion", "y0": (1000, 500, 250, 125), "h_q": 2048},
 )
 
 #: Step counts whose rk_step instruction totals must stand in exact proportion. Straight-line
@@ -981,7 +1012,13 @@ def _sha(text: str) -> str:
 
 def _trace_per_step(b: Build, t: Tableau, regions: dict[int, str], n_states: int) -> dict:
     """Per-step instruction and cycle counts, from two runs that must stand in proportion."""
-    case = next(c for c in TRACE_CASES if PROBLEMS[c["problem"]].n_states == n_states)
+    matching = [c for c in TRACE_CASES if PROBLEMS[c["problem"]].n_states == n_states]
+    if not matching:
+        raise TraceCheckError(
+            f"no trace case at {n_states} states: the per-step histogram is read from a run, "
+            f"so a state count CASES reaches and TRACE_CASES does not has no per-step count "
+            f"and must not be given one")
+    case = matching[0]
     problem = PROBLEMS[case["problem"]]
     y0 = tuple(int(v) for v in case["y0"])
     lo, hi = LINEARITY_STEPS
@@ -1140,8 +1177,12 @@ SCHEMA: dict[str, str] = {
     "opcode_histogram": "executed mnemonics per step inside rk_step",
     "muls_per_step": "MULS instructions executed per step inside rk_step",
     "muls_in_model_scope": "of those, the ones applying a tableau coefficient",
-    "state_scaling": "the same counts at one and at two states, so the model's linear scaling "
-                     "in state dimension can be read rather than assumed",
+    "state_scaling": "the same counts at each state count the scored problem set uses, one "
+                     "through four, so the model's linear scaling in state dimension can be "
+                     "read rather than assumed. cycles_per_step is the whole rk_step at that "
+                     "state count, on the same scope as cycles_traced and so excluding the "
+                     "derivative routine's own body; cycles_analytic beside it is "
+                     "costmodel.cycle_count at the same state count",
     "crosscheck": "agreement with the pinned Python evaluator: exact final int16 state, every "
                   "stage input, and the operation index at which an overflow trapped",
 }
@@ -1167,6 +1208,7 @@ def _document(tc: Toolchain, rows: list[dict]) -> dict:
             "emitter": "rk_harness.costmodel.emit_c, used verbatim and never edited",
             "methods": [r["name"] for r in rows],
             "n_states": 1,
+            "state_counts": sorted({PROBLEMS[c["problem"]].n_states for c in TRACE_CASES}),
         },
         "accuracy": {
             "statement": (

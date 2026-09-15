@@ -29,10 +29,11 @@ from rk_harness import coeffrep
 from rk_harness import costmodel
 from rk_harness import encourager
 from rk_harness import ledger
+from rk_harness import problems as problems_mod
 from rk_harness import saturation
 from rk_harness import tableau as tableau_mod
 from rk_harness import timefmt
-from rk_harness.paths import work_dir
+from rk_harness.paths import archive_dir, work_dir
 from rk_harness.types import ArchiveState, Record
 
 BANNED_WORDS = ("novel", "first", "beats", "outperforms", "breakthrough", "proves",
@@ -399,6 +400,20 @@ def _us(v) -> str:
     return f"{float(v):.2f}"
 
 
+# The unit beside every microsecond figure. Written as an entity so this source stays
+# ASCII and the reader still gets the micro sign rather than a Latin u.
+_US_UNIT = "&micro;s"
+
+
+def _us_title(*parts: str) -> str:
+    """A chart title carrying the microsecond unit, escaped around the entity.
+
+    _esc is html.escape, which turns &micro; into &amp;micro; and prints the entity at
+    the reader, so the words are escaped and the unit is joined in afterwards.
+    """
+    return _US_UNIT.join(_esc(p) for p in parts)
+
+
 def _stages(n) -> str:
     """A stage count with its noun: "1 stage", "3 stages".
 
@@ -730,16 +745,29 @@ class _LogLog:
                 + "".join(self.parts) + "</svg>")
 
 
+def _hide_twin(narrow: str) -> str:
+    """The phone drawing, marked decorative: it is a second copy of a chart, not a second
+    chart. Both drawings carried role="img" and the same aria-label, so a screen reader
+    met the label twice in a row on every page holding a pair. The wide drawing keeps the
+    label and stays the announced one. Links inside the hidden copy give up their tab
+    stop with it, since a focusable element under aria-hidden is reachable by keyboard
+    and unreachable by name.
+    """
+    return re.sub(r"<svg\b", '<svg aria-hidden="true"', narrow, count=1).replace(
+        "<a ", '<a tabindex="-1" ')
+
+
 def _phone_pair(wide: str, narrow: str) -> str:
     """Two drawings of one chart; the stylesheet shows whichever fits the screen.
 
     A 640-wide chart inside a 342-wide viewport opens on its left gutter, which is axis
     labels and few marks, and a scrollable figure gives no sign that the rest is there.
     The phone drawing puts the same marks inside the visible box. It carries no hover
-    text, because a touch screen has no hover and the wide drawing keeps it.
+    text, because a touch screen has no hover and the wide drawing keeps it, and it is
+    hidden from assistive technology, because the wide drawing already announces it.
     """
     return (f'<div class="chart-wide">{wide}</div>'
-            f'<div class="chart-phone">{narrow}</div>')
+            f'<div class="chart-phone">{_hide_twin(narrow)}</div>')
 
 
 def _side_label(px: float, py: float, text: str, w: float) -> str:
@@ -759,6 +787,22 @@ def _legend(items: list[tuple[str, str]]) -> str:
 
 def _finite_pos(v) -> bool:
     return isinstance(v, (int, float)) and v == v and 0 < v < float("inf")
+
+
+def _real(v) -> bool:
+    """A stored number this module may do arithmetic on, zero and infinity included."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _finite_share(v) -> bool:
+    """A value that can carry a share of its set: finite, not negative, zero allowed.
+
+    _finite_pos excludes zero, which is right for a log axis and wrong for a share. The
+    aggregate these shares describe is a root mean square, and it counts a zero member
+    like any other, so a zero belongs in the set with a share of 0 rather than taking the
+    whole set out of the table.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf")
 
 
 def _elite_scatter(arch: ArchiveState) -> str:
@@ -1036,6 +1080,159 @@ _LBL_CHAR_W = 6.6
 
 _PER_PROBLEM_TABLE = "per-problem-values"
 
+# Which set each problem belongs to, read from the pinned problem definitions rather
+# than retyped here. Search error and held-out error are two separate root mean squares,
+# so a share of one set's sum of squares is not comparable with a share of the other's
+# and the tables below never let the two meet in one column.
+_SET_OF: dict[str, str] = {}
+for _p in problems_mod.SEARCH_SET:
+    _SET_OF[_p.name] = "search"
+for _p in problems_mod.HELDOUT_SET:
+    _SET_OF[_p.name] = "held-out"
+del _p
+_SET_ORDER = ("search", "held-out")
+# The same two sets in the order the scorer walks them. _SET_OF answers which set a
+# problem is in; rebuilding a set's aggregate needs the order as well, because the sum of
+# squares is a float sum and its order decides the last bit of the answer.
+_SET_MEMBERS: dict[str, tuple[str, ...]] = {
+    "search": tuple(p.name for p in problems_mod.SEARCH_SET),
+    "held-out": tuple(p.name for p in problems_mod.HELDOUT_SET),
+}
+# Which stored aggregate each set's members add up to, and the set each aggregate totals.
+_SET_AGG = {"search": "search_error", "held-out": "heldout_error"}
+_AGG_SET = {v: k for k, v in _SET_AGG.items()}
+
+
+def _check_share_sets(shares: dict[str, float]) -> None:
+    """Every published share set sums to one, checked before any page is written.
+
+    A set that does not sum to one is not a rounding annoyance: it is a reader adding a
+    column up and getting an answer the page does not mean. This raises instead of
+    rendering, so a generator change that breaks the arithmetic fails the build the way
+    a banned word does rather than publishing the column.
+    """
+    for setname in _SET_ORDER:
+        got = [v for n, v in shares.items() if _SET_OF.get(n) == setname]
+        if got and abs(sum(got) - 1.0) > 1e-9:
+            raise ClaimError(f"the {setname} share set sums to {sum(got)!r}, not to 1")
+
+
+def _rms(values) -> float:
+    """The aggregate both error columns feed, in the pinned scorer's own arithmetic.
+
+    evaluator._rms squares each value, sums in problem order, divides by the count and
+    takes the square root. The order of that sum decides the last bit, so callers pass
+    SEARCH_SET and HELDOUT_SET order rather than alphabetical order.
+    """
+    vals = [float(v) for v in values]
+    return math.sqrt(sum(v * v for v in vals) / len(vals))
+
+
+def _check_rms_agrees(cells: dict, cols, where: str) -> None:
+    """Each printed aggregate is the RMS of the per-problem values printed above it.
+
+    A record page publishes two separately stored things: the per-problem errors, and the
+    set aggregate the scorer wrote beside them. Until this check nothing rebuilt one from
+    the other, so a column could carry one model's per-problem errors next to another
+    model's aggregate, or the fast column's aggregate could go missing, and the page would
+    render either without complaint. This rebuilds each set's aggregate from the very
+    values the rows above it render and compares it against the stored one.
+
+    _check_share_sets is not this check. Its shares are built as v squared over the sum of
+    those same squares, so the set sums to one by construction and no generator that feeds
+    it can make it fail. This one reads two independent numbers and can disagree.
+
+    Exact equality is the right test here rather than a strict one. evaluator._rms is the
+    only thing that writes these aggregates, _rms repeats its arithmetic in the pinned
+    problem order, and the two agree bit for bit on every set of every archived record:
+    141,364 records, three cost models, two sets each, 848,184 comparisons, no exception.
+    A set whose members are not all stored numbers is skipped, because there is nothing to
+    rebuild from. An overflowed set is not skipped: both sides hold infinity there and
+    infinity equals itself. A stored nan fails the check, which is the intended answer,
+    because a page carrying nan on one side and a number on the other has nothing to say.
+    """
+    for m in cols:
+        for setname in _SET_ORDER:
+            absent = [n for n in _SET_MEMBERS[setname] if (n, m) not in cells]
+            if absent:
+                model = _MODEL_HEAD.get(m, m)
+                raise ClaimError(
+                    f"{where or 'a record page'}: the {setname} set under {model} is "
+                    f"missing {', '.join(absent)}, so the aggregate printed beneath it "
+                    "cannot be rebuilt from the rows above it. A member that is not "
+                    "stored used to skip this check, which made the gate's coverage "
+                    "depend on the scorer staying complete; the page is not written "
+                    "from a set it cannot check")
+            vals = [cells[(n, m)] for n in _SET_MEMBERS[setname]]
+            stored = cells.get((_SET_AGG[setname], m))
+            if not (_real(stored) and all(_real(v) for v in vals)):
+                continue
+            got = _rms(vals)
+            if got != float(stored):
+                model = _MODEL_HEAD.get(m, m)
+                raise ClaimError(
+                    f"{where or 'a record page'}: the {setname} rows under {model} do not "
+                    f"rebuild the aggregate printed beneath them. The rows give "
+                    f"{got!r} and the record stores {float(stored)!r}. Either the column "
+                    "is pairing one model's errors with another model's aggregate, or the "
+                    "two were scored by different code; the page is not written either way")
+
+
+def _shares(values: dict) -> dict[str, float]:
+    """Each problem's share of its own set's sum of squares.
+
+    The aggregate these tables feed is a root mean square, which sums squares, so a
+    problem's pull on it grows with the square of its error rather than with the error.
+    That is what the column is for: two rows that look alike on a log axis can carry very
+    different amounts of the number they decide.
+
+    A set contributes shares only when every one of its members is present and finite. An
+    overflowed run stores an infinite error, which makes that set's RMS infinite and every
+    share in it meaningless, so the set is dropped rather than normalized over whichever
+    rows happen to have survived.
+
+    An error of exactly 0 is not that case. It carries none of its set's total and the RMS
+    counts it like any other member, so it keeps its set and takes a share of 0. Reading it
+    through _finite_pos dropped the whole set instead, which turned three healthy rows into
+    n/a because a fourth one happened to finish exactly on the answer. A set whose members
+    are all 0 has a total of 0, which is nothing to divide by, and that set is dropped the
+    way an overflowed one is.
+    """
+    out: dict[str, float] = {}
+    for setname in _SET_ORDER:
+        members = [n for n in sorted(_SET_OF) if _SET_OF[n] == setname]
+        vals = [values.get(n) for n in members]
+        if not all(_finite_share(v) for v in vals):
+            continue
+        total = sum(float(v) ** 2 for v in vals)
+        if not total > 0:
+            continue
+        for name, v in zip(members, vals):
+            out[name] = float(v) ** 2 / total
+    _check_share_sets(out)
+    return out
+
+
+def _pct(share: float) -> str:
+    """A share as a percentage, at the precision both tables print.
+
+    Two decimals is the right precision for the rows that decide an aggregate and the
+    wrong one for the rows that barely touch it: a problem carrying 0.03 percent of its
+    set printed 0.00, which reads as contributing nothing at all. Anything below a tenth
+    of a percent switches to two significant figures instead, so a small share prints as
+    a small number rather than as zero, and a share of exactly 0 prints as 0 rather than
+    as a rounded-down small one.
+
+    The rule is the one rk-overview/tools/generate.py applies in _cf_pct, character for
+    character apart from the percent sign, which these columns carry in their heading.
+    The same share therefore reads the same on both sites.
+    """
+    if share <= 0:
+        return "0"
+    if share * 100 < 0.1:
+        return f"{share * 100:.2g}"
+    return f"{share * 100:.2f}"
+
 
 def _per_problem_bars(sv) -> str:
     keys = [k for k in sorted(sv.per_problem) if ":" not in str(k)]
@@ -1072,11 +1269,14 @@ def _per_problem_bars(sv) -> str:
            + ("problem" if len(vals) == 1 else "problems")
            + f', log scale"{_describedby(_PER_PROBLEM_TABLE)}>'
            + "".join(parts) + "</svg>")
+    shares = _shares(dict(vals))
     table = _chart_table(
         _PER_PROBLEM_TABLE, f"Every plotted bar, in one table ({len(vals)} "
         + ("row" if len(vals) == 1 else "rows") + ")",
-        ("problem", "final-state error"),
-        [(_esc(k), _num(v)) for k, v in vals], num_cols=(1,))
+        ("problem", "set", "final-state error", "share of its set, percent"),
+        [(_esc(k), _esc(_SET_OF.get(k, "other")), _num(v),
+          _pct(shares[k]) if k in shares else "n/a") for k, v in vals],
+        num_cols=(2, 3))
     return ('<figure><figcaption>Final-state error of this tableau on each problem, integrated '
             "in Q15 under m0plus_fast at the fixed cycle budget. Bar length is error on a log "
             "scale; the printed value is exact. dahlquist, damped_osc and vanderpol_mild are "
@@ -1084,7 +1284,15 @@ def _per_problem_bars(sv) -> str:
             + _gloss("held-out-set", "held-out set") + " that decides archive fitness, and on "
             "several problems " + _gloss("floor-rounding", "floor rounding") + " dominates the "
             "method choice, so bars can look similar across very different "
-            "tableaus.</figcaption>"
+            "tableaus. The share column gives each problem's part of its own set's sum of "
+            "squares, because both aggregates are a root mean square: the three search "
+            "rows share one total and the four held-out rows share another, and a share "
+            "from one set never adds to a share from the other. Each set adds to 100 "
+            "before rounding, so a set printed to two decimals can read 99.99 or 100.01. "
+            "A problem that finished with no error carries none of its set's total and "
+            "reads 0. A set holding an overflowed run has no usable total, and neither "
+            "has a set whose errors are all zero, so in both cases the shares read "
+            "n/a.</figcaption>"
             + svg + table + "</figure>")
 
 
@@ -1340,19 +1548,59 @@ _CLASS_BOUNDARY = (
 
 # Read the three cards the same way. Stated once under the row rather than per card,
 # because the thing being explained is what the row's three numbers have in common.
+# What "ours" means on a benchmark row, in one constant. The hub prints it under the
+# three cards, where it is the denominator of all three numbers; the class pages print it
+# under the legend that renders "(ours, ...)" beside every solver, which is where the
+# word is actually read. Two copies of one string cannot drift.
+_OURS_MEANS = (
+    "Ours on these rows means run by this harness through its own solver path, "
+    "which includes the classical rk4 control, so it does not mean discovered.")
+
 _CARD_CONVENTION = (
     "Each card counts its own class's rows in benchmark/results.json. The value is the "
     "targets reached out of the rows that ran, and the figure beside it is how many of "
     "the class's rows ran at all: a row that never ran is not a target the class "
-    "missed. Ours on these rows means run by this harness through its own solver path, "
-    "which includes the classical rk4 control, so it does not mean discovered.")
+    "missed. " + _OURS_MEANS)
+
+
+def _newest_elite_ts(arch: ArchiveState) -> str:
+    """Stored timestamp of the newest elite the archive holds, or "" when it holds none."""
+    stamps = [r.timestamp for grid in arch.grids.values() for r in grid.values()
+              if isinstance(r.timestamp, str) and r.timestamp]
+    return max(stamps) if stamps else ""
 
 
 def _newest_elite_ct(arch: ArchiveState) -> str:
     """Display time of the newest elite the archive holds, or "" when it holds none."""
-    stamps = [r.timestamp for grid in arch.grids.values() for r in grid.values()
-              if isinstance(r.timestamp, str) and r.timestamp]
-    return _ct(max(stamps)) if stamps else ""
+    ts = _newest_elite_ts(arch)
+    return _ct(ts) if ts else ""
+
+
+def _stored_gap_clause(newest: str) -> str:
+    """How far the newest elite sits from the run's own last saturation check.
+
+    Both endpoints are stored: the archive record's timestamp and saturation_state.json's
+    last_check, which the epoch panel already reads. The subtraction is a pure function of
+    the files on disk, so two builds of the same work directory stay byte-identical.
+
+    This is a gap between two recorded events, not a staleness state. Whether the check
+    itself is old is still the reader's subtraction against their own clock, which is the
+    division of labour D20 keeps: a file the container writes cannot report that the
+    container stopped.
+    """
+    state = _load_json_or_none(work_dir() / saturation.STATE_FILE) or {}
+    last = state.get("last_check") if isinstance(state, dict) else None
+    a, b = timefmt.to_ct(newest), timefmt.to_ct(last)
+    if a is None or b is None:
+        return ""
+    tail = f" the last saturation check at {_ct(last)}"
+    hours = (b - a).total_seconds() / 3600.0
+    if hours < 0:
+        return ", after" + tail
+    if hours < 0.5:
+        return ", less than an hour before" + tail
+    n = int(round(hours))
+    return f", about {n} {'hour' if n == 1 else 'hours'} before" + tail
 
 
 def _archive_stamp(arch: ArchiveState) -> str:
@@ -1367,9 +1615,9 @@ def _archive_stamp(arch: ArchiveState) -> str:
         return ""
     bits = (f"Built from cycle {_count(arch.last_cycle_id)} of the run, "
             f"{_count(arch.n_records)} archive records")
-    newest = _newest_elite_ct(arch)
+    newest = _newest_elite_ts(arch)
     if newest:
-        bits += f". Newest elite recorded {newest}"
+        bits += f". Newest elite recorded {_ct(newest)}" + _stored_gap_clause(newest)
     return f'<p class="when">{_esc(bits)}.</p>'
 
 
@@ -1546,6 +1794,39 @@ def _solver_arith_phrase(rows) -> str:
     return ", ".join(bits[:-1]) + " and " + bits[-1]
 
 
+def _skipped_clause(rows, ran, hit: int) -> str:
+    """Why a class's rows did not run, and whether that cost it a problem or a target.
+
+    The count on its own reads as a shortfall: "44 of 64 rows ran" beside a value of 44
+    of 44 invites "the class could not run the other 20", which is the reading the
+    document refutes. The reason is taken from the rows' own reason field rather than
+    written here, so a card cannot say something the benchmark does not.
+
+    The coverage clause is printed only when the rows that did run cover every problem
+    the class has and reach every target, which is what separates a missing variant from
+    a failure. On the implicit class that holds: the 20 skipped rows are one solver on
+    five problems for which no analytic Jacobian is derived, while its sibling ran all
+    eight and reached all of them.
+    """
+    out = [r for r in rows if str(r.get("status")) == "skipped"]
+    if not out:
+        return ""
+    n = len(out)
+    how_many = "row was" if n == 1 else f"{n} rows were"
+    text = f", the other {how_many} skipped"
+    reasons = sorted({literature_mod.soften(str(r.get("reason")).strip()) for r in out
+                      if isinstance(r.get("reason"), str) and r.get("reason").strip()})
+    if len(reasons) == 1:
+        text += f" for one recorded reason ({reasons[0]})"
+    probs = {str(r.get("problem")) for r in rows if r.get("problem")}
+    covered = {str(r.get("problem")) for r in ran if r.get("problem")}
+    if probs and covered >= probs and hit == len(ran):
+        which = ("every problem the class has" if len(probs) == 1
+                 else f"all {len(probs)} problems")
+        text += f", and the rows that ran cover {which} and reached every target"
+    return text
+
+
 def _matched_class_card(cls: str, benchmark, blurb: str):
     """One hub card from this class's own matched-accuracy rows, or None without them.
 
@@ -1559,7 +1840,8 @@ def _matched_class_card(cls: str, benchmark, blurb: str):
     value's denominator and are counted beside it. That rule alone made the implicit
     card read 44 of 44 next to 65 of 96, the only flawless number in the row, so all
     three cards carry the same two figures: reached out of rows that ran, then rows
-    that ran out of rows the class has. The convention is stated once under the row.
+    that ran out of rows the class has. The convention is stated once under the row,
+    and why those rows did not run is stated on the card itself.
     """
     rows = [r for r in _matched_rows(benchmark, cls) if str(r.get("side")) == "ours"]
     ran = [r for r in rows if str(r.get("status")) != "skipped"]
@@ -1571,6 +1853,7 @@ def _matched_class_card(cls: str, benchmark, blurb: str):
     if who:
         what += f" by {who}"
     what += f"; {len(ran)} of {len(rows)} {'row' if len(rows) == 1 else 'rows'} ran"
+    what += _skipped_clause(rows, ran, hit)
     return (cls, f"{hit} of {len(ran)} run", what, "benchmark/results.json", blurb)
 
 
@@ -1987,7 +2270,7 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
         "twice the nominal amplitude and must exceed 1.0, meaning a doubled signal still fits "
         "in " + _gloss("q15", "Q15") + " range."))
     parts.append("<h3>Every per-problem error, by cost model</h3>")
-    parts.append(_per_problem_matrix(sv))
+    parts.append(_per_problem_matrix(sv, where=_cell_file(order, stages, bucket)))
     title = f"Cell p{order} s{stages} b{bucket}"
     return _page(title, "\n".join(parts), active="explicit.html",
                  subtitle=f"grid order {order}, {_stages(stages)}, cycle bucket {bucket}",
@@ -2021,7 +2304,7 @@ _MODEL_COLS = ("", "slow", "avr_approx")
 _MODEL_HEAD = {"": "m0plus_fast", "slow": "m0plus_slow", "avr_approx": "avr_approx"}
 
 
-def _per_problem_matrix(sv) -> str:
+def _per_problem_matrix(sv, where: str = "") -> str:
     """per_problem keys pivoted to problem x cost model.
 
     The stored keys are '<name>' for the fast model and '<model>:<name>' otherwise, so the
@@ -2037,6 +2320,21 @@ def _per_problem_matrix(sv) -> str:
             names.append(name)
         if model not in models:
             models.append(model)
+    # The fast model's two aggregates are not in per_problem. The scorer writes
+    # 'slow:search_error' and 'avr_approx:search_error' but never a fast counterpart,
+    # because the fast pair is the record's own search_error and heldout_error
+    # (evaluator.evaluate, the prefix == "" branch). Looking for them in per_problem alone
+    # printed n/a in the m0plus_fast column on both aggregate rows of every cell page,
+    # beside real numbers for the other two models.
+    for agg, stored in (("search_error", sv.search_error),
+                        ("heldout_error", sv.heldout_error)):
+        if stored is None:
+            continue
+        cells[(agg, "")] = stored
+        if agg not in names:
+            names.append(agg)
+        if "" not in models:
+            models.append("")
     cols = [m for m in _MODEL_COLS if m in models] + sorted(set(models) - set(_MODEL_COLS))
     known = set(_PROBLEM_ROWS) | set(_AGG_ROWS)
     rows = ([n for n in _PROBLEM_ROWS if n in names]
@@ -2044,16 +2342,48 @@ def _per_problem_matrix(sv) -> str:
             + [n for n in _AGG_ROWS if n in names])
     if not rows or not cols:
         return "<p>no per-problem errors recorded</p>"
-    out = ['<div class="scroll"><table><tr><th>problem</th>'
-           + "".join(f'<th class="num">{_esc(_MODEL_HEAD.get(m, m))}</th>' for m in cols)
+    _check_rms_agrees(cells, cols, where)
+    out = ['<div class="scroll"><table><tr><th>problem</th><th>set</th>'
+           + "".join(f'<th class="num">{_esc(_MODEL_HEAD.get(m, m))}</th>'
+                     f'<th class="num">{_esc(_MODEL_HEAD.get(m, m))} share, percent</th>'
+                     for m in cols)
            + "</tr>"]
+    shares = {m: _shares({n: cells.get((n, m)) for n in _SET_OF}) for m in cols}
     for name in rows:
         agg = name in _AGG_ROWS
         label = f"<strong>{_esc(name)}</strong>" if agg else _esc(name)
-        out.append(f"<tr><td>{label}</td>" + "".join(
-            f'<td class="num">{_num(cells[(name, m)]) if (name, m) in cells else "n/a"}</td>'
-            for m in cols) + "</tr>")
+        setname = _AGG_SET.get(name, _SET_OF.get(name, "other"))
+        body = []
+        for m in cols:
+            val = _num(cells[(name, m)]) if (name, m) in cells else "n/a"
+            if agg:
+                share = "set total"
+            elif name in shares.get(m, {}):
+                share = _pct(shares[m][name])
+            else:
+                share = "n/a"
+            body.append(f'<td class="num">{val}</td><td class="num">{share}</td>')
+        out.append(f"<tr><td>{label}</td><td>{_esc(setname)}</td>"
+                   + "".join(body) + "</tr>")
     out.append("</table></div>")
+    out.append('<p class="note">Each cost model is scored by its own integration, so it '
+               "has its own per-problem errors and its own two sums, and one share column "
+               "would describe one of these three while mislabeling the other two. The set "
+               "column says which total a row belongs to: within one cost model the search "
+               "rows divide one sum of squares and the held-out rows divide another, and a "
+               "share is the row's error squared over the sum for its own set. Each set "
+               "adds to 100 before rounding, so a set printed to two decimals can read "
+               "99.99 or 100.01, and a share below a tenth of a percent prints to two "
+               "significant figures instead so that a small contribution does not read as "
+               "none. The two rows in bold are those sets' own root mean square values "
+               "rather than members of a set, which is why they carry the words set total "
+               "in place of a share; under m0plus_fast they are the record's own "
+               "search_error and heldout_error, and the other two models store theirs "
+               "under their own prefix. A row whose error is 0 carries none of its set's "
+               "total and reads 0. A set holding an overflowed run has an infinite error "
+               "and so has no usable total, and a set whose errors are all zero has "
+               "nothing to divide by, so in both cases every share reads n/a rather than "
+               "being spread over the rows that finished.</p>")
     return "\n".join(out)
 
 
@@ -2656,11 +2986,14 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "final weights and stage times, with A strictly lower triangular for an explicit "
         "method. On this site every tableau is exact fractions, hashed by content.",
     )),
+    # The state of the merged word is generated, not written here: _glossary_section
+    # substitutes _tiers_gloss(count) for this entry. What stands here is the same text
+    # with no count in it, which is what _tiers_gloss(None) returns.
     ("tiers", "tier names", (
         "The evidence tier a record gets on entering its cell by the rules in section 3: "
         "heldout_verified, search_only, no_incumbent for an empty cell, no_improvement "
-        "when an incumbent was there and neither applied, and unreplicated, which "
-        "merged those last two. The grid ranks on held-out "
+        "when an incumbent was there and neither applied, and unreplicated, the one word "
+        "those last two replaced. The grid ranks on held-out "
         "error alone, so the heldout_verified count can fall without anything going wrong.",
     )),
     ("verifier-hash", "verifier hash", (
@@ -2675,16 +3008,88 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 
 
-def _glossary_section() -> str:
+# The tier word that two tiers replaced. It is a stored value, and scripts/backfill_tiers.py
+# rewrites it in place, so no page on this site states how many records carry it from prose
+# written by hand: the count comes from the archive and the sentence follows the count.
+_MERGED_TIER = "unreplicated"
+_TIER_RE = re.compile(r'"tier":\s*"([a-z_]+)"')
+
+
+def _merged_tier_count() -> int | None:
+    """How many archived records still carry the merged tier word, or None if unknown.
+
+    Reading the tier off each line costs about a second over the whole archive, against
+    the minute the replay behind a build already spends, so the sentences that depend on
+    it are generated on every build rather than pinned to whatever was true on the day
+    someone typed them. A line the pattern cannot read unambiguously is parsed properly
+    instead, and a file that cannot be read at all returns None, which leaves the prose
+    saying only what the word meant rather than carrying a count it cannot support.
+
+    A missing archive directory is not an unknown count. archive._archive_files reads that
+    same absence as an empty archive and a replay of it holds no records at all, so the
+    answer there is zero and the prose is free to say so.
+    """
+    d = archive_dir()
+    if not d.is_dir():
+        return 0
+    n = 0
+    try:
+        files = sorted((p for p in d.iterdir()
+                        if p.is_file() and p.name.endswith(".jsonl")), key=lambda p: p.name)
+        for path in files:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    found = _TIER_RE.findall(line)
+                    if len(found) != 1:
+                        found = [str(json.loads(line).get("tier"))]
+                    if found[0] == _MERGED_TIER:
+                        n += 1
+    except (OSError, ValueError):
+        return None
+    return n
+
+
+def _tiers_gloss(merged: int | None) -> tuple[str, ...]:
+    """The tier-names glossary entry, with the merged word's state read off the archive.
+
+    unreplicated is still a legal stored tier, so the definition keeps it. What changes
+    under scripts/backfill_tiers.py is how many records carry it, and a sentence that
+    states that from memory is true until the script runs and false after it. merged is
+    None when the archive could not be counted, and the entry then says only what the word
+    meant, which holds in either state.
+    """
+    if merged is None:
+        tail = ""
+    elif merged == 1:
+        tail = ", which one record still carries"
+    elif merged > 0:
+        tail = f", which {_count(int(merged))} records still carry"
+    else:
+        tail = ", which no record carries now"
+    return (
+        "The evidence tier a record gets on entering its cell by the rules in section 3: "
+        "heldout_verified, search_only, no_incumbent for an empty cell, no_improvement "
+        "when an incumbent was there and neither applied, and unreplicated, the one word "
+        f"those last two replaced{tail}. The grid ranks on held-out "
+        "error alone, so the heldout_verified count can fall without anything going wrong.",
+    )
+
+
+def _glossary_section(merged: int | None = None) -> str:
     """Every glossary term as a compact definition list, for the methodology page.
 
     Each term keeps its anchor id, so every _gloss link on the site resolves to
-    methodology.html#<anchor>.
+    methodology.html#<anchor>. merged is the archive's count of records still carrying the
+    merged tier word, which the tiers entry states and nothing else here uses.
     """
     parts = ["<p>Terms used across this site, in alphabetical order. Each definition "
              "says what the code does.</p>", '<dl class="gloss">']
     for anchor, term, paras in _GLOSSARY:
         parts.append(f'<dt id="{_esc(anchor)}">{_esc(term)}</dt>')
+        if anchor == "tiers":
+            paras = _tiers_gloss(merged)
         for p in paras:
             parts.append(f"<dd>{_esc(p)}</dd>")
     parts.append("</dl>")
@@ -2844,41 +3249,170 @@ def _finisher_errors(rows) -> list[float]:
                   if isinstance(r, dict) and _finite_pos(r.get("q15_error")))
 
 
-def degeneracy(problem, rows) -> tuple[bool, str]:
+# The rule behind a verdict, named by something that does not move with the field. A
+# reason sentence states the finisher count and the thresholds, so the same rule firing
+# over a four-method field and over a nine-method field writes two different sentences.
+# A caller comparing one field against another compares these ids, and then "flagged on
+# a different rule" means the rule changed rather than the wording.
+DEGENERACY_RULES: dict[str, str] = {
+    "spread": "flagged: the finishers' errors span less than the spread threshold",
+    "norm": "flagged: every finisher sits within the band around the reference norm",
+    "pair": "flagged: two finishers near the reference norm agree with each other",
+    "clean": "not flagged: all three criteria ran and none of them fired",
+    "few-finishers": ("not flagged: too few finishers for a spread, and the two norm "
+                      "criteria ran without firing"),
+    "no-norm": ("not flagged: no reference norm to run the two norm criteria, and the "
+                "spread criterion ran without firing"),
+    "no-basis": "not flagged: too few finishers and no reference norm, so nothing ran",
+    "no-finishers": "not flagged: no method finished, so there is nothing to judge",
+}
+
+
+class Degeneracy(tuple):
+    """A degeneracy verdict: (flagged, reason), carrying the rule that decided it.
+
+    Two elements, so every caller that unpacks a pair, indexes [0] and [1], or compares
+    against a plain tuple keeps working unchanged; .rule is the addition.
+
+    Compare .rule and never .reason when asking whether two fields reached the same
+    verdict for the same cause. The reason states the finisher count, so it differs
+    between a four-method and a nine-method field wherever the field size differs, and a
+    caller diffing reason text reads that as a change of rule when nothing changed.
+    """
+
+    def __new__(cls, flagged: bool, reason: str, rule: str) -> "Degeneracy":
+        if rule not in DEGENERACY_RULES:
+            raise ClaimError(f"degeneracy() returned the rule id {rule!r}, which is not "
+                             "in DEGENERACY_RULES; a caller comparing rule identity has "
+                             "no way to read it")
+        if not str(reason).strip():
+            raise ClaimError(f"the degeneracy rule {rule!r} returned an empty reason; a "
+                             "reader cannot tell a clean verdict from a missing one")
+        self = super().__new__(cls, (bool(flagged), str(reason)))
+        self.rule = str(rule)
+        return self
+
+    @property
+    def flagged(self) -> bool:
+        return self[0]
+
+    @property
+    def reason(self) -> str:
+        return self[1]
+
+
+def _near_clause(near: list[float], norm) -> str:
+    """How many finishers sit on the reference norm, and why that is not a flag."""
+    band = (f"{_DEGENERATE_NORM * 100:.0f} percent of the reference solution's norm of "
+            f"{_num(norm)}")
+    if not near:
+        return f"none of them sits within {band}"
+    if len(near) == 1:
+        return (f"1 of them sits within {band}, which is neither every finisher nor a "
+                "pair that agree with each other")
+    return (f"{len(near)} of them sit within {band}, which is not every finisher, and no "
+            "two of those agree with each other to within "
+            f"{_DEGENERATE_SPREAD * 100:.0f} percent")
+
+
+def _clean_reason(errs, spread, norm, near) -> tuple[str, str]:
+    """Why a problem was not flagged, as (reason, rule id).
+
+    An unflagged problem used to return an empty string, which published a clean verdict
+    and a verdict nobody computed as the same blank. Every problem gets a sentence naming
+    which criteria ran on it and what they found, so the absence of a flag is readable as
+    a result rather than as a gap.
+    """
+    if not errs:
+        return ("no method finished with a finite Q15 error, so there is nothing to "
+                "compare and no criterion runs"), "no-finishers"
+    has_norm = _finite_pos(norm)
+    if spread is None:
+        # Reachable only through too few finishers: _finisher_errors filters through
+        # _finite_pos, so a non-empty list is strictly positive and the divisor holds.
+        n = len(errs)
+        few = (f"{n} finisher{'' if n == 1 else 's'} {'is' if n == 1 else 'are'} fewer "
+               f"than the {_DEGENERATE_MIN_FINISHERS} a spread needs")
+        if not has_norm:
+            return (few + ", and the problem entry carries no reference solution norm, "
+                    "so no criterion runs and the problem is not judged"), "no-basis"
+        return (few + ", and " + _near_clause(near, norm)
+                + ", so neither norm criterion fires"), "few-finishers"
+    spread_txt = (f"the {len(errs)} finishers' Q15 errors span {spread * 100:.2f} percent "
+                  f"from best to worst, over the {_DEGENERATE_SPREAD * 100:.0f} percent "
+                  "threshold")
+    if not has_norm:
+        return (spread_txt + ", and the problem entry carries no reference solution norm, "
+                "so the two norm criteria stay quiet"), "no-norm"
+    return (spread_txt + ", and " + _near_clause(near, norm)
+            + ", so the comparison is about the methods"), "clean"
+
+
+def degeneracy(problem, rows) -> Degeneracy:
     """Is this problem's comparison about the methods, or about the problem?
 
-    Returns (flagged, reason). Two criteria, both stated on the methodology page:
-    the finishers' errors span less than _DEGENERATE_SPREAD from best to worst, or every
+    Returns (flagged, reason), with the id of the rule that decided it on .rule. Every
+    problem gets a reason, the unflagged ones included; the flagged sentences are the
+    ones already published and they are unchanged. Three criteria, all stated on the
+    methodology page:
+    the finishers' errors span less than _DEGENERATE_SPREAD from best to worst; or every
     finisher's error sits within _DEGENERATE_NORM of the reference solution's own norm,
     which means the integrator returned approximately nothing and the error being
-    reported is the reference. The second reads reference_norm_over_peak from the
-    problem's own entry, normalized the way the errors are. A document written before
-    that field existed carries no norm, and then the criterion stays quiet rather than
-    inventing one.
+    reported is the reference; or any two finishers agree to within _DEGENERATE_SPREAD
+    while both sit within _DEGENERATE_NORM of that norm. The last two read
+    reference_norm_over_peak from the problem's own entry, normalized the way the errors
+    are. A document written before that field existed carries no norm, and then both stay
+    quiet rather than inventing one.
 
-    A third criterion was proposed and dropped: an identical peak magnitude across
-    methods equal to the initial condition. It flags glucose_minimal, whose largest state
-    is its starting one and whose field spans 306 percent, so it does not separate a dead
-    integration from a healthy decay.
+    The third exists because one live method defeats the other two at once. On dahlquist
+    three of four finishers land exactly on the norm and rk4 lands one LSB further out,
+    at 3.689 times it: that single method widens the spread to 268 percent and breaks the
+    all-finishers conjunction, while every method in the field has still collapsed to
+    within two LSB of zero. It is appended rather than inserted so the two above keep the
+    reason strings already published. Over the seven archive problems it flags dahlquist
+    and rc_thermal and nothing healthy, and over the eight validation problems it adds
+    nothing to what the first two already flag.
+
+    A further criterion was proposed and dropped twice: an identical peak magnitude
+    across methods equal to the initial condition. It flags glucose_minimal, whose largest
+    state is its starting one and whose field spans 306 percent, and on the archive
+    problems it also flags damped_osc, whose field spans 1,206 percent (measured
+    2026-09-12, eleven-method field). Both are healthy, so it does not separate a dead
+    integration from a healthy decay and it stays unimplemented.
     """
     errs = _finisher_errors(rows)
+    spread = None
     if len(errs) >= _DEGENERATE_MIN_FINISHERS and errs[0] > 0:
         spread = (errs[-1] - errs[0]) / errs[0]
         if spread < _DEGENERATE_SPREAD:
-            return True, (f"the {len(errs)} finishers' Q15 errors span "
-                          f"{spread * 100:.2f} percent from best to worst, under the "
-                          f"{_DEGENERATE_SPREAD * 100:.0f} percent threshold, so the "
-                          "comparison is reporting the problem rather than the method")
+            return Degeneracy(True, (
+                f"the {len(errs)} finishers' Q15 errors span "
+                f"{spread * 100:.2f} percent from best to worst, under the "
+                f"{_DEGENERATE_SPREAD * 100:.0f} percent threshold, so the "
+                "comparison is reporting the problem rather than the method"), "spread")
     norm = problem.get(_REFERENCE_NORM_KEY) if isinstance(problem, dict) else None
+    near: list[float] = []
     if _finite_pos(norm) and errs:
-        near = [e for e in errs if abs(e - float(norm)) / float(norm) <= _DEGENERATE_NORM]
+        near = sorted(e for e in errs
+                      if abs(e - float(norm)) / float(norm) <= _DEGENERATE_NORM)
         if len(near) == len(errs):
-            return True, (f"every finisher's error sits within "
-                          f"{_DEGENERATE_NORM * 100:.0f} percent of the reference "
-                          f"solution's norm of {_num(norm)}, so the integrated state "
-                          "went to approximately nothing and the error reported is the "
-                          "reference itself")
-    return False, ""
+            return Degeneracy(True, (
+                f"every finisher's error sits within "
+                f"{_DEGENERATE_NORM * 100:.0f} percent of the reference "
+                f"solution's norm of {_num(norm)}, so the integrated state "
+                "went to approximately nothing and the error reported is the "
+                "reference itself"), "norm")
+    # near is ascending, so the closest pair is adjacent.
+    for lo, hi in zip(near, near[1:]):
+        if lo > 0 and (hi - lo) / lo < _DEGENERATE_SPREAD:
+            return Degeneracy(True, (
+                f"{len(near)} of the {len(errs)} finishers sit within "
+                f"{_DEGENERATE_NORM * 100:.0f} percent of the reference "
+                f"solution's norm of {_num(norm)} and agree with each other to "
+                f"within {_DEGENERATE_SPREAD * 100:.0f} percent, so those runs "
+                "returned approximately the reference and the comparison is "
+                "reporting the problem rather than the method"), "pair")
+    return Degeneracy(False, *_clean_reason(errs, spread, norm, near))
 
 
 def _is_tie(ratio) -> bool:
@@ -3002,6 +3536,43 @@ def _suite_verdict(text) -> str:
     return out
 
 
+def _degeneracy_table(verdicts: dict, rows_by_problem: dict, n_methods: int) -> list[str]:
+    """Every problem's degeneracy verdict, with the field the rule ran on.
+
+    A verdict without its field is not a verdict. rc_thermal is flagged over the four
+    methods the overview's finding 2 publishes and flagged again over the nine the
+    counterfactual scores, but on a different rule, because the discovered methods
+    separate from the classical ones there. The same word for two different reasons is
+    what makes the field part of the verdict rather than context for it, so the finisher
+    count sits on every row and the field size sits in the note.
+
+    The unflagged problems are here too. The page printed a reason only for the flagged
+    ones, which left a clean verdict and a verdict nobody computed looking identical.
+    """
+    if not verdicts:
+        return []
+    rows = []
+    for name in sorted(verdicts):
+        v = verdicts[name]
+        n_fin = len(_finisher_errors(rows_by_problem.get(name, [])))
+        rows.append(f"<tr><td>{_esc(name)}</td>"
+                    f'<td class="num">{_num(n_fin)}</td>'
+                    f"<td>{'flagged' if v.flagged else 'clean'}</td>"
+                    f"<td>{_esc(v.reason)}</td></tr>")
+    return [
+        "<h3>Degeneracy verdict, problem by problem</h3>",
+        '<div class="scroll"><table><tr><th>problem</th>'
+        '<th class="num">finishers</th><th>verdict</th><th>why</th></tr>'
+        + "".join(rows) + "</table></div>",
+        '<p class="note">Every problem in this suite carries a verdict from the same '
+        f"rule, computed over the {n_methods} methods the suite ran on each of them. The "
+        "finishers column is how many of those returned a finite Q15 error, which is "
+        "what the rule reads. A flagged problem stays in the tables above and out of "
+        "every count, and the thresholds behind the flag are on the "
+        '<a href="methodology.html#meth-protocol">methodology page</a>.</p>',
+    ]
+
+
 def _champion_section(data, per, flags, practical_names, stiff_names,
                       n_disc: int, n_cls: int) -> list[str]:
     """One fixed discovered method against each fixed anchor, on every problem.
@@ -3041,8 +3612,9 @@ def _champion_section(data, per, flags, practical_names, stiff_names,
         "coefficients unchanged." + chosen + f" It runs against each of the {n_cls} "
         f"classical anchors on all {len(names)} problems. "
         "Each cell gives that anchor's Q15 error and one word for the champion against "
-        "it: lower, higher, or tie when the two sit inside the "
-        + f"{_TIE_BAND * 100:.0f} percent band.</p>",
+        "it: lower, higher, tie when the two sit inside the "
+        + f"{_TIE_BAND * 100:.0f} percent band, or flagged when the degeneracy filter "
+        f"flagged the problem over the {len(methods)} methods this suite ran.</p>",
         # The first use of the term on this page, linked, and the place the distinction
         # bites: the champion was chosen on held-out error, and these problems chose
         # nothing.
@@ -3152,18 +3724,9 @@ def _champion_section(data, per, flags, practical_names, stiff_names,
             f"{_num(_err(one, champ))}. A row like that counts for the discovered side "
             "in the maximum-over-both view below and against the champion here, which is "
             "the whole difference between the two tallies.</p>")
-    if flags:
-        rows = "".join(
-            f"<tr><td>{_esc(n)}</td>"
-            f'<td class="num">{len(_finisher_errors([r for (p, _m), r in by.items() if p == n]))}</td>'
-            f"<td>{_esc(flags[n])}</td></tr>" for n in sorted(flags))
-        parts.append("<h3>Problems left out of the tallies</h3>")
-        parts.append('<div class="scroll"><table><tr><th>problem</th>'
-                     '<th class="num">finishers</th><th>why it is flagged</th></tr>'
-                     + rows + "</table></div>")
-        parts.append('<p class="note">A flagged problem stays in the tables above and out '
-                     "of every count, and the thresholds behind the flag are on the "
-                     '<a href="methodology.html#meth-protocol">methodology page</a>.</p>')
+    # The flagged problems used to get their own table here, reasons and all, and the
+    # clean ones got nothing. _degeneracy_table now states every problem's verdict in one
+    # place, so this section keeps the cells and hands the reasoning to that one.
     return parts
 
 
@@ -3214,11 +3777,19 @@ def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
     for r in results:
         rows_by_problem.setdefault(str(r.get("problem")), []).append(r)
     pmeta = {str(p.get("name")): p for p in problems if isinstance(p, dict)}
+    n_field = len(methods)
+    verdicts_by_problem: dict[str, Degeneracy] = {}
     flags: dict[str, str] = {}
     for name in sorted(set(pmeta) | set(per)):
-        bad, why = degeneracy(pmeta.get(name, {}), rows_by_problem.get(name, []))
-        if bad:
-            flags[name] = why
+        v = degeneracy(pmeta.get(name, {}), rows_by_problem.get(name, []))
+        if not v.reason.strip():
+            raise ClaimError(
+                f"validation.html: {name} carries no degeneracy reason. Every problem in "
+                "this suite states a verdict and the reasoning behind it, so one blank "
+                "cell cannot stand for both a clean problem and a problem nobody judged")
+        verdicts_by_problem[name] = v
+        if v.flagged:
+            flags[name] = v.reason
     flagged = frozenset(flags)
     n_disc = sum(1 for m in methods if str(m.get("kind")) == "discovered")
     n_cls = sum(1 for m in methods if str(m.get("kind")) == "classical")
@@ -3251,7 +3822,11 @@ def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
                     + f" inside the {_TIE_BAND * 100:.0f} percent band")
         left = sorted(n for n in names if n in flagged)
         if left:
-            out += (f"; {len(left)} left out as degenerate (" + ", ".join(left) + ")")
+            # The field the flag was computed over travels with the flag: rc_thermal's
+            # verdict depends on who was in the field, so a count of what was left out
+            # means nothing without it.
+            out += (f"; {len(left)} left out as degenerate (" + ", ".join(left)
+                    + f"), over the {n_field} methods this suite ran")
         return out
 
     p_won, p_cmp, p_ties, p_ratios = _tally(practical_names)
@@ -3312,9 +3887,19 @@ def _validation_body(data: dict, benchmark) -> tuple[list[str], list[str]]:
         chart = _validation_chart(data)
         if chart:
             parts.append('<div class="panel">' + chart + "</div>")
+    # Said where the per-problem tables start rather than in the lead, which has a word
+    # budget before the first chart. The cell pages do carry a weight-share column, and a
+    # reader arriving from one would otherwise assume the same weighting applies here.
+    parts.append('<p class="note">This suite is compared problem by problem and '
+                 "summarized by medians of those per-problem ratios and by win counts, "
+                 "not by a root mean square, so no problem carries a weight here and "
+                 "there is no share to report. The weight shares that do exist are on "
+                 "the cell pages, where the archive's search error and held-out error "
+                 "are formed.</p>")
     parts.append("<h2>The champion against each anchor</h2>")
     parts.extend(_champion_section(data, per, flags, practical_names, stiff_names,
                                    n_disc, n_cls))
+    parts.extend(_degeneracy_table(verdicts_by_problem, rows_by_problem, n_field))
     inner: list[str] = []
     if has_stiff:
         inner.append("<h3>Practical (non-stiff)</h3>")
@@ -3592,17 +4177,19 @@ def _bench_us_chart(sp: dict, methods: list, protocol=None) -> str:
         med = float(d["median_us_per_step"])
         bw = med * px_per_us
         parts.append(f'<text x="{ml - 8}" y="{_fmt(y + 15)}" text-anchor="end">{_esc(label)}</text>')
-        title = (f"{label} ({kind}): median {_us(med)} us per Q15 step over "
-                 f"{_num(d.get('n_problems'))} problems; min {_us(d.get('min_us_per_step'))}, "
-                 f"max {_us(d.get('max_us_per_step'))}")
+        title = _us_title(f"{label} ({kind}): median {_us(med)} ",
+                          f" per Q15 step over {_num(d.get('n_problems'))} problems; "
+                          f"min {_us(d.get('min_us_per_step'))}, "
+                          f"max {_us(d.get('max_us_per_step'))}")
         parts.append(f'<rect x="{ml}" y="{y}" width="{_fmt(max(bw, 2))}" height="20" rx="4" '
-                     f'fill="{sw}" fill-opacity="0.35"><title>{_esc(title)}</title></rect>')
+                     f'fill="{sw}" fill-opacity="0.35"><title>{title}</title></rect>')
         for prob in sorted((d.get("per_problem_us_per_step") or {}).keys()):
             v = d["per_problem_us_per_step"][prob]
             if _finite_pos(v):
                 parts.append(f'<circle cx="{_fmt(fx(float(v)))}" cy="{_fmt(y + 10)}" r="4" '
                              f'fill="{sw}" class="cellstroke">'
-                             f'<title>{_esc(f"{label} / {prob}: {_us(v)} us per step")}</title></circle>')
+                             f'<title>{_us_title(f"{label} / {prob}: {_us(v)} ", " per step")}'
+                             "</title></circle>")
         parts.append(f'<text class="lbl" x="{w - 8}" y="{_fmt(y + 15)}" '
                      f'text-anchor="end">{_us(med)}</text>')
     svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" '
@@ -3679,7 +4266,8 @@ def _speed_sentence(bench, full: bool = True) -> str:
         lead = ordering + " "
     return (lead
             + f"In the benchmark head-to-head the champion tableau ({_esc(champ[:8])}) "
-            f"runs in {_us(cm)} us per Q15 step against {_us(bm)} us for {_esc(base)}, "
+            f"runs in {_us(cm)} {_US_UNIT} per Q15 step against {_us(bm)} {_US_UNIT} "
+            f"for {_esc(base)}, "
             f"each a median over that method's own {_num(sp.get('n_problems_compared'))} "
             f"problems. The per-step speedup of {float(gm):.3f}x is the geometric mean of "
             "the per-problem ratios, so it is not the quotient of those two medians. "
@@ -3724,7 +4312,8 @@ def _speed_section(data) -> list[str]:
             return f"{float(v):.3f}" if isinstance(v, (int, float)) else "n/a"
 
         body = ['<div class="scroll"><table><tr><th>problem</th>'
-                f'<th class="num">champion us/step</th><th class="num">{bname} us/step</th>'
+                f'<th class="num">champion {_US_UNIT}/step</th>'
+                f'<th class="num">{bname} {_US_UNIT}/step</th>'
                 '<th class="num">predicted ratio</th><th class="num">measured ratio</th>'
                 f'<th class="num">champion Q15 error</th><th class="num">{bname} Q15 error</th>'
                 "<th>lower error</th></tr>"]
@@ -3808,8 +4397,10 @@ def _speed_section(data) -> list[str]:
 # threshold the page enforces: rows outside it are published with the diagnosis, which
 # is the point of running the comparison at all.
 _TRACE_BAND = 0.25
-_TRACE_TABLE = "trace-values"
 _TRACE_MODEL = "m0plus_fast"
+# One spelling of the section heading, shared with the gate below so that the gate finds
+# the section by the same string the section is built from.
+_TRACE_ANCHOR = '<h2 id="trace">'
 
 
 def _trace_rows(doc) -> list[dict]:
@@ -3827,6 +4418,24 @@ def _tnum(node, key: str, model: str = _TRACE_MODEL):
         return None
     v = inner.get(model)
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _trace_pair_names(invs) -> str:
+    """The inverted pairs by name: "ralston2 against 11e898cb and kutta3 against rk38".
+
+    Names and no cycle counts, deliberately. The document's small-multiplier inversion
+    list compares the whole traced step while the table above is at the matched scope, so
+    a number quoted here would put two scopes in one sentence. The ordering is the claim;
+    the counts are in the columns that carry a scope label.
+    """
+    bits = []
+    for inv in invs:
+        pair = [str(x) for x in (inv.get("pair") or [])]
+        if len(pair) == 2:
+            bits.append(f"{_esc(pair[0])} against {_esc(pair[1])}")
+    if len(bits) > 1:
+        return ", ".join(bits[:-1]) + " and " + bits[-1]
+    return bits[0] if bits else ""
 
 
 def _trace_assumption_list(doc) -> str:
@@ -3855,6 +4464,101 @@ def _trace_assumption_list(doc) -> str:
     return "<ul>" + "".join(bits) + "</ul>"
 
 
+_TRACE_STATES = (1, 2, 3, 4)
+
+
+def _cc_sum(rows, key: str, fallback: str = "") -> int:
+    """One cross-check column, summed over the methods the document carries.
+
+    `comparable` counts the cases where the two implementations can be compared at all,
+    and it is the denominator the agreement sentence needs: measuring agreement against
+    `cases` would publish a case that was skipped as a case that disagreed. It arrived
+    after the earliest documents were written, so a row without it falls back to its own
+    `cases` rather than to zero, which would read as total disagreement.
+    """
+    total = 0
+    for m in rows:
+        cc = m.get("crosscheck")
+        if not isinstance(cc, dict):
+            continue
+        v = cc.get(key)
+        if v is None and fallback:
+            v = cc.get(fallback)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        total += int(v)
+    return total
+
+
+def _state_ladder(rows) -> list[dict]:
+    """The traced whole-step cost of each method at each state count the problems use.
+
+    A method drops out unless every rung was measured. The ladder exists to show that
+    this cost cannot be extrapolated, so filling a missing rung by assuming a shape is
+    the one thing it must not do.
+    """
+    out = []
+    for m in rows:
+        ss = m.get("state_scaling")
+        if not isinstance(ss, dict):
+            continue
+        cyc, ana, ins = {}, {}, {}
+        for n in _TRACE_STATES:
+            rung = ss.get(f"n{n}")
+            if not isinstance(rung, dict):
+                break
+            c = _tnum(rung, "cycles_per_step")
+            if c is None:
+                break
+            cyc[n] = c
+            ana[n] = _tnum(rung, "cycles_analytic")
+            ins[n] = rung.get("instructions_per_step")
+        else:
+            out.append({"name": str(m.get("name")), "cycles": cyc,
+                        "analytic": ana, "instructions": ins})
+    return out
+
+
+def _state_growth(ladder):
+    """How the traced whole-step cost grows with state dimension, from the ladder itself.
+
+    Two readings, both taken inside the traced column: what four states cost against one,
+    and what a straight line through the one-state and two-state costs predicts for four
+    against what the tracer measured there. Neither is a ratio against cycles_analytic,
+    which prices a narrower scope and would report that difference as a model error.
+    """
+    grow, under = [], []
+    for r in ladder:
+        c = r["cycles"]
+        if not all(isinstance(c.get(n), (int, float)) and c.get(n) for n in (1, 2, 4)):
+            return None
+        grow.append(c[4] / c[1])
+        pred = c[1] + 3 * (c[2] - c[1])
+        if pred <= 0:
+            return None
+        under.append((c[4] / pred, r["name"]))
+    if not grow:
+        return None
+    return min(grow), max(grow), min(under), max(under)
+
+
+def _analytic_is_linear_in_states(ladder) -> bool:
+    """Whether the analytic model charges a fixed amount per state, for every method here.
+
+    Checked rather than assumed: it is the shape the traced ladder is measured against,
+    and a cost-model change is exactly the thing that would retire the sentence.
+    """
+    for r in ladder:
+        base = r["analytic"].get(1)
+        if not isinstance(base, (int, float)) or not base:
+            return False
+        for n in _TRACE_STATES:
+            v = r["analytic"].get(n)
+            if not isinstance(v, (int, float)) or v != n * base:
+                return False
+    return bool(ladder)
+
+
 def _trace_section(doc) -> list[str]:
     """The analytic cost model against a compiled, executed, TRM-priced instruction stream.
 
@@ -3864,7 +4568,7 @@ def _trace_section(doc) -> list[str]:
     number restricted to that same scope, and the whole-step figures sit in a fold that
     says what they include.
     """
-    parts = ['<h2 id="trace">Compiled and traced against the cost model</h2>']
+    parts = [_TRACE_ANCHOR + "Compiled and traced against the cost model</h2>"]
     rows = _trace_rows(doc)
     if not rows:
         parts.append('<p class="note">rk-work/trace/results.json has not been written in '
@@ -3889,22 +4593,31 @@ def _trace_section(doc) -> list[str]:
     statement = acc.get("statement")
     if isinstance(statement, str) and statement.strip():
         parts.append(f"<p>{_esc(statement.strip())}</p>")
-    cases = sum(int(m.get("crosscheck", {}).get("cases") or 0) for m in rows)
-    matched = sum(int(m.get("crosscheck", {}).get("matched") or 0) for m in rows)
-    overflow = sum(int(m.get("crosscheck", {}).get("overflow_cases") or 0) for m in rows)
-    trapped = sum(int(m.get("crosscheck", {}).get("trap_index_matched") or 0) for m in rows)
+    cases = _cc_sum(rows, "cases")
+    comparable = _cc_sum(rows, "comparable", "cases")
+    matched = _cc_sum(rows, "matched")
+    overflow = _cc_sum(rows, "overflow_cases")
+    trapped = _cc_sum(rows, "trap_index_matched")
     if cases:
-        agree = (f"all {cases} agree" if matched == cases
-                 else f"{matched} of the {cases} agree")
+        agree = (f"all {comparable} agree" if matched == comparable
+                 else f"{matched} of the {comparable} agree")
         traps = ("all of them" if overflow and trapped == overflow
                  else f"{trapped} of them")
+        # Agreement is measured against the comparable cases, never against every case.
+        # A case the two implementations cannot be compared on is not a case they
+        # disagreed on, and counting it as one would publish a disagreement that the
+        # document does not report.
+        skipped = ""
+        if comparable < cases:
+            skipped = (f" {cases - comparable} of the {cases} cannot be compared and are "
+                       f"left out of that count rather than counted against it.")
         parts.append(
             f"<p>Correctness came before any timing number. The compiled step ran against "
             f"the pinned Python evaluator over {cases} cases, compared on the exact final "
-            f"int16 state and on every stage input, and {agree}. {overflow} of the cases "
-            f"push the Q15 primitives past the range they check, where they raise instead "
-            f"of wrapping, and the checked build traps at the same operation in "
-            f"{traps}.</p>")
+            f"int16 state and on every stage input, and {agree}.{skipped} {overflow} of "
+            f"the cases push the Q15 primitives past the range they check, where they "
+            f"raise instead of wrapping, and the checked build traps at the same operation "
+            f"in {traps}.</p>")
     scope = verdicts.get("scope")
     if isinstance(scope, str) and scope.strip():
         parts.append(f"<p>{_esc(scope.strip())}</p>")
@@ -3934,12 +4647,14 @@ def _trace_section(doc) -> list[str]:
             "</tr>")
     body.append("</table></div>")
     parts.append("\n".join(body))
+    ladder = _state_ladder(rows)
     parts.append('<p class="note">Both columns are at n_states = 1 under '
                  + _esc(_TRACE_MODEL) + ". The traced column is restricted to what "
                  "cycle_count prices, which is the stage and b combinations: it excludes "
                  "the derivative call, the h times k product, loop control and the stack "
-                 "frame. The whole-step figures are in the fold below and do not compare "
-                 "with cycles_analytic.</p>")
+                 "frame. The whole-step figures"
+                 + (", and the same counts at two, three and four states," if ladder else "")
+                 + " are in the fold below and do not compare with cycles_analytic.</p>")
 
     if outside:
         named = ", ".join(f"{_esc(n)} at {g:.3f}" for n, g in outside)
@@ -3953,33 +4668,57 @@ def _trace_section(doc) -> list[str]:
     sp_slow = corr.get("spearman_analytic_vs_traced_slow")
     inversions = [i for i in (corr.get("inversions_model_scope_fast") or [])
                   if isinstance(i, dict)]
+    inverted_slow = [i for i in (corr.get("inversions_slow") or []) if isinstance(i, dict)]
     lines = []
-    if isinstance(sp, (int, float)):
-        lines.append(f"Ranking the six methods by cost, the analytic order and the traced "
-                     f"order agree to a Spearman correlation of {float(sp):.4f} under "
-                     f"{_TRACE_MODEL}.")
+    if isinstance(sp, (int, float)) and len(rows) > 1:
+        lines.append(f"Ranking the {len(rows)} methods in this table by cost, the analytic "
+                     f"order and the traced order agree to a Spearman correlation of "
+                     f"{float(sp):.4f} under {_TRACE_MODEL}.")
+    if len(inversions) > 1:
+        lines.append(f"{len(inversions)} pairs come out the other way round.")
     for inv in inversions:
         pair = [str(x) for x in (inv.get("pair") or [])]
         ana = inv.get("analytic") if isinstance(inv.get("analytic"), dict) else {}
         tra = inv.get("traced") if isinstance(inv.get("traced"), dict) else {}
         if len(pair) == 2:
+            head = ("One pair comes out the other way round: the" if len(inversions) == 1
+                    else "The")
             lines.append(
-                f"One pair comes out the other way round: the model prices "
+                f"{head} model prices "
                 f"{_esc(pair[0])} at {_num(ana.get(pair[0]))} cycles against "
                 f"{_num(ana.get(pair[1]))} for {_esc(pair[1])}, while the trace gives "
                 f"{_esc(pair[1])} {_num(tra.get(pair[1]))} and {_esc(pair[0])} "
                 f"{_num(tra.get(pair[0]))}.")
-    if isinstance(sp_slow, (int, float)) and not (corr.get("inversions_slow") or []):
-        lines.append("Under the small-multiplier model no pair is inverted and the two "
-                     "orders match exactly.")
+    if isinstance(sp_slow, (int, float)):
+        if inverted_slow:
+            named = _trace_pair_names(inverted_slow)
+            lines.append(
+                "Under the small-multiplier model the two orders do not match: "
+                f"{len(inverted_slow)} "
+                + ("pair ranks" if len(inverted_slow) == 1 else "pairs rank")
+                + " differently"
+                + (f" ({named})" if named else "")
+                + f", at a Spearman correlation of {float(sp_slow):.4f}.")
+        else:
+            lines.append("Under the small-multiplier model no pair is inverted and the two "
+                         "orders match exactly.")
     if lines:
         parts.append("<p>" + " ".join(lines) + "</p>")
 
-    coeff_muls = [m for m in rows
-                  if isinstance(m.get("muls_in_model_scope"), int)
-                  and m.get("muls_in_model_scope") == 0]
+    # Every MULS the trace executes is the h times k product and none of them applies a
+    # coefficient: both halves of that sentence are conditions here, so a method that
+    # broke either one takes the paragraph with it rather than being described wrongly.
+    clean = [m for m in rows
+             if isinstance(m.get("muls_in_model_scope"), int)
+             and m.get("muls_in_model_scope") == 0
+             and m.get("muls_per_step") == m.get("stages")]
     champs = [m for m in rows if str(m.get("origin")) == "discovered"]
-    if len(coeff_muls) == len(rows) and rows:
+    if len(clean) == len(rows) and rows:
+        widest = verdicts.get("widest_model_scope_gap")
+        tail = ""
+        if isinstance(widest, dict) and isinstance(widest.get("relative_gap"), (int, float)):
+            tail = (f" The widest gap above is {_esc(str(widest.get('method')))} at "
+                    f"{float(widest['relative_gap']):.3f}.")
         parts.append(
             "<p>Two results, and the load-bearing one is good news. Every MULS in every "
             "trace is the h times k product, one per stage, and not one of them applies a "
@@ -3987,11 +4726,8 @@ def _trace_section(doc) -> list[str]:
             "otherwise, into shifts and adds. The other result is the gap above. Because "
             "the analytic model charges each coefficient the cheaper of a shift-add chain "
             "and a hardware multiply, and a multiply costs one cycle on the fast "
-            "multiplier variant, it prices a multiply the compiler does not emit, so it "
-            "counts low for coefficient-heavy tableaus. That is why the widest gaps here "
-            "are the four-stage classical methods, and why the ordering under the "
-            "small-multiplier model, where the model picks the shift-add chain, matches "
-            "the compiled code exactly.</p>")
+            "multiplier variant, it prices a multiply the compiler does not emit in these nine traces, so it "
+            "counts low for coefficient-heavy tableaus." + tail + "</p>")
     if len(champs) == 1:
         c = champs[0]
         parts.append(
@@ -4005,6 +4741,30 @@ def _trace_section(doc) -> list[str]:
         "moves VERIFIER_HASH and invalidates all scores in the archive. That is an epoch "
         "decision for the run's owner, not a fix inside a cycle, and this page publishes "
         "the disagreement in the meantime.</p>")
+
+    # State dimension, read off the ladder rather than fitted. Both readings below stay
+    # inside the traced column: a whole-step count divided by cycles_analytic would
+    # report a scope difference as a model error, which D42 rules out and D43 keeps out.
+    growth = _state_growth(ladder)
+    if growth:
+        lo, hi, (u_lo, u_lo_name), (u_hi, u_hi_name) = growth
+        model_shape = ""
+        if _analytic_is_linear_in_states(ladder):
+            model_shape = ("The analytic model charges a fixed amount per state, so its "
+                           "count at four states is four times its count at one for every "
+                           "method above. ")
+        lead = ("The compiled step does not keep that shape: " if model_shape
+                else "The compiled step is not proportional to state count: ")
+        parts.append(
+            "<p>State dimension is where the two prices part company. Every count in this "
+            "paragraph and in the ladder below is one whole rk_step with the derivative "
+            "routine's own body excluded, priced from the same instruction-accurate "
+            "emulator. " + model_shape + lead
+            + f"at four states it costs {lo:.2f} to {hi:.2f} times its own one-state cost, "
+            f"and a straight line through the one-state and two-state traced costs, read "
+            f"at four states, underprices the measured four-state cost by {u_lo:.2f}x for "
+            f"{_esc(u_lo_name)} up to {u_hi:.2f}x for {_esc(u_hi_name)}. That is why "
+            "nothing here is priced at a state count the tracer did not run.</p>")
 
     assumptions = _trace_assumption_list(doc)
     fold_body = []
@@ -4035,6 +4795,26 @@ def _trace_section(doc) -> list[str]:
             "</tr>")
     whole.append("</table></div>")
     fold_body.append("\n".join(whole))
+    if ladder:
+        lad = ["<h3>Traced whole-step cost by state count</h3>",
+               '<div class="scroll"><table><tr><th>method</th>'
+               + "".join(f'<th class="num">{n} state{"" if n == 1 else "s"}</th>'
+                         for n in _TRACE_STATES) + "</tr>"]
+        for r in ladder:
+            lad.append(
+                "<tr>" + f'<td class="hash">{_esc(r["name"])}</td>'
+                + "".join(f'<td class="num">{_num(r["cycles"].get(n))}</td>'
+                          for n in _TRACE_STATES) + "</tr>")
+        lad.append("</table></div>")
+        lad.append(
+            '<p class="note">Cycles for one whole rk_step under ' + _esc(_TRACE_MODEL)
+            + ", at each state count the seven scored problems use. The derivative "
+            "routine's own body is excluded, and the emulator is instruction accurate "
+            "rather than cycle accurate, so every entry is a priced instruction stream "
+            "and not a measurement on any part. These counts do not compare with "
+            "cycles_analytic, which prices a narrower scope. What they are is the "
+            "denominator a cycle budget is divided by to get a step count.</p>")
+        fold_body.append("\n".join(lad))
     parts.append(_fold("The assumptions, the limits and the whole-step counts",
                        "\n".join(fold_body)))
     gen = doc.get("generated_from") if isinstance(doc.get("generated_from"), dict) else {}
@@ -4148,6 +4928,137 @@ def check_claims(name: str, html_text: str) -> None:
                 f"the first {_CHIP} mention on {name} has neither "
                 + " nor ".join(_CHIP_QUALIFIERS) + f" within {_CHIP_WORDS} words")
         return
+
+
+# The claim the trace section is not allowed to make on its own. It was written when the
+# document covered six methods and no pair ranked the other way under the small
+# multiplier; the document now covers nine and lists two such pairs, and the sentence was
+# unconditional, so a rebuild would have published the old answer again.
+_TRACE_SLOW_MODEL = "small-multiplier model"
+_TRACE_MATCH_PHRASES = ("no pair is inverted",
+                        "the two orders match exactly",
+                        "matches the compiled code exactly")
+
+
+def check_trace_claim(name: str, html_text: str, doc=None) -> None:
+    """What a page says about the two cost orders has to survive reading the document.
+
+    Two directions, because this claim can go stale by standing and by vanishing. No page
+    may say the orders agree under the small multiplier while rk-work/trace/results.json
+    lists a pair that ranks the other way, and a page carrying the trace section has to
+    say something about that model rather than dropping the comparison in silence.
+    """
+    if not isinstance(doc, dict) or not _trace_rows(doc):
+        return
+    corr = doc.get("correlation")
+    if not isinstance(corr, dict):
+        return
+    inverted = [i for i in (corr.get("inversions_slow") or []) if isinstance(i, dict)]
+    low = html_text.lower()
+    if inverted:
+        for phrase in _TRACE_MATCH_PHRASES:
+            if phrase in low:
+                raise ClaimError(
+                    f"{name} says {phrase!r} while rk-work/trace/results.json lists "
+                    f"{len(inverted)} inverted pair(s) under the small multiplier")
+    if _TRACE_ANCHOR in html_text and _TRACE_SLOW_MODEL not in low:
+        raise ClaimError(f"{name} carries the trace section and never names the "
+                         f"{_TRACE_SLOW_MODEL}; the document states an ordering under it "
+                         "whether the two orders agree or not")
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_RATIO_CUE = re.compile(r"\bratios?\b", re.I)
+# The tags that start a block a number can be printed in. Splitting on them keeps the
+# word "ratio" in one paragraph from arming a number three paragraphs below it.
+_BLOCK_SPLIT = re.compile(r"(?i)</?(?:p|li|figcaption|summary|h[1-6]|div|dt|dd)\b[^>]*>")
+_TABLE_RE = re.compile(r"<table\b.*?</table>", re.S)
+
+
+def _forbidden_ratios(doc) -> dict[str, str]:
+    """{printed token: what that number would be} for the one ratio no page may print.
+
+    Both cost models, and every rung of state_scaling as well as the top-level pair: a
+    whole-step count at four states over the analytic count at four states is the same
+    forbidden quantity as the one-state pair, one rung further down the ladder. Tokens
+    are generated at one to four decimal places because the prohibition is on the value,
+    not on a spelling of it.
+    """
+    out: dict[str, str] = {}
+    for m in _trace_rows(doc):
+        name = str(m.get("name"))
+        rungs = [("n1", m)]
+        ss = m.get("state_scaling")
+        if isinstance(ss, dict):
+            rungs += sorted((str(k), v) for k, v in ss.items() if isinstance(v, dict))
+        for model in ("m0plus_fast", "m0plus_slow"):
+            for rung, node in rungs:
+                whole = _tnum(node, "cycles_per_step", model)
+                if whole is None:
+                    whole = _tnum(node, "cycles_traced", model)
+                ana = _tnum(node, "cycles_analytic", model)
+                if not (whole and ana and whole > 0 and ana > 0):
+                    continue
+                what = (f"{name} at {rung}: whole step {whole:g} over cycles_analytic "
+                        f"{ana:g} under {model}")
+                for places in (1, 2, 3, 4):
+                    out.setdefault(f"{whole / ana:.{places}f}", what)
+    return out
+
+
+def _numeric_blocks(html_text: str):
+    """(block text, the column heading above it) for every block that can print a number.
+
+    Table cells carry their own heading, so a cue word in one column cannot arm a number
+    in another, and the prose outside tables is split at the tags that start a block.
+    """
+    for table in _TABLE_RE.findall(html_text):
+        head: list[str] = []
+        for row in re.findall(r"<tr\b.*?</tr>", table, re.S):
+            cells = [" ".join(_TAG_RE.sub(" ", c).split())
+                     for c in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", row, re.S)]
+            if "<th" in row and not head:
+                head = cells
+                continue
+            for i, cell in enumerate(cells):
+                yield cell, (head[i] if i < len(head) else "")
+    for block in _BLOCK_SPLIT.split(_TABLE_RE.sub(" ", html_text)):
+        yield " ".join(_TAG_RE.sub(" ", block).split()), ""
+
+
+def check_ratio_claim(name: str, html_text: str, doc=None) -> None:
+    """No page prints a whole-step traced count divided by cycles_analytic.
+
+    D42 rejects that ratio and D43 keeps it rejected. cycles_analytic prices the stage and
+    b combinations only, so most of the distance between the two counts is the derivative
+    call, the h times k product, loop control and the stack frame, and dividing one by the
+    other reports a scope difference as a model error. D43 admits the same traced count on
+    the other side of a division, where a cycle budget becomes a step count; that use
+    yields a step count in the thousands rather than a value between 3 and 13, so it does
+    not reach this gate.
+
+    A number counts as a printed ratio only when its own block says so: the word ratio in
+    that block, the same word in its column heading, or a trailing x on the number itself.
+    Without that rule the gate would fire on a section number like 4.2 and on a share
+    percentage like 10.18, both of which are live on this site, and it would be turned off
+    inside a week. A collision between a permitted number and a forbidden value fails the
+    build on purpose; the fix is to name the two counts in the sentence, not to widen the
+    gate.
+    """
+    bad = _forbidden_ratios(doc)
+    if not bad:
+        return
+    for block, heading in _numeric_blocks(_STYLE_RE.sub(" ", html_text)):
+        cued = bool(_RATIO_CUE.search(block) or _RATIO_CUE.search(heading))
+        for token, what in bad.items():
+            for m in re.finditer(r"(?<![\d.])" + re.escape(token) + r"(?![\d])", block):
+                if not (cued or block[m.end():m.end() + 1] == "x"):
+                    continue
+                raise ClaimError(
+                    f"{name} prints {token!r} as a ratio, which is {what}. A whole-step "
+                    "traced count over cycles_analytic reports a scope difference as a "
+                    "model error (D42, D43); quote the matched scope, or put the traced "
+                    f"count under a budget instead. Context: {block[:120]!r}")
 
 
 def _load_hypotheses() -> list[dict]:
@@ -5232,6 +6143,10 @@ def _matched_section(benchmark, cls: str, extra_keys=()) -> list[str]:
         return parts
     parts.append(f"<p>{_matched_sentence(benchmark, rows, cls)}</p>")
     parts.append(_chart_block(_matched_chart(rows, cls)))
+    # The legend inside that figure prints "(ours, ...)" beside every solver, and this is
+    # the page where the word is read. The hub states the same sentence under its cards,
+    # from the same constant, so the two cannot drift.
+    parts.append(f'<p class="note">{_esc(_OURS_MEANS)}</p>')
     if any(str(r.get("side")) == "library" for r in rows):
         parts.append(f'<p class="note">{_esc(_NEVER_SAME_WORK)}</p>')
     # A class-specific verdict (the stiff subset) is a long generated sentence; it opens
@@ -6867,11 +7782,12 @@ def _ledger_section(data) -> str:
     return "\n".join(parts)
 
 
-def _methodology_sections(sidetrack) -> tuple[tuple[str, str, str], ...]:
+def _methodology_sections(sidetrack, merged: int | None = None) -> tuple[tuple[str, str, str], ...]:
     """The sections sitegen builds for methodology.html, as (anchor, heading, body).
 
     methodology.py owns the article and never imports this module, so the parts that
-    need run data or the pinned cost model are built here and handed over.
+    need run data or the pinned cost model are built here and handed over. merged is the
+    archive's count of records still carrying the merged tier word, for the glossary.
     """
     # methodology.py holds the related-work prose beside the reference list it cites, so
     # the article's only outside-facing section stays in the article's own module. The
@@ -6882,8 +7798,44 @@ def _methodology_sections(sidetrack) -> tuple[tuple[str, str, str], ...]:
         ("costmodel", "Cost model", _costmodel_section()),
         ("ledger", "Measurement ledger", _ledger_section(sidetrack)),
         ("related-work", "Related work", methodology_mod.RELATED_WORK),
-        ("glossary", "Glossary", _glossary_section()),
+        ("glossary", "Glossary", _glossary_section(merged)),
     )
+
+
+def _methodology_page(title, body, active="", subtitle=""):
+    """_page with this build's head strings, for the injected callable.
+
+    methodology.render_page takes a page callable and passes it four positional
+    arguments, so the title and description this site wants for the article are applied
+    here rather than inside _page.
+    """
+    return _page(title, body, active, subtitle,
+                 doc_title=_doc_title(title),
+                 description="How the harness searches, scores and verifies "
+                             "Runge-Kutta tableaus in Q15: the cost model, "
+                             "the measurement ledger and the glossary.")
+
+
+def render_methodology(sidetrack=None, merged: int | None = None) -> str:
+    """methodology.html as build() publishes it, given the same two run values.
+
+    build() used to assemble this page from a closure, so the only way to render it
+    outside a build was to repeat the assembly, and the page-length guard in t7 measured
+    a shorter page than the one that ships: it passed the injected sections a None
+    side-track ledger and no merged-tier count, which left out the ledger section's
+    failed points and section 3's count clause, 4,306 words against a published 4,365.
+    A guard that measures a page the build does not write cannot see the published page
+    cross its limit.
+
+    The body is what that guard weighs and it is byte-identical either way. The chrome
+    is not: _PRESENT decides whether the nav carries a validation tab and build() sets it
+    around the whole render, so calling this outside a build gives the same article under
+    a nav with one tab fewer.
+    """
+    from rk_harness import methodology
+    return methodology.render_page(_methodology_page,
+                                   sections=_methodology_sections(sidetrack, merged),
+                                   merged_tier_records=merged)
 
 
 def _prune(out_dir: Path, pages: dict[str, str]) -> None:
@@ -6919,6 +7871,7 @@ def build(arch: ArchiveState, out_dir: Path, commit_shas=None) -> None:
     sidetrack = _load_sidetrack()
     falsification = _load_falsification()
     trace = _load_trace()
+    merged_tier = _merged_tier_count()
     evidence = any(x is not None for x in (validation, benchmark, falsification, trace))
     _PRESENT = frozenset({"validation.html"}) if evidence else frozenset()
     try:
@@ -6947,31 +7900,19 @@ def build(arch: ArchiveState, out_dir: Path, commit_shas=None) -> None:
                                                          falsification=falsification,
                                                          trace=trace)
         try:
-            from rk_harness import methodology
+            from rk_harness import methodology  # noqa: F401
         except ImportError:
             pass
         else:
-            def _methodology_page(title, body, active="", subtitle=""):
-                """_page with this build's head strings, for the injected callable.
-
-                methodology.render_page takes a page callable and passes it four
-                positional arguments, so the title and description this site wants for
-                the article are applied here rather than inside _page.
-                """
-                return _page(title, body, active, subtitle,
-                             doc_title=_doc_title(title),
-                             description="How the harness searches, scores and verifies "
-                                         "Runge-Kutta tableaus in Q15: the cost model, "
-                                         "the measurement ledger and the glossary.")
-
-            pages["methodology.html"] = methodology.render_page(
-                _methodology_page, sections=_methodology_sections(sidetrack))
+            pages["methodology.html"] = render_methodology(sidetrack, merged_tier)
         for name in sorted(pages.keys()):
             check_banned(pages[name])
             check_claims(name, pages[name])
             check_head(name, pages[name])
             check_hover(name, pages[name])
             check_tallies(name, pages[name])
+            check_trace_claim(name, pages[name], trace)
+            check_ratio_claim(name, pages[name], trace)
         out_dir.mkdir(parents=True, exist_ok=True)
         for name in sorted(pages.keys()):
             with open(out_dir / name, "wb") as fh:

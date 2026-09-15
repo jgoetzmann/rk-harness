@@ -1,7 +1,7 @@
 """Checkout hygiene and the acceptance-evidence plumbing: scripts/hygiene.py,
 scripts/merge_junit.py, and preflight's evidence-dated report.
 
-Ids C30-C38. Two of these are tripwires rather than ordinary tests. C33 pins the exact node
+Ids C30-C39. Two of these are tripwires rather than ordinary tests. C33 pins the exact node
 ids the container's `-k` gate collects and C35 byte-compares the shipped workspace scripts
 against the workspace root, so both go red the moment either moves. That is the point: the
 gate's collected set and the restorable copies are things you want to hear about, not things
@@ -400,3 +400,336 @@ def test_C38c_the_evidence_job_expects_exactly_the_shard_matrix():
     assert "name: junit-${{ matrix.name }}" in ci
     assert "pattern: junit-*" in ci and "merge-multiple: true" in ci
     assert "name: preflight-suite" in ci
+# ------------------------------------------------------------------------------------ C39
+
+_KEY_FINDINGS = WORKSPACE / "rk-overview" / "tools" / "key_findings.json"
+_WEIGHTINGS = (("magnitude", None),
+               ("equal_median_anchor", "median_anchor"),
+               ("equal_reference_norm", "reference_norm"))
+
+
+@pytest.mark.skipif(not _KEY_FINDINGS.exists(),
+                    reason="rk-overview/tools/key_findings.json not present")
+def test_C39_the_counterfactual_shares_sum_to_one_and_its_aggregates_reconstruct():
+    """The published weight shares and counterfactual aggregates are checked, not trusted.
+
+    Invariants rather than pinned values, so a fresh archive does not turn this red: the
+    shares of a sum of squares add to one, an RMS rebuilt from the per-problem errors
+    reproduces the aggregate it is meant to be, every ratio is the best anchor over the
+    champion, and the traced prices carry the two hashes that sit on disk. Pinning the
+    values instead would pin them to one snapshot of a run that writes a new one every
+    cycle, which is how a share table ends up disagreeing with the page beside it.
+    """
+    doc = json.loads(_KEY_FINDINGS.read_text(encoding="utf-8"))
+    if "counterfactual" not in doc:
+        pytest.skip("this key_findings.json predates the counterfactual finding; rerun "
+                    "rk-overview/tools/key_findings.py")
+    cf = doc["counterfactual"]
+    n = cf["numbers"]
+    rows = cf["series"]["per_method"]
+
+    # Tied to the pins on disk. A counterfactual priced from a trace document that another
+    # evaluator produced is a ratio between two different things.
+    assert n["provenance"]["trace_hash"] == (HARNESS / "TRACE_HASH").read_text(
+        encoding="ascii").strip()
+    assert n["provenance"]["verifier_hash"] == (HARNESS / "VERIFIER_HASH").read_text(
+        encoding="ascii").strip()
+    assert not n["excluded"]["state_counts_without_a_traced_price"], (
+        "a state count the problem set uses has no traced price, so something in the grid "
+        "was priced by extrapolation")
+
+    # Every share set sums to one.
+    groups = {}
+    for row in rows:
+        for weighting, _scale in _WEIGHTINGS:
+            key = (row["basis"], row["set"], row["method"], weighting)
+            groups.setdefault(key, []).append(row["share_" + weighting])
+    assert groups, "the counterfactual published no weight shares"
+    for key, shares in sorted(groups.items()):
+        assert len(shares) in (3, 4), key
+        assert abs(sum(shares) - 1.0) < 1e-9, (key, sum(shares))
+
+    # Every aggregate is the RMS of the weighted per-problem errors it is built from.
+    scales = n["scales"]
+    for weighting, scale_key in _WEIGHTINGS:
+        for basis in ("analytic", "traced_whole_step"):
+            for set_name, block_key in (("search", "search_set"), ("heldout", "heldout")):
+                block = n[block_key][weighting][basis]
+                for method, published in sorted(block["error"].items()):
+                    vals = [r["error"] / (1.0 if scale_key is None
+                                          else scales[scale_key][r["problem"]])
+                            for r in rows
+                            if r["basis"] == basis and r["set"] == set_name
+                            and r["method"] == method]
+                    assert len(vals) in (3, 4), (weighting, basis, set_name, method)
+                    got = (sum(v * v for v in vals) / len(vals)) ** 0.5
+                    assert abs(got - published) <= 1e-12 * max(abs(got), 1e-300), (
+                        weighting, basis, set_name, method, got, published)
+
+    # Every ratio is the best anchor over the champion, on the set the row keeps.
+    for weighting, _scale in _WEIGHTINGS:
+        for basis in ("analytic", "traced_whole_step"):
+            for r in n["heldout"][weighting][basis]["leave_one_out"]:
+                want = r["best_anchor_error"] / r["champion_error"]
+                assert abs(r["ratio"] - want) <= 1e-12 * abs(want), (weighting, basis, r)
+
+    # The magnitude and analytic corner is the published leave-one-out table, or the two
+    # tables are not comparable and neither belongs beside the other.
+    pub = doc["efficiency"]["numbers"]["leave_one_out"]
+    mine = n["heldout"]["magnitude"]["analytic"]["leave_one_out"]
+    assert [r["dropped"] for r in mine] == [r["dropped"] for r in pub]
+    for a, b in zip(pub, mine):
+        assert a["best_anchor_name"] == b["best_anchor_name"], (a, b)
+        assert abs(a["ratio"] - b["ratio"]) <= 1e-12, (a, b)
+    assert n["invariants"]["published_leave_one_out_reproduced"] is True
+    assert n["invariants"]["every_step_count_is_the_budget_division"] is True
+
+
+# ------------------------------------------------------------------------------------ C39b
+
+_GENERATE_CACHE: dict = {}
+
+
+def _overview_generate():
+    """rk-overview/tools/generate.py, imported once per path under a private module name.
+
+    Importing it puts rk-overview/tools and rk-harness at the front of sys.path. Both entries
+    come back out afterwards, so a module in tools/ cannot shadow anything a later test
+    imports; the names generate.py bound while importing stay bound.
+    """
+    if _GENERATE not in _GENERATE_CACHE:
+        saved = list(sys.path)
+        spec = importlib.util.spec_from_file_location("rk_overview_generate_under_test",
+                                                      _GENERATE)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.path[:] = saved
+        _GENERATE_CACHE[_GENERATE] = mod
+    return _GENERATE_CACHE[_GENERATE]
+
+
+def _folded_table(html_text: str, table_id: str):
+    """The header cells and body rows of the folded table with this id, as plain text."""
+    import html as html_mod
+    m = re.search(r'<details class="fold" id="' + re.escape(table_id) + r'"><summary>(.*?)'
+                  r"</summary>(.*?)</details>", html_text, re.S)
+    assert m, f"{table_id} did not render"
+
+    def text(cell: str) -> str:
+        return html_mod.unescape(re.sub(r"<[^>]+>", "", cell)).strip()
+
+    head = [text(c) for c in re.findall(r"<th[^>]*>(.*?)</th>", m.group(2), re.S)]
+    tbody = m.group(2).split("<tbody>", 1)[1]
+    body = [[text(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+            for tr in re.findall(r"<tr>(.*?)</tr>", tbody, re.S)]
+    assert f"({len(body)} rows)" in m.group(1), (table_id, m.group(1), len(body))
+    return head, body
+
+
+def _counterfactual_or_skip():
+    doc = json.loads(_KEY_FINDINGS.read_text(encoding="utf-8"))
+    if "counterfactual" not in doc:
+        pytest.skip("this key_findings.json predates the counterfactual finding; rerun "
+                    "rk-overview/tools/key_findings.py")
+    return doc
+
+
+@pytest.mark.skipif(not (_KEY_FINDINGS.exists() and _GENERATE.exists()),
+                    reason="rk-overview/tools/key_findings.json or generate.py not present")
+def test_C39b_the_counterfactual_tables_render_from_the_current_document():
+    """The overview's counterfactual tables are rendered from key_findings.json, row for row.
+
+    C39 checks the document. This checks what the page is built from it: the overview's own
+    renderers are called on the document on disk, and every grid cell, search-set rank and
+    leave-one-out row in the document must come back as a printed row, with the value the
+    document holds. The excluded table must name exactly methods_without_a_trace_row, in the
+    document's order, and that list must still mean what it says: discovered frontier rows
+    with no trace row, none of them a method the grid scores. Every count is read from the
+    document and none is pinned (DECISIONS.md D44, D-b), so a refreshed analysis moves both
+    sides together and a table that silently drops a row does not.
+    """
+    doc = _counterfactual_or_skip()
+    gen = _overview_generate()
+    cf = gen._cf_load(doc)
+    n = cf["numbers"]
+    wl, bl = gen._CF_WLABEL, gen._CF_BLABEL
+    cells = [(w, b) for w, _l in gen._CF_WEIGHTINGS for b, _m in gen._CF_BASES]
+    assert sorted(cells) == sorted((w, b) for w in n["heldout"] for b in n["heldout"][w]), (
+        "the renderers and the document disagree about which cells the grid has")
+
+    # The grid: one row per cell, in the renderers' order, carrying that cell's numbers.
+    grid = gen._cf_grid_table(cf)
+    rows = [re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
+            for tr in re.findall(r"<tr>(.*?)</tr>", grid.split("<tbody>", 1)[1], re.S)]
+    assert len(rows) == len(cells), (len(rows), len(cells))
+    for (w, b), row in zip(cells, rows):
+        c = n["heldout"][w][b]
+        reduced = sum(1 for r in c["leave_one_out"] if r["dropped"])
+        assert row[0] == wl[w] and row[1] == bl[b], (w, b, row[:2])
+        assert row[3].startswith(c["best_anchor_name"] + " "), (w, b, row[3])
+        assert row[4] == gen._cf_ratio(c["ratio"]) + "x", (w, b, row[4], c["ratio"])
+        assert row[5].startswith(gen._cf_ratio(c["lowest_leave_one_out_ratio"]) + "x"), (w, b)
+        assert row[6] == f'{c["reduced_sets_where_an_anchor_leads"]} of {reduced}', (w, b, row[6])
+
+    # Leave-one-out: every row of every cell, and nothing else.
+    head, body = _folded_table(gen._cf_loo_table(cf), "cf-loo-table")
+    dropped = {r["dropped"] for w, b in cells for r in n["heldout"][w][b]["leave_one_out"]}
+    want = sorted((wl[w], bl[b], r["dropped"] or "", r["best_anchor_name"],
+                   gen._cf_ratio(r["ratio"]) + "x")
+                  for w, b in cells for r in n["heldout"][w][b]["leave_one_out"])
+    col = {h: i for i, h in enumerate(head)}
+    got = sorted((r[col["weighting"]], r[col["cost basis"]],
+                  r[col["dropped"]] if r[col["dropped"]] in dropped else "",
+                  r[col["best classical anchor"]], r[col["ratio"]]) for r in body)
+    assert got == want
+    assert len(body) == len(cf["series"]["leave_one_out"])
+
+    # Search set: every method's error and rank in every cell.
+    head, body = _folded_table(gen._cf_search_table(cf), "cf-search-table")
+    col = {h: i for i, h in enumerate(head)}
+    want = sorted((wl[w], bl[b], m, gen._short(e),
+                   f'{n["search_set"][w][b]["rank"][m]} of {len(n["search_set"][w][b]["error"])}')
+                  for w, b in cells for m, e in n["search_set"][w][b]["error"].items())
+    got = sorted((r[col["weighting"]], r[col["cost basis"]], r[col["method"]],
+                  r[col["search-set RMS"]], r[col["rank of the nine scored"]]) for r in body)
+    assert got == want
+
+    # Held-out on both bases: each value is the RMS of that method's own held-out rows,
+    # recomputed here rather than taken from the renderer.
+    head, body = _folded_table(gen._cf_heldout_table(cf), "cf-heldout-table")
+    per: dict = {}
+    for r in cf["series"]["per_method"]:
+        if r["set"] == "heldout":
+            per.setdefault((r["method"], r["basis"]), []).append(r["error"])
+    methods = sorted({m for m, _b in per})
+    assert sorted(r[0] for r in body) == methods
+    analytic = next(i for i, h in enumerate(head) if "analytic" in h)
+    traced = next(i for i, h in enumerate(head) if "traced" in h)
+    for r in body:
+        for i, basis in ((analytic, "analytic"), (traced, "traced_whole_step")):
+            v = per[(r[0], basis)]
+            assert r[i] == gen._short((sum(x * x for x in v) / len(v)) ** 0.5), (r, basis)
+
+    # Excluded: exactly the document's list, in its order.
+    excluded = n["excluded"]["methods_without_a_trace_row"]
+    head, body = _folded_table(gen._cf_excluded_table(cf), "cf-excluded-table")
+    assert [r[0] for r in body] == [x["tableau_hash"] for x in excluded]
+    assert [r[1] for r in body] == [str(x["cycles"]) for x in excluded]
+    assert [r[2] for r in body] == [gen._short(x["heldout_error"]) for x in excluded]
+
+    # And the list still means what its name says.
+    frontier = doc["efficiency"]["series"]["frontier_cycles_vs_heldout"]
+    discovered = {str(r["tableau_hash"])[:12] for r in frontier if r["kind"] == "discovered"}
+    scored = {m["tableau_hash"][:12] for m in n["methods"]}
+    assert all(m.get("trace_row") for m in n["methods"]), "a scored method has no trace row"
+    assert {x["tableau_hash"] for x in excluded} <= discovered
+    assert not {x["tableau_hash"] for x in excluded} & scored, (
+        "a method the grid prices is also named as having no trace row")
+    trace_doc = WORKSPACE / "rk-work" / "trace" / "results.json"
+    if trace_doc.exists():
+        traced_hashes = {m["tableau_hash"][:12] for m in
+                         json.loads(trace_doc.read_text(encoding="utf-8"))["methods"]}
+        untraced = sorted(((r["cycles"], str(r["tableau_hash"])[:12]) for r in frontier
+                           if r["kind"] == "discovered"
+                           and str(r["tableau_hash"])[:12] not in traced_hashes))
+        assert [h for _c, h in untraced] == [x["tableau_hash"] for x in excluded], (
+            "methods_without_a_trace_row no longer matches the trace document on disk; "
+            "rerun rk-overview/tools/key_findings.py")
+
+
+# ------------------------------------------------------------------------------------ C39c
+
+def _share_faults(head, body, share_col: int, group_cols) -> list:
+    """What is wrong with one share column: a cell that is not a percentage, or a group of
+    rows (one method's rows in one set) whose shares do not add to 100 percent."""
+    faults, sums = [], {}
+    for r in body:
+        cell = r[share_col]
+        try:
+            v = float(cell[:-1]) if cell.endswith("%") else None
+        except ValueError:
+            v = None
+        if v is None or not 0.0 <= v <= 100.0:
+            faults.append(f"{head[share_col]!r} holds {cell!r}, which is not a share")
+            continue
+        key = tuple(g(r) for g in group_cols)
+        sums[key] = sums.get(key, 0.0) + v
+    # _cf_pct prints two decimals, or two significant figures below 0.1 percent, so four
+    # rounded shares can miss 100 by 0.02 at most.
+    faults += [f"{head[share_col]!r} sums to {s:.3f}% over {key}"
+               for key, s in sorted(sums.items()) if abs(s - 100.0) > 0.05]
+    return faults
+
+
+def _share_columns(head, *words):
+    return [i for i, h in enumerate(head)
+            if "share" in h and all(w in h for w in words)]
+
+
+@pytest.mark.skipif(not (_KEY_FINDINGS.exists() and _GENERATE.exists()),
+                    reason="rk-overview/tools/key_findings.json or generate.py not present")
+def test_C39c_the_overview_rms_tables_keep_their_share_columns():
+    """The overview tables whose rows feed an RMS carry a weight-share column, and it adds up.
+
+    G1's acceptance 2, scoped by SPEC2 to the tables that feed an RMS aggregate. On the
+    overview those are finding 2's floor against round-to-nearest table, which feeds both
+    the search-set and the held-out RMS, and the counterfactual's per-problem table. rc-table
+    is checked too, because finding 4 prints each method's rc_thermal error and that error
+    is one term of the method's held-out RMS (D44, D-d). Each is rendered from the current
+    key_findings.json, and each share column has to be present and hold a real share:
+    within one method and one set the shares add to 100 percent, and on rc-table each share
+    is the document's own. The findings half of the acceptance, the cell pages, is tested
+    beside sitegen. Finding 1's per-problem sentence also carries shares but only renders
+    with the live archive loaded, so it is not checked here.
+    """
+    doc = _counterfactual_or_skip()
+    gen = _overview_generate()
+    cf = gen._cf_load(doc)
+    set_of = {r["problem"]: r["set"] for r in cf["series"]["per_method"]}
+
+    head, body = _folded_table(gen.flip_problem_chart(doc), "flip-problem-table")
+    col = {h: i for i, h in enumerate(head)}
+    by_method_and_set = (lambda r: r[col["method"]], lambda r: set_of[r[col["problem"]]])
+    for words in (("floor",), ("round",)):
+        found = _share_columns(head, *words)
+        assert len(found) == 1, f"flip-problem-table has no {words[0]} share column: {head}"
+        assert not _share_faults(head, body, found[0], by_method_and_set), (
+            _share_faults(head, body, found[0], by_method_and_set))
+
+    head, body = _folded_table(gen._cf_permethod_fold(cf, gen._cf_degeneracy(cf, doc)),
+                               "cf-per-method-table")
+    col = {h: i for i, h in enumerate(head)}
+    groups = (lambda r: r[col["cost basis"]], lambda r: r[col["set"]],
+              lambda r: r[col["method"]])
+    for words in (("magnitude",), ("median",), ("reference",)):
+        found = _share_columns(head, *words)
+        assert len(found) == 1, f"cf-per-method-table has no {words[0]} share column: {head}"
+        assert not _share_faults(head, body, found[0], groups), (
+            _share_faults(head, body, found[0], groups))
+
+    head, body = _folded_table(gen.rc_chart(doc), "rc-table")
+    found = _share_columns(head)
+    assert len(found) == 1, f"rc-table has no share column: {head}"
+    share = {r["method"]: r["share_magnitude"] for r in cf["series"]["per_method"]
+             if r["problem"] == "rc_thermal" and r["basis"] == "analytic"}
+    printed = [r for r in body if r[0] in share]
+    assert printed, "rc-table prints no method the counterfactual scores"
+    for r in body:
+        want = gen._cf_pct(share[r[0]]) if r[0] in share else gen._NA
+        assert r[found[0]] == want, (r, want)
+
+    # The check is not vacuous. A table that loses the column, or whose column stops adding
+    # up, is reported, and that is exactly what the assertions above turn red on.
+    head, body = _folded_table(gen.flip_problem_chart(doc), "flip-problem-table")
+    col = {h: i for i, h in enumerate(head)}
+    i = _share_columns(head, "floor")[0]
+    lost = head[:i] + head[i + 1:]
+    assert not _share_columns(lost, "floor")
+    bent = [list(r) for r in body]
+    bent[0][i] = "50.00%" if bent[0][i] != "50.00%" else "49.00%"
+    assert _share_faults(head, bent, i, (lambda r: r[col["method"]],
+                                         lambda r: set_of[r[col["problem"]]]))
+    assert _share_faults(head, [r[:i] + ["n/a"] + r[i + 1:] for r in body], i,
+                         (lambda r: r[col["method"]],))

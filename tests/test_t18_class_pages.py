@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from rk_harness import sitegen
 from rk_harness.sitegen import (
     build, check_banned, render_adaptive, render_explicit, render_implicit, render_index,
@@ -35,6 +37,26 @@ from test_t4_ledger_runner_site import _assert_chart_fit
 
 CLASS_PAGES = ("explicit.html", "implicit.html", "adaptive.html")
 CLASS_HREFS = ('href="explicit.html"', 'href="implicit.html"', 'href="adaptive.html"')
+
+# Captured at import, which happens before any fixture runs. conftest's autouse fixture
+# repoints RK_WORK_DIR at a throwaway directory so no test can touch a real archive, and
+# says in as many words that a test setting it itself overrides that. The few tests below
+# read the live documents on purpose and take that override.
+_AMBIENT_WORK = os.environ.get("RK_WORK_DIR")
+
+
+def _live_work_dir() -> Path:
+    """The run directory this session was launched against, or the checkout beside this.
+
+    Two candidates, tried in order, because the container runs with RK_WORK_DIR set to a
+    path that is nowhere near this file and the host runs with rk-work as a sibling of
+    rk-harness. Nothing is guessed quietly: when neither carries the document a caller
+    wants, the caller fails naming the path it tried.
+    """
+    for cand in (_AMBIENT_WORK, Path(__file__).resolve().parents[2] / "rk-work"):
+        if cand and Path(cand).is_dir():
+            return Path(cand)
+    return Path(_AMBIENT_WORK or "rk-work")
 
 
 # --------------------------------------------------------------------------------------
@@ -2198,7 +2220,7 @@ def test_the_speed_chart_fades_the_median_bar_and_keeps_values_off_the_marks():
     # every microsecond figure prints to the same precision, chart included: the stored
     # medians carry whatever the timer produced (20.47 beside 31.993) and the page used
     # to print both as stored, four significant figures beside five
-    ours = [dots[f"11e898cb / {p}: {v} us per step"] for p, v in
+    ours = [dots[f"11e898cb / {p}: {v} µs per step"] for p, v in
             (("a", "18.00"), ("b", "20.47"), ("c", "25.00"))]
     _assert_proportional([m["cx"] for m in ours], [18.0, 20.47, 25.0])
     labels = re.findall(r'<text class="lbl" x="([\d.]+)" y="[\d.]+" text-anchor="end">'
@@ -2295,6 +2317,16 @@ def test_each_hub_card_carries_its_own_class_number(monkeypatch, tmp_path):
     assert "; 4 of 4 rows ran" in got["explicit"][1]
     assert "; 1 of 2 rows ran" in got["implicit"][1]
     assert "; 1 of 1 row ran" in got["adaptive"][1]
+    # F18. The count alone reads as a shortfall, so the card carries the rows' own
+    # recorded reason and says what the skipped rows did not cost: the runs that did
+    # happen still cover every problem the class has and still reached every target.
+    # Both halves are generated from the rows, so a card cannot claim what the document
+    # does not say. The two classes with nothing skipped say nothing about skipping.
+    assert ("; 1 of 2 rows ran, the other row was skipped for one recorded reason (no "
+            "analytic Jacobian is derived for this problem), and the rows that ran cover "
+            "every problem the class has and reached every target") in got["implicit"][1]
+    assert "skipped" not in got["explicit"][1]
+    assert "skipped" not in got["adaptive"][1]
     # the solvers behind the number are named with their arithmetic, because "our
     # solvers" reads as "the methods this project found" and two thirds of the explicit
     # set is the classical rk4 control, one row of it in float64. The pairs come out of
@@ -2696,15 +2728,270 @@ def test_degeneracy_flags_a_dead_integration_and_leaves_a_healthy_field():
     assert sitegen._REFERENCE_NORM_KEY in V._problem_entry("enzyme_qssa")
 
 
-def test_the_degenerate_block_prints_its_reason_and_the_thresholds_are_published(
+def test_two_finishers_agreeing_on_the_reference_norm_flag_past_one_live_method():
+    """G2 acceptance 6. Three finishers agree and a fourth sits far out: the spread
+    criterion sees 415 percent and stays quiet, and the all-finishers norm criterion
+    fails on the outlier, so the pair that agrees on the reference is what catches it.
+
+    This is dahlquist's shape. Three of its four finishers land exactly on the reference
+    norm and rk4 lands one LSB further out, which is enough to defeat both of the older
+    criteria while every method in the field has still collapsed to within two LSB of
+    zero. The new branch is appended, so a problem the first criterion already flags
+    keeps the reason string that was published for it.
+    """
+    def rows(*errs):
+        return [{"q15_error": e} for e in errs]
+    norm = {"reference_norm_over_peak": 0.0098}
+    flagged, why = sitegen.degeneracy(norm, rows(0.00970, 0.00971, 0.00974, 0.0500))
+    assert flagged
+    assert "3 of the 4 finishers sit within 5 percent of the reference" in why
+    assert "agree with each other to within 5 percent" in why
+    # the older criteria really are silent on this field, so the new branch is what fired
+    assert not sitegen.degeneracy({}, rows(0.00970, 0.00971, 0.00974, 0.0500))[0]
+    # a healthy field stays clean: no two of these agree, near the norm or anywhere else
+    assert not sitegen.degeneracy(norm, rows(0.0005, 0.005, 0.05, 0.5))[0]
+    # two that agree but sit nowhere near the reference are a tight pair, not a dead run
+    assert not sitegen.degeneracy(norm, rows(0.00050, 0.00051, 0.05))[0]
+    # and the problem the site already flags keeps criterion 1's published reason
+    _f, first_why = sitegen.degeneracy(norm, rows(0.00970, 0.00971, 0.00974))
+    assert "percent from best to worst" in first_why
+
+
+def _drows(*errs):
+    return [{"q15_error": e} for e in errs]
+
+
+def test_the_rule_id_names_the_branch_and_holds_still_when_the_field_grows():
+    """G2 acceptance: a caller comparing two fields compares rule identity, not wording.
+
+    The overview computes each archive problem's verdict twice, over the four methods
+    finding 2 publishes and over the nine the counterfactual scores, then asks which
+    problems flagged on a different rule. It asked by diffing reason strings, and a
+    reason states its finisher count, so dahlquist's four-method and nine-method
+    sentences differ although both are the pair rule. That published a sentence saying
+    dahlquist flags on a different rule across the two fields, which is not true.
+
+    An id names its branch, carries no count and does not move with the field, so the
+    same comparison reads correctly.
+    """
+    norm = {"reference_norm_over_peak": 0.0098}
+    assert set(sitegen.DEGENERACY_RULES) == {
+        "spread", "norm", "pair",
+        "clean", "few-finishers", "no-norm", "no-basis", "no-finishers"}
+    for rule, blurb in sitegen.DEGENERACY_RULES.items():
+        assert not any(ch.isdigit() for ch in rule), rule
+        assert blurb.strip(), rule
+    # one case per branch, flagged and unflagged alike
+    assert sitegen.degeneracy({}, _drows(0.0097, 0.00971, 0.00974)).rule == "spread"
+    assert sitegen.degeneracy(norm, _drows(0.0097, 0.00991)).rule == "norm"
+    assert sitegen.degeneracy(norm, _drows(0.0097, 0.00971, 0.00974, 0.05)).rule == "pair"
+    assert sitegen.degeneracy(norm, _drows(0.0005, 0.005, 0.05)).rule == "clean"
+    assert sitegen.degeneracy(norm, _drows(0.0005, 0.05)).rule == "few-finishers"
+    assert sitegen.degeneracy({}, _drows(0.0005, 0.005, 0.05)).rule == "no-norm"
+    assert sitegen.degeneracy({}, _drows(0.0005, 0.05)).rule == "no-basis"
+    assert sitegen.degeneracy(norm, _drows()).rule == "no-finishers"
+    # the same rule over two field sizes: one id, two sentences
+    small = sitegen.degeneracy(norm, _drows(0.0097, 0.00971, 0.00974, 0.05))
+    large = sitegen.degeneracy(norm, _drows(0.0097, 0.00971, 0.00974, 0.05, 0.5, 0.6))
+    assert small.rule == large.rule == "pair"
+    assert small.reason != large.reason
+    # an id the caller cannot look up, and a verdict with nothing to say, both refuse
+    with pytest.raises(sitegen.ClaimError):
+        sitegen.Degeneracy(False, "something", "not-a-rule")
+    with pytest.raises(sitegen.ClaimError):
+        sitegen.Degeneracy(False, "   ", "clean")
+
+
+def test_the_verdict_is_still_a_pair_so_every_existing_caller_keeps_working():
+    """The id is returned additively. Both sites unpack two values from this function
+    and the overview stores the result and indexes it, so a third element would have
+    broken every one of those call sites."""
+    v = sitegen.degeneracy({}, _drows(0.0097, 0.00971, 0.00974))
+    flagged, why = v
+    assert len(v) == 2 and v == (True, why)
+    assert (v[0], v[1]) == (flagged, why)
+    assert v.flagged is True and v.reason == why and v.rule == "spread"
+    clean = sitegen.degeneracy({}, _drows(0.0005, 0.005, 0.05))
+    bad, text = clean
+    assert bad is False and text == clean.reason
+
+
+def test_an_unflagged_problem_says_which_criteria_ran_on_it():
+    """G2.A1b and G2.A1d. An unflagged problem returned an empty reason, which published
+    a clean verdict and a verdict nobody computed as the same blank. Every case now says
+    what ran and what it found, the two the audit named included: fewer than three
+    finishers, and a document with no reference norm."""
+    norm = {"reference_norm_over_peak": 0.0098}
+    for problem, rows_in in ((norm, _drows(0.0005, 0.005, 0.05)),
+                             ({}, _drows(0.0005, 0.005, 0.05)),
+                             (norm, _drows(0.0005, 0.05)),
+                             ({}, _drows(0.0005, 0.05)),
+                             (norm, _drows())):
+        v = sitegen.degeneracy(problem, rows_in)
+        assert not v.flagged
+        assert v.reason.strip() and v.reason[-1] not in " ,"
+    few = sitegen.degeneracy(norm, _drows(0.0005, 0.05)).reason
+    assert "fewer than the 3 a spread needs" in few
+    assert "neither norm criterion fires" in few
+    nonorm = sitegen.degeneracy({}, _drows(0.0005, 0.005, 0.05)).reason
+    assert "carries no reference solution norm" in nonorm
+    assert "the two norm criteria stay quiet" in nonorm
+    assert "span 9900.00 percent from best to worst" in nonorm
+    none_at_all = sitegen.degeneracy(norm, _drows()).reason
+    assert "no method finished with a finite Q15 error" in none_at_all
+    clean = sitegen.degeneracy(norm, _drows(0.0005, 0.005, 0.05)).reason
+    assert "so the comparison is about the methods" in clean
+    # a flagged reason is untouched: the strings the pages publish are the old ones
+    assert sitegen.degeneracy({}, _drows(0.0097, 0.00971, 0.00974))[1] == (
+        "the 3 finishers' Q15 errors span 0.41 percent from best to worst, under the "
+        "5 percent threshold, so the comparison is reporting the problem rather than "
+        "the method")
+
+
+def test_a_problem_with_no_reason_fails_the_build_rather_than_rendering_a_blank(
         monkeypatch, tmp_path):
+    """G2.AUTO1. The rule that every problem carries a reason is worth nothing unless it
+    can fail, so this puts a detector that returns a blank reason behind the page and
+    watches it refuse. ClaimError is a BannedWordError, so runner.py's existing handler
+    catches it and leaves the previous site standing."""
     _env(monkeypatch, tmp_path)
-    html = sitegen.render_validation(_champion_validation_fixture())
-    assert "<h3>Problems left out of the tallies</h3>" in html
-    block = html.split("<h3>Problems left out of the tallies</h3>", 1)[1]
-    assert "enzyme_qssa" in block
-    assert "reporting the problem rather than the method" in block
+    data = _champion_validation_fixture()
+    sitegen.render_validation(data)      # clean first, so the gate is not always failing
+
+    class _Blank(tuple):
+        rule = "clean"
+        flagged = False
+        reason = ""
+
+    monkeypatch.setattr(sitegen, "degeneracy", lambda p, r: _Blank((False, "")))
+    with pytest.raises(sitegen.ClaimError) as err:
+        sitegen.render_validation(data)
+    assert "carries no degeneracy reason" in str(err.value)
+
+
+def test_the_live_flag_sets_are_pinned_to_the_documents_that_produce_them(monkeypatch):
+    """G2.AUTO2. Nothing pinned which problems the detector flags on the live data, so a
+    threshold edit or a document change could move every published tally and no test
+    would notice. Both fields are read from the documents rather than typed here.
+
+    The validation field is the methods rk-work/validation/results.json ran. The archive
+    field is the one the overview builds: the four methods finding 2 publishes and the
+    nine the counterfactual scores, both out of key_findings.json, which is the only
+    admitted document carrying a cross-method field for the seven archive problems.
+
+    This is one of the tests conftest means when it says a test may set RK_WORK_DIR
+    itself: a pin on the live flag sets cannot read a throwaway work directory.
+    """
+    monkeypatch.setenv("RK_WORK_DIR", str(_live_work_dir()))
+    val = work_dir() / "validation" / "results.json"
+    assert val.is_file(), (
+        f"{val} is missing; point RK_WORK_DIR at a work directory carrying a validation "
+        "run, because this pin reads the live document rather than a fixture")
+    doc = json.loads(val.read_text(encoding="utf-8"))
+    rows_by: dict = {}
+    for r in doc["results"]:
+        rows_by.setdefault(str(r.get("problem")), []).append(r)
+    pmeta = {str(p["name"]): p for p in doc["problems"]}
+    flagged = set()
+    for name, entry in sorted(pmeta.items()):
+        v = sitegen.degeneracy(entry, rows_by.get(name, []))
+        assert v.rule in sitegen.DEGENERACY_RULES, (name, v.rule)
+        assert v.reason.strip(), name
+        if v.flagged:
+            flagged.add(name)
+    assert flagged == {"enzyme_qssa"}, sorted(flagged)
+
+    kfp = (Path(__file__).resolve().parents[2] / "rk-overview" / "tools"
+           / "key_findings.json")
+    assert kfp.is_file(), f"{kfp} is missing; run rk-overview/tools/key_findings.py"
+    kf = json.loads(kfp.read_text(encoding="utf-8"))
+    norms = kf["counterfactual"]["numbers"]["scales"]["reference_norm"]
+    flip = kf["floor_bias_flip"]["series"]["per_problem_floor_vs_round"]
+    per_method = kf["counterfactual"]["series"]["per_method"]
+    four = {p: [{"q15_error": r["floor_error"]} for r in flip if r["problem"] == p]
+            for p in norms}
+    nine = {p: [{"q15_error": r["error"]} for r in per_method
+                if r["problem"] == p and r["basis"] == "analytic"] for p in norms}
+    got = {}
+    for p in sorted(norms):
+        entry = {"name": p, "reference_norm_over_peak": norms[p]}
+        a = sitegen.degeneracy(entry, four[p])
+        b = sitegen.degeneracy(entry, nine[p])
+        assert a.reason.strip() and b.reason.strip(), p
+        got[p] = (a, b)
+    assert {p for p, (a, _b) in got.items() if a.flagged} == {"dahlquist", "rc_thermal"}
+    assert {p for p, (_a, b) in got.items() if b.flagged} == {"dahlquist", "rc_thermal"}
+    # The field decides the rule, and that is what a cross-field comparison has to read.
+    # rc_thermal changes rule between the two fields and dahlquist does not, while both
+    # change reason text, which is exactly why the comparison cannot be made on wording.
+    assert got["rc_thermal"][0].rule == "spread"
+    assert got["rc_thermal"][1].rule == "pair"
+    assert got["dahlquist"][0].rule == got["dahlquist"][1].rule == "pair"
+    assert got["dahlquist"][0].reason != got["dahlquist"][1].reason
+
+
+def test_the_ours_definition_sits_on_the_pages_that_use_the_word(monkeypatch, tmp_path):
+    """F26. The word is defined under the hub's three cards, whose denominator it is,
+    and the class pages are where it is read: each prints "(ours, ...)" beside every
+    solver in the matched-accuracy legend. One constant feeds both, so the copies cannot
+    drift, and each page states it once."""
+    _env(monkeypatch, tmp_path)
+    bench = _matched_fixture()
+    pages = {"explicit": render_explicit(_stocked_arch(), benchmark=bench),
+             "implicit": sitegen.render_implicit(benchmark=bench),
+             "adaptive": sitegen.render_adaptive(benchmark=bench)}
+    for name, html in pages.items():
+        assert html.count(sitegen._OURS_MEANS) == 1, name
+        # it sits under the figure whose legend renders the word, not in the fold below
+        assert html.index(sitegen._OURS_MEANS) < html.index("with its cost grade"), name
+        assert "(ours, " in html, name
+        check_banned(html)
+    assert sitegen._OURS_MEANS in sitegen._CARD_CONVENTION
+
+
+def test_every_problem_gets_a_verdict_a_reason_and_the_field_it_was_computed_over(
+        monkeypatch, tmp_path):
+    """G2.A1d and G2.A3b. The page printed a reason only for the flagged problems, so a
+    clean verdict and a verdict nobody computed were the same blank cell. Every problem
+    in the suite now states its verdict and why it reached it, and each surface carrying
+    a flag names the field the rule ran on, because rc_thermal's verdict depends on who
+    was in the field.
+    """
+    _env(monkeypatch, tmp_path)
+    data = _champion_validation_fixture()
+    html = sitegen.render_validation(data)
+    assert "<h3>Degeneracy verdict, problem by problem</h3>" in html
+    block = html.split("<h3>Degeneracy verdict, problem by problem</h3>", 1)[1]
+    table = block.split("</table>", 1)[0]
+    rows = {}
+    for row in re.findall(r"<tr>(.*?)</tr>", table, re.S):
+        cells = [" ".join(re.sub(r"<[^>]+>", " ", c).split())
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+        if cells:
+            rows[cells[0]] = cells
+    names = [str(p["name"]) for p in data["problems"]]
+    assert set(names) <= set(rows), sorted(set(names) - set(rows))
+    for name in names:
+        _problem, finishers, verdict, why = rows[name]
+        assert verdict in ("flagged", "clean"), (name, verdict)
+        assert why.strip(), name
+        assert int(finishers) >= 0, name
+    assert rows["enzyme_qssa"][2] == "flagged"
+    assert "reporting the problem rather than the method" in rows["enzyme_qssa"][3]
+    assert rows["buck_converter"][2] == "clean"
+    # the three surfaces that carry a flag each name the field the rule ran on
+    n_methods = len(data["methods"])
+    assert (f"computed over the {n_methods} methods the suite ran on each of them"
+            in block)
     assert 'href="methodology.html#meth-protocol"' in block
+    assert (f"1 left out as degenerate (enzyme_qssa), over the {n_methods} methods "
+            "this suite ran") in html
+    champ = html.split("<h2>The champion against each anchor</h2>", 1)[1]
+    assert ("flagged when the degeneracy filter flagged the problem over the "
+            f"{n_methods} methods this suite ran") in champ
+    check_banned(html)
+    sitegen.check_tallies("validation.html", html)
+    assert sitegen.render_validation(data) == html
     from rk_harness import methodology as methodology_mod
     meth = methodology_mod.render_page(sitegen._page,
                                        sitegen._methodology_sections(None))

@@ -1412,6 +1412,72 @@ def test_B96_load_method_takes_a_classical_name_or_an_archive_hash_prefix(monkey
         tc.load_method("not a method")
 
 
+def test_B96_every_state_count_the_scored_problems_use_is_compiled_and_checked():
+    """A state count with no case has no traced price, and the one thing that must not be
+    done with a missing price is model it. rc_thermal has three states and quaternion four,
+    so both are compiled and cross-checked rather than extrapolated to from one and two."""
+    from rk_harness.problems import HELDOUT_SET, PROBLEMS, SEARCH_SET
+    tc = _tc()
+    scored = {p.n_states for p in SEARCH_SET + HELDOUT_SET}
+    assert scored == {1, 2, 3, 4}
+    assert {PROBLEMS[c["problem"]].n_states for c in tc.CASES} == scored
+    # _trace_per_step picks one trace case by n_states, so each count needs exactly one
+    traced = [PROBLEMS[c["problem"]].n_states for c in tc.TRACE_CASES]
+    assert sorted(traced) == sorted(scored)
+    assert len(traced) == len(set(traced))
+
+
+def test_B96_a_state_count_with_no_trace_case_raises_rather_than_reporting_a_count():
+    tc = _tc()
+    with pytest.raises(tc.TraceCheckError, match="no trace case at 5 states"):
+        tc._trace_per_step(None, None, {}, 5)
+
+
+def test_B96_all_eight_classical_anchors_carry_a_trace_row():
+    """A counterfactual that prices steps from this document re-chooses its best classical
+    anchor by minimum over the anchor set. Pricing five of the eight would take that minimum
+    over a different set from the published one, and the two ratios would not compare."""
+    tc = _tc()
+    assert set(CLASSICAL_NAMES) <= set(tc.DEFAULT_METHODS)
+    assert len(tc.DEFAULT_METHODS) == len(CLASSICAL_NAMES) + 1
+    assert len(set(tc.DEFAULT_METHODS)) == len(tc.DEFAULT_METHODS)
+
+
+def test_B96_no_case_can_overrun_the_recorded_derivative_log():
+    """emulate raises when the recorded log exceeds K_CAP. That log is steps times stages
+    times states, so whether it fits is a property of the case list rather than of a run,
+    and it is what holds quaternion to 120 steps where the other problems take 144."""
+    from rk_harness.problems import PROBLEMS
+    tc = _tc()
+    worst_stages = max(len(classical()[name].b) for name in CLASSICAL_NAMES)
+    for case in tc.CASES:
+        p = PROBLEMS[case["problem"]]
+        assert case["steps"] * worst_stages * p.n_states <= tc.K_CAP, case["id"]
+
+
+def test_B96_no_case_dies_in_the_right_hand_side_and_the_new_rails_reach_the_trap():
+    """A case that raises inside the float right-hand side is reported as not comparable,
+    because the cost model prices no derivative and the C port evaluates none. It says
+    nothing about the trap contract, so no case is allowed to end that way. The two new
+    rails are the reason rc_thermal holds every state at one sign: alternating them drives
+    the stiff row out of int16 before any Q15 primitive is reached."""
+    from rk_harness.problems import PROBLEMS
+    tc = _tc()
+    trapped: dict[str, list[str]] = {}
+    for name in CLASSICAL_NAMES:
+        t = classical()[name]
+        for case in tc.CASES:
+            p = PROBLEMS[case["problem"]]
+            y0 = tuple(case.get("y0") or [int(v) for v in p.y0])
+            rep = tc.replay_q15(t, p, case["steps"], y0=y0, h_q=case.get("h_q"))
+            assert rep.status in ("ok", "overflow"), (name, case["id"], rep.status)
+            if rep.status == "overflow":
+                assert rep.trap_op >= 1
+                trapped.setdefault(case["id"], []).append(name)
+    assert "rc_thermal_rail" in trapped
+    assert "quaternion_rail" in trapped
+
+
 @pytest.mark.slow
 def test_B96_the_whole_chain_runs_when_the_toolchain_is_present():
     """Compile, execute, attribute, price and cross-check one method end to end. Skipped

@@ -2464,12 +2464,14 @@ def test_B67_index_and_validation_carry_the_measured_speed_sentence(monkeypatch,
     for name in ("index.html", "explicit.html"):
         html = (out / name).read_text(encoding="utf-8")
         assert "(Pearson r 0.980 over 4 fixed-step Q15 runs)" in html, name
-        assert "runs in 36.29 us per Q15 step against 51.67 us for rk4" in html, name
+        assert ("runs in 36.29 &micro;s per Q15 step against 51.67 &micro;s for rk4"
+                in html), name
         assert "The per-step speedup of 1.450x is the geometric mean" in html, name
         assert 'href="validation.html#speed"' in html, name
         assert 'href="benchmark.html"' not in html, name
     val = (out / "validation.html").read_text(encoding="utf-8")
-    assert "runs in 36.29 us per Q15 step" not in val and "(Pearson r" not in val
+    assert ("runs in 36.29 &micro;s per Q15 step" not in val
+            and "(Pearson r" not in val)
     assert ("preserves the cycle model's ordering, and the cycle counts are modeled"
             in val)
     assert "so their quotient is a different number again" in val
@@ -2478,7 +2480,7 @@ def test_B67_index_and_validation_carry_the_measured_speed_sentence(monkeypatch,
     (work / "benchmark" / "results.json").unlink()
     build(arch, out2)
     for name in ("index.html", "validation.html"):
-        assert "us per Q15 step" not in (out2 / name).read_text(encoding="utf-8"), name
+        assert "&micro;s per Q15 step" not in (out2 / name).read_text(encoding="utf-8"), name
 
 
 def test_the_build_refuses_the_agreement_claim_and_an_unqualified_chip():
@@ -2565,6 +2567,61 @@ def test_the_hub_stamps_the_archive_state_it_was_built_from(monkeypatch, tmp_pat
     # an empty archive has no state to stamp, and says nothing rather than printing zeroes
     assert '<p class="when">' not in render_index(_empty_arch())
 
+
+def test_the_stamp_measures_the_gap_between_two_stored_events(monkeypatch, tmp_path):
+    """F16. A reader could not tell how far the newest elite sat from the run's own
+    last look at itself, and the page cannot read a clock to say so.
+
+    Both endpoints here are stored: the elite record's timestamp and
+    saturation_state.json's last_check, which the epoch panel already reads. The
+    subtraction is a pure function of those files, so two builds stay byte-identical
+    and nothing on the page claims to know the current time. Whether the check itself
+    is old is still the reader's own subtraction, which is where D20 puts it.
+    """
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    (work / "saturation_state.json").write_text(
+        json.dumps({"consecutive": 0, "last_check": "2026-09-22T04:00:00+00:00",
+                    "last_verdict": "CONTINUE"}), encoding="utf-8")
+    stamp = re.search(r'<p class="when">([^<]+)</p>', render_index(arch)).group(1)
+    assert ("Newest elite recorded 2026-09-21 05:00 CT, about 18 hours before the "
+            "last saturation check at 2026-09-21 23:00 CT.") in stamp
+    assert render_index(arch) == render_index(arch)
+    # with no saturation state on disk the stamp says only what it can source
+    (work / "saturation_state.json").unlink()
+    bare = re.search(r'<p class="when">([^<]+)</p>', render_index(arch)).group(1)
+    assert bare.endswith("Newest elite recorded 2026-09-21 05:00 CT.")
+    assert "saturation check" not in bare
+
+
+def test_the_phone_drawing_is_not_announced_as_a_second_chart(monkeypatch, tmp_path):
+    """F13. Every chart with a phone twin emitted both drawings with role="img" and the
+    same aria-label, so a screen reader met the identical label twice in a row. The wide
+    drawing stays the announced one and the twin is marked decorative.
+
+    The twin's links give up their tab stop with it: a focusable element inside an
+    aria-hidden subtree is reachable by keyboard and unreachable by name, which is worse
+    than either state on its own.
+    """
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_validation(work, _validation_fixture())
+    out = tmp_path / "docs"
+    build(arch, out)
+    pairs = 0
+    for name in ("index.html", "explicit.html", "validation.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        for wide, narrow in re.findall(
+                r'<div class="chart-wide">(.*?)</div><div class="chart-phone">(.*?)</div>',
+                html, re.S):
+            pairs += 1
+            assert wide.startswith("<svg viewBox="), name
+            assert narrow.startswith('<svg aria-hidden="true"'), name
+            label = re.search(r'aria-label="([^"]+)"', wide).group(1)
+            assert label
+            # the label is announced once: the twin carrying it is out of the tree
+            assert html.count(f'aria-label="{label}"') == 2
+            for attrs in re.findall(r"<a\b([^>]*)>", narrow):
+                assert 'tabindex="-1"' in attrs, (name, attrs[:60])
+    assert pairs >= 2
 
 def test_each_panel_names_the_archive_state_its_document_was_built_at(monkeypatch, tmp_path):
     """benchmark/results.json carries no record count of its own, so the hub names the
@@ -3378,7 +3435,7 @@ def _trace_fixture() -> dict:
     the pair inverted between the analytic order and the traced order, which is the case
     the page has to name rather than hide.
     """
-    def method(name, origin, stages, ana, traced, matched, muls):
+    def method(name, origin, stages, ana, traced, matched, muls, ladder):
         return {
             "name": name, "origin": origin, "stages": stages,
             "cycles_analytic": {"m0plus_fast": ana, "m0plus_slow": ana},
@@ -3391,11 +3448,22 @@ def _trace_fixture() -> dict:
             "muls_per_step": muls, "muls_in_model_scope": 0,
             "crosscheck": {"cases": 8, "comparable": 8, "matched": 8,
                            "overflow_cases": 2, "trap_index_matched": 2},
+            "state_scaling": {
+                f"n{n}": {
+                    "cycles_per_step": {"m0plus_fast": c, "m0plus_slow": c * 2},
+                    "cycles_analytic": {"m0plus_fast": ana * n, "m0plus_slow": ana * n},
+                    "instructions_per_step": c // 2,
+                }
+                for n, c in zip((1, 2, 3, 4), ladder)
+            },
         }
     return {
-        "methods": [method("midpoint", "classical", 2, 11, 50, 14, 2),
-                    method("rk4", "classical", 4, 33, 139, 67, 4),
-                    method("11e898cb", "discovered", 3, 22, 86, 35, 3)],
+        "methods": [method("midpoint", "classical", 2, 11, 50, 14, 2,
+                           (50, 74, 144, 296)),
+                    method("rk4", "classical", 4, 33, 139, 67, 4,
+                           (139, 256, 478, 716)),
+                    method("11e898cb", "discovered", 3, 22, 86, 35, 3,
+                           (86, 144, 297, 490))],
         "accuracy": {
             "statement": "The emulator is instruction accurate and NOT cycle accurate.",
             "does_not_establish": ["wall clock time on any physical part"],
@@ -3406,7 +3474,9 @@ def _trace_fixture() -> dict:
         "toolchain": {"compiler": "arm-none-eabi-gcc 13.2.1", "emulator": "unicorn 2.1.4",
                       "flags": ["-mcpu=cortex-m0plus", "-mthumb", "-O2"]},
         "verdicts": {"scope": "The analytic model prices the stage and b combinations "
-                              "only."},
+                              "only.",
+                     "widest_model_scope_gap": {"method": "rk4",
+                                                "relative_gap": 0.5074626865671642}},
         "correlation": {
             "spearman_analytic_vs_traced_model_scope_fast": 0.9429,
             "spearman_analytic_vs_traced_slow": 1.0,
@@ -3446,9 +3516,16 @@ def test_the_trace_section_keeps_the_two_scopes_apart_and_publishes_the_failed_b
     assert "One pair comes out the other way round" in sec
     assert "rk4" in sec and "rk38" in sec and "0.9429" in sec
     assert "no pair is inverted" in sec
+    # the method count in the ordering sentence comes from the document, not the prose,
+    # and the widest gap is the verdict the document states rather than a class of method
+    assert "Ranking the 3 methods in this table by cost" in sec
+    assert "The widest gap above is rk4 at 0.507." in sec
+    assert "Ranking the six" not in sec and "four-stage classical methods" not in sec
     # the champion's MULS count and the dyadic assumption behind its cost
     assert "the trace contains 3 MULS per step" in sec
     assert "0 of them apply a tableau coefficient" in sec
+    # the multiply the model prices is scoped to these traces, not a general compiler claim
+    assert "prices a multiply the compiler does not emit in these nine traces" in sec
     # the correction is an epoch decision, said in those terms
     assert "moves VERIFIER_HASH" in sec and "epoch decision" in sec
     # the whole-step numbers exist but sit in a fold that says what they include
@@ -3467,6 +3544,135 @@ def test_a_missing_trace_document_says_so_and_draws_nothing():
     assert "cycles_traced" not in html
     # and with no trace argument at all the section is absent, not empty
     assert '<h2 id="trace">' not in render_validation(None)
+
+
+def test_the_ordering_sentence_counts_the_methods_the_document_carries():
+    """The count was the word "six", written when the trace priced six methods. The
+    document now prices nine and the table renders every one of them, so a sentence that
+    counts them by hand is wrong the moment tracecheck.DEFAULT_METHODS grows again."""
+    doc = _trace_fixture()
+    sec = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "Ranking the 3 methods in this table by cost" in sec
+    doc["methods"].append(dict(doc["methods"][0], name="heun2", stages=2))
+    grown = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "Ranking the 4 methods in this table by cost" in grown
+    assert "Ranking the 3 methods" not in grown
+
+
+def test_an_inverted_pair_under_the_small_multiplier_stops_the_page_claiming_a_match():
+    """The paragraph asserting that the small-multiplier ordering matched the compiled
+    code was unconditional, and it outlived the document it described: the trace went
+    from six methods to nine, two pairs began to rank the other way there, and the page
+    would have published the old answer. The sentence now reads the document, and the
+    gate fails the build if any page asserts the match anyway."""
+    doc = _trace_fixture()
+    doc["correlation"]["spearman_analytic_vs_traced_slow"] = 0.9666666666666666
+    doc["correlation"]["inversions_slow"] = [
+        {"pair": ["ralston2", "11e898cb"], "analytic": {"ralston2": 30, "11e898cb": 29},
+         "traced": {"ralston2": 128, "11e898cb": 179}},
+        {"pair": ["kutta3", "rk38"], "analytic": {"kutta3": 65, "rk38": 64},
+         "traced": {"kutta3": 195, "rk38": 254}},
+    ]
+    html = render_validation(None, trace=doc)
+    sec = html.split('<h2 id="trace">', 1)[1]
+    assert "Under the small-multiplier model the two orders do not match: 2 pairs rank " \
+           "differently (ralston2 against 11e898cb and kutta3 against rk38), at a " \
+           "Spearman correlation of 0.9667." in sec
+    for phrase in sg._TRACE_MATCH_PHRASES:
+        assert phrase not in sec.lower(), phrase
+    # names only: the document compares the whole traced step under that model while the
+    # table above is at the matched scope, so a cycle count here would mix the two
+    assert "128" not in sec and "179" not in sec
+    sg.check_trace_claim("validation.html", html, doc)
+    check_banned(html)
+    # the gate is the part that cannot go stale quietly: it reads the document
+    for phrase in sg._TRACE_MATCH_PHRASES:
+        with pytest.raises(sg.ClaimError):
+            sg.check_trace_claim("validation.html", html + f"<p>{phrase}</p>", doc)
+    # and it fails the other way too, when the section stops naming that model at all
+    with pytest.raises(sg.ClaimError):
+        sg.check_trace_claim("validation.html",
+                             html.replace("small-multiplier model", "other model"), doc)
+    # a page without the section, and a work directory without the document, both pass
+    sg.check_trace_claim("index.html", "<p>no trace section here</p>", doc)
+    sg.check_trace_claim("validation.html", html, None)
+
+
+def test_the_crosscheck_measures_agreement_against_the_comparable_cases():
+    """A case the two implementations cannot be compared on is not a case they disagreed
+    on. The denominator was every case rather than the comparable ones, so a single
+    not_comparable row would have published "23 of the 24 agree" as though the C and the
+    pinned Python evaluator had diverged, which is the one thing this paragraph exists to
+    report. Today the document reports none, so no published byte moves."""
+    doc = _trace_fixture()
+    sec = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "over 24 cases" in sec and "all 24 agree" in sec
+    assert "cannot be compared" not in sec
+    # one case drops out of the comparison. Agreement is still total, and the page says
+    # which cases left rather than counting them as disagreements.
+    doc["methods"][0]["crosscheck"] = {"cases": 8, "comparable": 7, "matched": 7,
+                                       "not_comparable": 1, "overflow_cases": 2,
+                                       "trap_index_matched": 2}
+    sec = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "over 24 cases" in sec and "all 23 agree" in sec
+    assert "1 of the 24 cannot be compared" in sec
+    assert "23 of the 24 agree" not in sec
+    # a real disagreement still reads as one, against the comparable count
+    doc["methods"][0]["crosscheck"]["matched"] = 6
+    sec = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "22 of the 23 agree" in sec
+    # a document written before comparable existed falls back to its own case count
+    # rather than to zero, which would read as total disagreement
+    for m in doc["methods"]:
+        m["crosscheck"] = {"cases": 8, "matched": 8, "overflow_cases": 2,
+                           "trap_index_matched": 2}
+    sec = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "all 24 agree" in sec and "cannot be compared" not in sec
+
+
+def test_the_state_ladder_publishes_every_rung_and_says_the_cost_is_not_linear():
+    """The document prices every state count the scored problems use and the page
+    rendered none of it. The ladder is what shows the whole-step cost cannot be
+    extrapolated, which is why nothing is priced at a state count the tracer did not run.
+    Both readings stay inside the traced column: a whole-step count over cycles_analytic
+    would report a scope difference as a model error, which D42 forbids and D43 keeps
+    forbidden."""
+    doc = _trace_fixture()
+    html = render_validation(None, trace=doc)
+    sec = html.split('<h2 id="trace">', 1)[1]
+    lad = sec.split("Traced whole-step cost by state count", 1)[1]
+    assert '<th class="num">1 state</th>' in lad
+    assert '<th class="num">4 states</th>' in lad
+    row = lad.split('<td class="hash">midpoint</td>', 1)[1].split("</tr>", 1)[0]
+    for cell in (">50<", ">74<", ">144<", ">296<"):
+        assert cell in row, cell
+    # the growth is read off the ladder, not fitted, and the model's own shape is checked
+    # against the document rather than asserted
+    assert "four times its count at one for every method above" in sec
+    assert "at four states it costs 5.15 to 5.92 times its own one-state cost" in sec
+    assert ("underprices the measured four-state cost by 1.46x for rk4 up to 2.43x for "
+            "midpoint") in sec
+    # the scope freight travels with the numbers in both places they appear
+    assert "whole rk_step with the derivative routine's own body excluded" in sec
+    assert "instruction accurate rather than cycle accurate" in lad
+    assert "do not compare with cycles_analytic" in lad
+    assert render_validation(None, trace=doc) == html
+    check_banned(html)
+    sg.check_trace_claim("validation.html", html, doc)
+    # a rung that was never measured is never invented: the method leaves the ladder
+    doc["methods"][1]["state_scaling"].pop("n4")
+    lad2 = render_validation(None, trace=doc).split(
+        "Traced whole-step cost by state count", 1)[1]
+    assert '<td class="hash">rk4</td>' not in lad2
+    assert '<td class="hash">midpoint</td>' in lad2
+    # and a document with no ladder at all says nothing about state count
+    for m in doc["methods"]:
+        m.pop("state_scaling")
+    bare = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert "Traced whole-step cost by state count" not in bare
+    assert "State dimension is where the two prices part company" not in bare
+    assert "the same counts at two, three and four states" not in bare
+    assert "Both columns are at n_states = 1" in bare
 
 
 def test_no_page_tells_the_reader_to_hover(monkeypatch, tmp_path):
@@ -3598,3 +3804,391 @@ def test_a_chart_mark_that_is_a_link_gets_a_focus_ring():
     stops with nothing to show for it. CSS only, so the site stays JavaScript-free."""
     assert "svg a:focus-visible rect" in sg._STYLE
     assert "outline:2px solid var(--s1)" in sg._STYLE
+
+
+# ======================================================================================
+# FIND-SHARE (2026-09-12): the weight-share columns on the two archive-record tables,
+# the reason the validation suite carries none, and the forbidden-ratio gate
+# ======================================================================================
+
+def _rendered_table(html: str, marker: str) -> tuple[list[str], list[list[str]]]:
+    """(heading cells, body rows) of the first table after marker, tags stripped.
+
+    The assertions below read the rendered page rather than the generator, because the
+    thing being pinned is what a reader can add up.
+    """
+    sec = html.split(marker, 1)[1].split("</table>", 1)[0]
+    rows = []
+    for row in re.findall(r"<tr\b.*?</tr>", sec, re.S):
+        rows.append([" ".join(re.sub(r"<[^>]+>", " ", c).split())
+                     for c in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", row, re.S)])
+    return rows[0], rows[1:]
+
+
+def test_the_per_problem_table_names_each_rows_set_and_its_weight_share():
+    """G1 acceptance 2 on the findings side. Search error and held-out error are two
+    separate root mean squares, so a share is a share of one set's sum of squares, and
+    the table names the set on every row rather than letting a reader add across both."""
+    rec = _site_records()[0]
+    html = render_cell(4, 4, 2, rec)
+    head, body = _rendered_table(html, 'id="per-problem-values"')
+    assert head == ["problem", "set", "final-state error", "share of its set, percent"]
+    totals: dict[str, list[float]] = {}
+    for name, setname, _err, share in body:
+        assert setname in ("search", "held-out"), (name, setname)
+        totals.setdefault(setname, []).append(float(share))
+    assert sorted(totals) == ["held-out", "search"]
+    assert len(totals["search"]) == 3 and len(totals["held-out"]) == 4
+    for setname, vals in sorted(totals.items()):
+        assert abs(sum(vals) - 100.0) <= 0.05, (setname, sum(vals))
+    # the fixture gives every problem in a set the same error, so the shares are equal
+    assert totals["search"] == [pytest.approx(100 / 3, abs=0.01)] * 3
+    assert totals["held-out"] == [pytest.approx(25.0, abs=0.01)] * 4
+    assert "part of its own set's sum of squares" in html
+    check_banned(html)
+
+
+def test_the_per_problem_matrix_carries_one_share_per_cost_model():
+    """Each cost model is scored by its own integration, so each column has its own two
+    sums. A single share column would describe one of the three and mislabel the other
+    two. The aggregate rows are not members of a set and say so in words.
+
+    The set column arrived with SHARE-FIX, so a value column sits at 2, 4 and 6 and its
+    share column at 3, 5 and 7, and a row states its own set rather than leaving the
+    reader to recognise the three search problems by name."""
+    rec = _site_records()[0]
+    html = render_cell(4, 4, 2, rec)
+    head, body = _rendered_table(html, "Every per-problem error, by cost model")
+    assert head == ["problem", "set",
+                    "m0plus_fast", "m0plus_fast share, percent",
+                    "m0plus_slow", "m0plus_slow share, percent",
+                    "avr_approx", "avr_approx share, percent"]
+    for col in (3, 5, 7):
+        totals: dict[str, list[float]] = {}
+        for row in body:
+            if row[0] in ("search_error", "heldout_error"):
+                assert row[col] == "set total", (row[0], head[col - 1], row[col])
+                continue
+            totals.setdefault(row[1], []).append(float(row[col]))
+        assert sorted(totals) == ["held-out", "search"]
+        assert len(totals["search"]) == 3 and len(totals["held-out"]) == 4
+        for setname, vals in sorted(totals.items()):
+            assert abs(sum(vals) - 100.0) <= 0.05, (head[col - 1], setname, sum(vals))
+    assert "one share column would describe one of these three" in html
+    check_banned(html)
+
+
+def test_a_share_set_that_does_not_sum_to_one_never_reaches_a_page():
+    """The gate that makes the column worth reading. A share set that does not sum to one
+    is a reader adding a column up and getting an answer the page does not mean, so it
+    fails the build the way a banned word does rather than rendering."""
+    good = sg._shares({"dahlquist": 3.0, "damped_osc": 4.0, "vanderpol_mild": 12.0,
+                       "pendulum": 1.0, "dc_motor": 2.0, "rc_thermal": 2.0,
+                       "quaternion": 4.0})
+    for setname in ("search", "held-out"):
+        got = [v for k, v in good.items() if sg._SET_OF[k] == setname]
+        assert abs(sum(got) - 1.0) < 1e-12, (setname, sum(got))
+    with pytest.raises(sg.ClaimError):
+        sg._check_share_sets({"dahlquist": 0.5, "damped_osc": 0.2,
+                              "vanderpol_mild": 0.2})
+    assert issubclass(sg.ClaimError, BannedWordError)
+
+
+def test_an_overflowed_run_drops_its_whole_share_set_rather_than_renormalizing():
+    """An infinite error makes its set's RMS infinite, so every share in that set is
+    meaningless. Spreading the total over the rows that happened to finish would publish
+    a share of a number the page cannot state."""
+    vals = {"dahlquist": 1.0, "damped_osc": 1.0, "vanderpol_mild": 1.0,
+            "pendulum": 1.0, "dc_motor": 1.0, "rc_thermal": float("inf"),
+            "quaternion": 1.0}
+    got = sg._shares(vals)
+    assert set(got) == {"dahlquist", "damped_osc", "vanderpol_mild"}
+    assert abs(sum(got.values()) - 1.0) < 1e-12
+
+
+def test_the_validation_page_says_why_it_carries_no_weight_share():
+    """The suite is compared per problem and summarized by medians of those ratios and by
+    win counts, never by a root mean square, so a share column there would invent a
+    weighting the suite does not have."""
+    html = render_validation(_stiff_validation_fixture())
+    assert ("summarized by medians of those per-problem ratios and by win counts, not by "
+            "a root mean square") in html
+    assert "no problem carries a weight here and there is no share to report" in html
+    check_banned(html)
+
+
+def test_no_page_may_print_a_whole_step_traced_count_over_cycles_analytic():
+    """D42 rejects that ratio and D43 keeps it rejected: cycles_analytic prices the stage
+    and b combinations only, so dividing a whole step by it reports a scope difference as
+    a model error. The forbidden values are read out of the document rather than typed."""
+    doc = _trace_fixture()
+    bad = sg._forbidden_ratios(doc)
+    m = doc["methods"][0]
+    whole = m["cycles_traced"]["m0plus_fast"]
+    ana = m["cycles_analytic"]["m0plus_fast"]
+    assert f"{whole / ana:.3f}" in bad and f"{whole / ana:.1f}" in bad
+    # the ladder is covered too: a whole step at four states over the analytic count at
+    # four states is the same forbidden quantity, one rung further down
+    rung = m["state_scaling"]["n4"]
+    ladder = rung["cycles_per_step"]["m0plus_fast"] / rung["cycles_analytic"]["m0plus_fast"]
+    assert f"{ladder:.2f}" in bad
+    for html in (f"<p>a ratio of {whole / ana:.3f} against the model</p>",
+                 f"<p>the compiled step is {whole / ana:.2f}x the model price</p>",
+                 "<table><tr><th>method</th><th>ratio</th></tr>"
+                 f"<tr><td>midpoint</td><td>{whole / ana:.3f}</td></tr></table>"):
+        with pytest.raises(sg.ClaimError):
+            sg.check_ratio_claim("validation.html", html, doc)
+    # and the shapes that have to stay quiet: a section number, a share percentage, the
+    # budget denominator D43 permits, and the matched-scope ratio the page prints today
+    for html in ("<p>See section 4.2 for the cost model.</p>",
+                 '<table><tr><th>problem</th><th>share of its set, percent</th></tr>'
+                 f"<tr><td>dc_motor</td><td>{whole / ana:.2f}</td></tr></table>",
+                 f"<p>Priced at the traced {whole} the budget buys 2048 steps.</p>",
+                 "<table><tr><th>method</th><th>ratio</th></tr>"
+                 "<tr><td>midpoint</td><td>1.273</td></tr></table>"):
+        sg.check_ratio_claim("validation.html", html, doc)
+    # with no document there is nothing to compare against and the gate stands down
+    sg.check_ratio_claim("validation.html", f"<p>ratio {whole / ana:.3f}</p>", None)
+
+
+def test_build_refuses_a_page_that_prints_the_forbidden_ratio(monkeypatch, tmp_path):
+    """The gate runs inside build() beside the banned-word check, and names the page.
+
+    A gate that only ever passes is not evidence, so this drives a real build twice: once
+    clean, then once with the forbidden sentence on one page.
+    """
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    (work / "trace").mkdir(parents=True, exist_ok=True)
+    (work / "trace" / "results.json").write_text(json.dumps(_trace_fixture()),
+                                                 encoding="utf-8")
+    out = tmp_path / "docs"
+    build(replay(), out)
+    assert (out / "validation.html").is_file()
+    before = sorted(p.name for p in out.glob("*.html"))
+    m = _trace_fixture()["methods"][0]
+    ratio = m["cycles_traced"]["m0plus_fast"] / m["cycles_analytic"]["m0plus_fast"]
+    real = sg.render_hypotheses
+    monkeypatch.setattr(sg, "render_hypotheses", lambda *a, **k: real(*a, **k).replace(
+        "</footer>", f"</footer><p>a ratio of {ratio:.3f} against cycles_analytic</p>", 1))
+    with pytest.raises(sg.ClaimError) as err:
+        build(replay(), out)
+    assert "hypotheses.html" in str(err.value)
+    assert sorted(p.name for p in out.glob("*.html")) == before
+
+
+# ======================================================================================
+# SHARE-FIX (2026-09-12): the fast column's aggregates, the set column, small shares,
+# the rebuild gate, a zero member, and the generated tier-word sentence
+# ======================================================================================
+
+def test_the_fast_column_prints_the_aggregates_the_record_stores_at_top_level():
+    """per_problem holds slow:search_error and avr_approx:search_error and no fast
+    counterpart, because the fast pair is the record's own search_error and
+    heldout_error (evaluator.evaluate, the prefix == "" branch). Looking for them in
+    per_problem alone printed n/a in the m0plus_fast column on both aggregate rows of
+    every cell page, beside real numbers for the other two models."""
+    rec = _site_records()[0]
+    sv = rec.score
+    assert "search_error" not in sv.per_problem
+    assert "heldout_error" not in sv.per_problem
+    assert "slow:search_error" in sv.per_problem
+    html = render_cell(4, 4, 2, rec)
+    head, body = _rendered_table(html, "Every per-problem error, by cost model")
+    fast = head.index("m0plus_fast")
+    rows = {r[0]: r for r in body}
+    assert rows["search_error"][fast] == sg._num(sv.search_error)
+    assert rows["heldout_error"][fast] == sg._num(sv.heldout_error)
+    assert "n/a" not in (rows["search_error"][fast], rows["heldout_error"][fast])
+
+
+def test_the_matrix_names_each_rows_set_the_way_the_bars_table_does():
+    """The matrix carried no set label at all, and its note spoke of the three search
+    rows without saying which rows those were. An aggregate row names the set it totals
+    rather than a set it belongs to, because it is not a member of one."""
+    rec = _site_records()[0]
+    html = render_cell(4, 4, 2, rec)
+    head, body = _rendered_table(html, "Every per-problem error, by cost model")
+    assert head[:2] == ["problem", "set"]
+    got = {r[0]: r[1] for r in body}
+    assert got["dahlquist"] == "search" and got["vanderpol_mild"] == "search"
+    assert got["pendulum"] == "held-out" and got["quaternion"] == "held-out"
+    assert got["search_error"] == "search" and got["heldout_error"] == "held-out"
+    assert "The set column says which total a row belongs to" in html
+
+
+def test_a_share_too_small_for_two_decimals_prints_small_rather_than_zero():
+    """A problem carrying 0.03 percent of its set printed 0.00, which reads as carrying
+    none of it. The rule below is the one rk-overview/tools/generate.py applies in
+    _cf_pct, so the same share reads the same on both sites, without the percent sign
+    these columns carry in their heading instead."""
+    assert sg._pct(0.0) == "0"
+    assert sg._pct(0.5) == "50.00"
+    assert sg._pct(0.001) == "0.10"
+    assert sg._pct(0.00099) == "0.099"
+    assert sg._pct(1.2e-05) == "0.0012"
+    for tiny in (3.4e-06, 1e-09, 9.9e-04):
+        assert float(sg._pct(tiny)) > 0, tiny
+    # and the caption says what two-decimal rounding does to a column total
+    html = render_cell(4, 4, 2, _site_records()[0])
+    assert "99.99 or 100.01" in html
+
+
+def test_a_problem_with_no_error_keeps_its_set_and_takes_a_share_of_zero():
+    """_finite_pos excludes zero, which is right for a log axis and wrong for a share:
+    reading the members through it dropped a whole set the moment one problem finished
+    exactly on the answer, although the RMS those shares describe counts that zero. A
+    set with nothing to divide by is the case that really has no share, and an
+    overflowed set still goes whole."""
+    vals = {"dahlquist": 0.0, "damped_osc": 3.0, "vanderpol_mild": 4.0,
+            "pendulum": 1.0, "dc_motor": 2.0, "rc_thermal": 2.0, "quaternion": 4.0}
+    got = sg._shares(vals)
+    assert set(got) == set(vals)
+    assert got["dahlquist"] == 0.0 and sg._pct(got["dahlquist"]) == "0"
+    for setname in ("search", "held-out"):
+        members = [v for k, v in got.items() if sg._SET_OF[k] == setname]
+        assert abs(sum(members) - 1.0) < 1e-12, setname
+    allzero = dict(vals, damped_osc=0.0, vanderpol_mild=0.0)
+    assert set(sg._shares(allzero)) == {"pendulum", "dc_motor", "rc_thermal",
+                                        "quaternion"}
+    over = dict(vals, rc_thermal=float("inf"))
+    assert set(sg._shares(over)) == {"dahlquist", "damped_osc", "vanderpol_mild"}
+
+
+def test_an_aggregate_its_own_rows_do_not_rebuild_never_reaches_a_page():
+    """A record page publishes two separately stored things: the per-problem errors and
+    the aggregate the scorer wrote beside them. Nothing rebuilt one from the other, so
+    a column could pair one model's errors with another model's aggregate and render
+    without complaint. _check_share_sets is not this check: its shares are built as v
+    squared over the sum of those same squares, so it cannot fail from its own
+    generator. This one reads two independent numbers and can."""
+    sv = _sv(33, 85, 0.001, 0.002)
+    sg._per_problem_matrix(sv, where="cell-p4-s4-b2.html")
+    bad = dataclasses.replace(sv, search_error=sv.search_error * 1.5)
+    with pytest.raises(sg.ClaimError) as err:
+        sg._per_problem_matrix(bad, where="cell-p4-s4-b2.html")
+    assert "cell-p4-s4-b2.html" in str(err.value) and "search" in str(err.value)
+    per = dict(sv.per_problem)
+    per["dahlquist"] = per["dahlquist"] * 2
+    with pytest.raises(sg.ClaimError):
+        sg._per_problem_matrix(dataclasses.replace(sv, per_problem=per),
+                               where="cell-p4-s4-b2.html")
+    slow = dict(sv.per_problem)
+    slow["slow:heldout_error"] = slow["slow:heldout_error"] * 1.01
+    with pytest.raises(sg.ClaimError):
+        sg._per_problem_matrix(dataclasses.replace(sv, per_problem=slow),
+                               where="cell-p4-s4-b2.html")
+    assert issubclass(sg.ClaimError, BannedWordError)
+
+
+def test_build_refuses_a_record_whose_rows_do_not_rebuild_its_aggregate(
+        monkeypatch, tmp_path):
+    """The gate runs inside build() and names the page it refused.
+
+    A gate that only ever passes is not evidence, so this drives a real build twice:
+    once clean, then once with a record whose stored search_error disagrees with the
+    per-problem errors printed above it. The poisoned record improves on both
+    aggregates, so it takes the cell whatever the ranking rule is."""
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    before = sorted(p.name for p in out.glob("*.html"))
+    assert "cell-p4-s4-b2.html" in before
+    poisoned = dataclasses.replace(_sv(33, 85, 0.001, 0.0019), search_error=0.0005)
+    append(_rec(_classical_8()["rk4"], poisoned, "heldout_verified", 4, "D-E000002"))
+    with pytest.raises(sg.ClaimError) as err:
+        build(replay(), out)
+    assert "cell-p4-s4-b2.html" in str(err.value)
+    assert "rebuild the aggregate" in str(err.value)
+    assert sorted(p.name for p in out.glob("*.html")) == before
+
+
+def test_the_merged_tier_word_is_counted_from_the_archive_not_typed_into_prose(
+        monkeypatch, tmp_path):
+    """scripts/backfill_tiers.py rewrites the stored tier word, so a sentence saying
+    every earlier record still carries it is true until that script runs and false the
+    moment it does. Both sentences that state it are generated from a count of the
+    archive, so neither needs editing when the tiers are backfilled."""
+    work = _setup_env(monkeypatch, tmp_path)
+    assert sg._merged_tier_count() == 0
+    for r in _site_records():
+        append(r)
+    assert sg._merged_tier_count() == 0
+    append(_rec(_classical_8()["heun3"], _sv(20, 44, 0.007, 0.008),
+                "unreplicated", 4, None))
+    append(_rec(_classical_8()["ralston2"], _sv(18, 40, 0.009, 0.01),
+                "unreplicated", 5, None))
+    assert sg._merged_tier_count() == 2
+    _full_work(work)
+    out = tmp_path / "docs"
+    build(replay(), out)
+    meth = (out / "methodology.html").read_text(encoding="utf-8")
+    assert "2 archived records still carry it" in meth
+    assert "which 2 records still carry" in meth
+    assert "every record written earlier still carries it" not in meth
+    assert "which merged those last two" not in meth
+    check_banned(meth)
+
+
+def test_a_missing_per_problem_member_fails_the_gate_rather_than_skipping_it():
+    """The RMS gate rebuilds each printed aggregate from the rows above it, but a set
+    whose members were not all stored was skipped, so the gate's coverage was
+    conditional on the scorer staying complete rather than being a property of the page.
+    Deleting one problem from a record raised nothing and the page rendered n/a beside
+    an aggregate nothing had checked.
+
+    An absent member now fails the build and the message names it. A member that is
+    stored and is not a number still skips, because there is nothing to rebuild from.
+    """
+    sv = _sv(33, 85, 0.001, 0.002)
+    sg._per_problem_matrix(sv, where="cell-p4-s4-b2.html")
+    for gone in ("dahlquist", "quaternion", "avr_approx:rc_thermal"):
+        per = dict(sv.per_problem)
+        del per[gone]
+        with pytest.raises(sg.ClaimError) as err:
+            sg._per_problem_matrix(dataclasses.replace(sv, per_problem=per),
+                                   where="cell-p4-s4-b2.html")
+        assert gone.rpartition(":")[2] in str(err.value)
+        assert "cell-p4-s4-b2.html" in str(err.value)
+    # a model column that kept its two aggregates and lost every member is the same
+    # failure: the column is still printed, and nothing rebuilds what it prints
+    per = {k: v for k, v in sv.per_problem.items()
+           if not k.startswith("slow:") or k.endswith("_error")}
+    with pytest.raises(sg.ClaimError) as err:
+        sg._per_problem_matrix(dataclasses.replace(sv, per_problem=per),
+                               where="cell-p4-s4-b2.html")
+    assert "m0plus_slow" in str(err.value)
+    assert issubclass(sg.ClaimError, BannedWordError)
+
+
+def test_an_overflowed_member_still_passes_the_gate_and_reads_n_a_in_the_share_column():
+    """An overflowed run stores an infinite error, and the aggregate over its set is
+    infinite too, so both sides of the gate hold infinity and infinity equals itself.
+    That set passes the gate rather than skipping it, and the share column drops it
+    because an infinite total has nothing to divide. The case is live, so making an
+    absent member fail must not take this one with it."""
+    inf = float("inf")
+    sv = _sv(33, 85, 0.001, 0.002)
+    per = dict(sv.per_problem)
+    per["dahlquist"] = inf
+    over = dataclasses.replace(sv, per_problem=per, search_error=inf)
+    frag = sg._per_problem_matrix(over, where="cell-p4-s4-b2.html")
+    rows = {}
+    for row in re.findall("<tr>(.*?)</tr>", frag, re.S):
+        cells = [" ".join(re.sub("<[^>]+>", " ", c).split())
+                 for c in re.findall("<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+        if cells:
+            rows[cells[0]] = cells
+    # column 3 is the m0plus_fast share; the overflowed set reads n/a across its members
+    assert rows["dahlquist"][3] == "n/a"
+    assert rows["damped_osc"][3] == "n/a"
+    assert rows["vanderpol_mild"][3] == "n/a"
+    # the held-out set never saw the overflow and keeps its shares
+    assert rows["pendulum"][3] != "n/a"
+    assert rows["quaternion"][3] != "n/a"
+    # and the whole record page still renders
+    rec = _rec(_classical_8()["rk4"], over, "heldout_verified", 1, "D-E000001")
+    html = render_cell(4, 4, 2, rec)
+    assert "n/a" in html
+    check_banned(html)

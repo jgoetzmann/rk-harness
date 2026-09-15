@@ -10,7 +10,7 @@ The page callable (sitegen._page) is injected by the caller, and so are the clos
 sections that need run data or the pinned cost model (the cost model tables, the
 measurement ledger, the glossary). This module never imports sitegen, so there is no
 circular import. The article itself is a fixed string: no wall clock, no randomness,
-byte-identical output for the same sections.
+byte-identical output for the same sections and the same injected count.
 
 Every number and filename in the article was checked against the repository at the
 time of writing: rk_harness/fixedpoint.py, coeffrep.py, orderconditions.py,
@@ -27,6 +27,8 @@ TITLE = "Methodology"
 _SUBTITLE = "How the run measures, checks and reproduces its numbers."
 
 _ARCH = "https://jgoetzmann.github.io/rk-overview/architecture.html"
+
+_RESULTS = "https://jgoetzmann.github.io/rk-overview/results.html"
 
 
 def _cite(*refs: int) -> str:
@@ -141,6 +143,20 @@ units, and the reference at t_end, divided by the problem's peak amplitude. pend
 relative energy drift |E - E0| / E0 instead, and quaternion the drift of its norm from
 1{_cite(3)}.</p>
 
+<p>Search error and held-out error are each the root mean square of the per-problem errors
+over their set, computed by <code>evaluator.set_error</code>{_cite(5)}. An RMS sums squares,
+so a problem's influence on the aggregate grows with the square of its error and the
+problems do not carry equal weight: the problem a method does worst on dominates that
+method's score, and which problem that is differs from method to method. The weighting is
+deliberate. Every per-problem error is already divided by its own problem's scale, so the
+squares are summed on one shared scale, and that magnitude weighting is what every score in
+the archive was computed under. The equal-weighting answer is a different scale: divide each
+problem by the median error of the classical anchors before the squares are summed. The
+counterfactual under that scale, and under a reference-norm scale that concentrates weight
+instead of spreading it, is published on the
+<a href="{_RESULTS}#efficiency">overview results page</a>. The two scales disagree about the
+outcome, and that disagreement is itself the result.</p>
+
 <p>The Q15 integrator takes n equal steps of h = t_end / n, and an overflow anywhere
 aborts the run. The evaluator never raises: a failure becomes an inf entry, a zero
 overflow margin or a None measured order in the ScoreVector it returns, and its
@@ -168,7 +184,25 @@ among them. The study runs in float64 because Q15 roundoff would flatten every m
 slope; the problem runs measure the Q15 error separately{_cite(5, 17)}.</p>
 """
 
-_S3 = f"""
+def _s3(merged: int | None) -> str:
+    """Section 3, with the merged tier word's own state read off the archive.
+
+    unreplicated is a stored tier that scripts/backfill_tiers.py rewrites in place,
+    so how many records carry it is a fact about the archive rather than about the
+    method, and a sentence stating it from memory is true until that script runs and
+    false after it. The caller passes the count and the clause follows it. merged is
+    None when the archive could not be counted, and the paragraph then says only what
+    the word meant, which holds either way.
+    """
+    if merged is None:
+        tier_state = ""
+    elif merged == 1:
+        tier_state = ", and one archived record still carries it"
+    elif merged > 0:
+        tier_state = f", and {int(merged):,} archived records still carry it"
+    else:
+        tier_state = ", and no archived record carries it now"
+    return f"""
 <h2 id="meth-protocol">3. Statistical protocol</h2>
 
 <p>Code assigns each verified candidate an evidence <a href="methodology.html#tiers">tier</a>
@@ -178,7 +212,7 @@ search-set and held-out error, across at least two problem families.
 the signature of overfitting. <em>no_incumbent</em>: the cell was empty.
 <em>no_improvement</em>: there was an incumbent and neither rule above applied, which
 includes improving held-out error but not search error. Those last two were one word,
-<em>unreplicated</em>, before the split, and every record written earlier still carries it. The tier
+<em>unreplicated</em>, before the split{tier_state}. The tier
 words appear in no
 prompt template, and a planted tableau tuned to the search set must land in search_only;
 canaries check both. The archive
@@ -224,9 +258,12 @@ method; a flagged problem is left out of every tally with its reason printed. Th
 criterion, an error within 5 percent of the reference solution's norm, catches a state
 that decayed to nothing. validation/results.json stores that norm for each problem, on
 the same scale as the errors, so the pages read it from the document rather than
-assuming it. Any error ratio within 2 percent of 1.0 is counted as a tie. A third
+assuming it. A third criterion catches the case that defeats both: when any
+two finishers agree to within 5 percent of each other while both sit within 5 percent
+of that norm, the field is not separating methods even though one live method widens
+the spread. Any error ratio within 2 percent of 1.0 is counted as a tie. A further
 criterion, an identical peak magnitude equal to the initial condition, was dropped because
-it flagged a healthy problem{_cite(5, 20)}.</p>
+it flags healthy problems{_cite(5, 20)}.</p>
 """
 
 _S4 = f"""
@@ -357,7 +394,7 @@ def _toc(sections) -> str:
     return '<ol class="meth-toc">\n' + "\n".join(items) + "\n</ol>\n"
 
 
-def _body(sections=()) -> str:
+def _body(sections=(), merged=None) -> str:
     """The article, with any injected sections after section 7 and before References.
 
     Each injected section is (anchor, heading, trusted HTML body). The caller builds the
@@ -367,14 +404,17 @@ def _body(sections=()) -> str:
         f'\n<h2 id="{html.escape(str(sid), quote=True)}">{html.escape(str(title))}</h2>\n'
         f"{body}\n" for sid, title, body in sections)
     return (_INFOBOX + _LEAD + _toc(sections)
-            + _S1 + _S2 + _S3 + _S4 + _S5 + _S6 + _S7 + extra + _REFS)
+            + _S1 + _S2 + _s3(merged) + _S4 + _S5 + _S6 + _S7 + extra + _REFS)
 
 
-def render_page(page, sections=()) -> str:
+def render_page(page, sections=(), merged_tier_records=None) -> str:
     """Render the methodology article through the injected page callable.
 
     `page` is sitegen._page (or any callable with the same signature):
     page(title, body, active="", subtitle="") -> str. `sections` is an optional
     sequence of (anchor, heading, html) tuples appended after section 7.
+    `merged_tier_records` is how many archived records still carry the merged tier
+    word, which section 3 states; None leaves that clause out.
     """
-    return page(TITLE, _body(tuple(sections)), "methodology.html", _SUBTITLE)
+    return page(TITLE, _body(tuple(sections), merged_tier_records),
+                "methodology.html", _SUBTITLE)
