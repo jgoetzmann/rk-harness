@@ -22,7 +22,19 @@ from __future__ import annotations
 
 import html
 
+from rk_harness import verifier_hash
+
 TITLE = "Methodology"
+
+# How many files the scoring pin covers, counted off verifier_hash.VERIFIER_FILES rather
+# than typed. Section 4 and the infobox state the same count on the same page, and the
+# section had it typed as ten while the pin covers fourteen (DECISIONS D45 added four),
+# so both now read the list. sitegen keeps its own copy of this map because this module
+# never imports it.
+_PIN_WORDS = {10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+              15: "fifteen", 16: "sixteen"}
+_PIN_COUNT = len(verifier_hash.VERIFIER_FILES)
+_PIN_COUNT_WORD = _PIN_WORDS.get(_PIN_COUNT, str(_PIN_COUNT))
 
 _SUBTITLE = "How the run measures, checks and reproduces its numbers."
 
@@ -52,16 +64,16 @@ as {_cite(21)} cites a file in the rk-harness repository, a section of the froze
 specification, docs/HANDOFF.md, or a published paper.</p>
 """
 
-_INFOBOX = """
+_INFOBOX = f"""
 <table class="infobox meth-infobox">
 <caption>rk-harness</caption>
 <tr><th>Object of study</th><td>Explicit Runge-Kutta tableaus, orders 1 to 4, stages 2 to 6</td></tr>
 <tr><th>State arithmetic</th><td>Q15: int16 in [-32768, 32767], scale 2<sup>-15</sup></td></tr>
-<tr><th>Target</th><td>ARM Cortex-M0+, analytic cycle model, two multiplier variants; AVR model advisory only</td></tr>
+<tr><th>Target</th><td>ARM Cortex-M0+, analytic cycle model, two multiplier variants; AVR model advisory only; coefficient prices compiled at pinned flags</td></tr>
 <tr><th>Evaluation budget</th><td>65,536 cycles per problem run</td></tr>
 <tr><th>Test problems</th><td>7 fixed (3 search, 4 held out)</td></tr>
 <tr><th>Verification gate</th><td>Nine ordered checks, pure code, never raises</td></tr>
-<tr><th>Integrity pin</th><td>sha256 over ten files, checked at container start</td></tr>
+<tr><th>Integrity pin</th><td>sha256 over {len(verifier_hash.VERIFIER_FILES)} files, checked at container start</td></tr>
 </table>
 """
 
@@ -102,11 +114,25 @@ tableau costing k cycles per step takes n = B // k steps with B = 65,536 cycles,
 two-stage method takes about twice the steps of a four-stage one. Comparing at equal h
 would hand the expensive methods free work{_cite(5)}.</p>
 
-<p>Cycle counts are analytic, a pure function of the tableau with no compiler in the
-loop. m0plus_fast (single-cycle multiplier) and m0plus_slow (32-cycle multiplier) are
-primary; avr_approx is advisory. Each coefficient application is charged the cheaper of
-a shift-add chain of its <a href="methodology.html#csd-weight">CSD weight</a> and a
-hardware multiply, which is why bit structure matters under a slow multiplier. The tables
+<p>Cycle counts are analytic: a pure function of the tableau, with no compiler and no
+hardware in the scoring loop. m0plus_fast (single-cycle multiplier) and m0plus_slow
+(32-cycle multiplier) are primary; avr_approx is advisory. Under the two M0+ models a
+coefficient application costs the instructions arm-none-eabi-gcc 13.2.1 emits for that
+term at -mcpu=cortex-m0plus -mthumb -O2 -ffreestanding -nostdlib, counted by op class
+(mul, shift, add, load) in the pinned table <code>fixtures/m0plus_coeff_ops.json</code>
+and priced by the model's per-class cycles, so the compiler enters the price once, at pin
+time, and never per evaluation. The table is keyed by the signed multiplier and by whether
+a shift is present, so a negative coefficient can cost more than its positive twin, and a
+multiplier outside the two keyed domains raises rather than guessing. A multiplier of plus
+or minus 1 at shift 0 costs nothing, because the compiler emits a bare adds or subs that
+the combination add already prices; zero entries and exact plus or minus 1 stay free.
+avr_approx keeps the earlier charge, the cheaper of a shift-add chain of its
+<a href="methodology.html#csd-weight">CSD weight</a> and a hardware multiply, which is why
+bit structure matters under its slow multiplier. The table holds what one compiler emits
+for an isolated term at those flags: it over-prices work the compiler shares across a
+combination, and it says nothing about other compilers, flags or tunings, about AVR, or
+about cycle accuracy. The correction landed at the epoch-2 boundary (DECISIONS D45);
+scores produced under the earlier charge keep the pin they were scored with. The tables
 are in the <a href="methodology.html#costmodel">cost model</a> section below and the
 counting rules on the <a href="{_ARCH}#costmodel">architecture page</a>{_cite(7, 2)}.</p>
 
@@ -275,9 +301,9 @@ the search but never change the objective, the problems, the cost model or the t
 rules{_cite(15)}.</p>
 
 <p>The container mounts rk-harness read-only and exits at start-up unless a sha256 over
-the ten scoring files matches VERIFIER_HASH and the golden tests pass, and every record
-stores the hash it was scored under. Model-written code runs only inside the problem
-quarantine, and the container never receives the GitHub token. The
+the {_PIN_COUNT_WORD} scoring files matches VERIFIER_HASH and the golden tests pass, and
+every record stores the hash it was scored under. Model-written code runs only inside
+the problem quarantine, and the container never receives the GitHub token. The
 <a href="{_ARCH}#verify">architecture page</a> goes through the checks in
 order{_cite(13, 14, 16)}.</p>
 """
@@ -308,7 +334,11 @@ _S7 = f"""
 
 <p>The cost model is analytic and has never been checked against silicon inside the
 loop: an assembly fixture and a reference C emitter anchor it, but no hardware
-measurement feeds a score. Derivative evaluation is left out of the cycle count, which is
+measurement feeds a score. The per-coefficient prices under the two M0+ models come from
+compiled probes at fixed flags rather than from silicon, and they describe an isolated
+term: work the compiler shares across a combination is over-priced, and nothing is
+established for other compilers, flags or tunings, for AVR, or for cycle accuracy.
+Derivative evaluation is left out of the cycle count, which is
 harmless between methods with the same stage count and a real simplification
 otherwise{_cite(7)}.</p>
 
@@ -364,7 +394,7 @@ _REFS = """
 <li id="meth-ref-4">rk_harness/simulate.py (Q15 and float64 integrators, derivative scaling, budget-to-steps).</li>
 <li id="meth-ref-5">rk_harness/evaluator.py; HANDOFF 4.7 (equal-budget rule, measured order, stability extents).</li>
 <li id="meth-ref-6">rk_harness/verifier.py; HANDOFF 4.4 (nine ordered checks).</li>
-<li id="meth-ref-7">rk_harness/costmodel.py, fixtures/known_sequence.s; HANDOFF 4.5 (counting rules), 9.5 (anchor comparison) and 12 (assembly fixture).</li>
+<li id="meth-ref-7">rk_harness/costmodel.py, fixtures/known_sequence.s, fixtures/m0plus_coeff_ops.json; HANDOFF 4.5 (counting rules, superseded for the M0+ coefficient charge by DECISIONS D45), 9.5 (anchor comparison) and 12 (assembly fixture).</li>
 <li id="meth-ref-8">rk_harness/orderconditions.py; HANDOFF 4.3 (rooted trees, dyadic impossibility).</li>
 <li id="meth-ref-9">rk_harness/search.py; HANDOFF 4.9 (CMA-ES, projection, islands).</li>
 <li id="meth-ref-10">rk_harness/enumeration.py; HANDOFF 8 (phase table) and 9.6 (phase 0 count).</li>

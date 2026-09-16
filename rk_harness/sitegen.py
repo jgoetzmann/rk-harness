@@ -1,7 +1,8 @@
 """Findings site generator: SPEC §Surface/sitegen.py, HANDOFF §17.
 
 Seven tabs (D41): overview, the three class pages, validation, the research log and
-methodology. Retired pages are deleted by build(); see _RETIRED.
+methodology. Retired pages are deleted by build() and a page name a frozen epoch
+still publishes keeps a stub pointing at it; see _RETIRED and render_epoch_stub.
 
 Pure HTML + inline SVG, no JavaScript, no wall-clock reads: the same ArchiveState always
 produces byte-identical files. Stored UTC timestamps are displayed in US Central via
@@ -33,23 +34,58 @@ from rk_harness import problems as problems_mod
 from rk_harness import saturation
 from rk_harness import tableau as tableau_mod
 from rk_harness import timefmt
+from rk_harness import verifier_hash
 from rk_harness.paths import archive_dir, work_dir
 from rk_harness.types import ArchiveState, Record
 
 BANNED_WORDS = ("novel", "first", "beats", "outperforms", "breakthrough", "proves",
                 "state-of-the-art", "best-ever")
+
+# How many files the scoring pin covers, counted off verifier_hash.VERIFIER_FILES rather
+# than typed. The footer of every page states it, so a typed count goes wrong the moment
+# the pin set changes, which is exactly what DECISIONS D45 did to it.
+_PIN_WORDS = {10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+              15: "fifteen", 16: "sixteen"}
+_PIN_COUNT = len(verifier_hash.VERIFIER_FILES)
+_PIN_COUNT_WORD = _PIN_WORDS.get(_PIN_COUNT, str(_PIN_COUNT))
+
+# The coefficient price pin (DECISIONS D45): the rule's own toolchain, which is a
+# different thing from any one traced run's toolchain. fixtures/m0plus_coeff_ops.json
+# carries the same compiler string and the same flag list in its _meta, and
+# rk_harness.tracecheck.CFLAGS is that list. They stand here as constants so the site
+# build neither parses the 1 MB fixture nor pulls the tracer into its import path; one
+# test asserts they still equal both sources, so they cannot drift from the pin.
+COEFF_PIN_TABLE = "fixtures/m0plus_coeff_ops.json"
+COEFF_PIN_COMPILER = "arm-none-eabi-gcc 13.2.1"
+COEFF_PIN_CFLAGS: tuple[str, ...] = ("-mcpu=cortex-m0plus", "-mthumb", "-O2",
+                                     "-ffreestanding", "-nostdlib")
+# Deliberately not sorted. This is a command line that was run, so its order is the
+# pin's own; sorted iteration is for data iteration, not for a fixed sequence.
+_CFLAGS_TEXT = " ".join(COEFF_PIN_CFLAGS)
+
+
+def _pinned_rule_clause() -> str:
+    """The coefficient pricing rule as a clause, with no flag string typed at the site.
+
+    One phrasing, used by the cost-model section, the coefficient fold and the trace
+    lead, so the rule reads the same wherever the reader meets it.
+    """
+    return (f"the instructions {COEFF_PIN_COMPILER} emits for that term at "
+            f"{_CFLAGS_TEXT}")
 # Provenance line, rendered quietly in the footer of every page. The footer's link to
 # the rk-overview site completes the sentence, so the constant ends mid-phrase.
 #
 # Every gate named here runs. The hash check and the golden tests run at container
 # start (entrypoint.sh), the banned-word check runs over every rendered page before
-# build() opens the first file, and _prune deletes the retired names on the same build.
+# build() opens the first file, and _prune deletes the retired names on the same build,
+# leaving a stub where a frozen epoch still publishes the name.
 # The full test suite, the host preflight and the overview's demo cross-check are not
 # in this path and are not claimed.
 BANNER = ("Generated from run data by the harness, with no human review. The container "
-          "starts only if the ten pinned scoring files still match their hash, no page "
-          "is written unless every page passes the banned-word check, and pages this "
-          "site has retired are deleted on the same build. Human interpretation is at")
+          f"starts only if the {_PIN_COUNT_WORD} pinned scoring files still match their "
+          "hash, no page is written unless every page passes the banned-word check, and "
+          "pages this site has retired are deleted on the same build. Human "
+          "interpretation is at")
 OVERVIEW_URL = "https://jgoetzmann.github.io/rk-overview/"
 FINDINGS_URL = "https://jgoetzmann.github.io/rk-findings/"
 SITE_NAME = "rk-harness findings"
@@ -555,12 +591,21 @@ _PRESENT: frozenset[str] = frozenset()
 # Pages this site published under earlier layouts. GitHub Pages serves whatever is in
 # docs/, so a page dropped from build() would stay live, stale and unlinked, until
 # someone removed it by hand. build() deletes exactly these names, plus cell pages for
-# cells the archive no longer holds, and nothing else.
+# cells the archive no longer holds and the frozen epoch sites do not publish, and
+# nothing else; a cell page the frozen epoch-1 site publishes keeps a stub pointing at
+# the frozen copy.
 _RETIRED: tuple[str, ...] = (
     "benchmark.html", "costmodel.html", "falsification.html", "glossary.html",
     "interpretation.html", "literature.html", "sidetrack.html",
 )
+# _CELL_FILE_RE is the pattern _prune matches with and it stays capture-free, so the
+# grouped reader of the same name lives beside it instead of inside it. _EPOCH_SITE_RE
+# is the shape a frozen epoch's site field has to have before any page links it: the
+# trailing slash is load-bearing, and the capture group is where the epoch number comes
+# from, so no epoch number is ever typed into this module.
 _CELL_FILE_RE = re.compile(r"^cell-p\d+-s\d+-b\d+\.html$")
+_CELL_NAME_RE = re.compile(r"^cell-p(\d+)-s(\d+)-b(\d+)\.html$")
+_EPOCH_SITE_RE = re.compile(r"^epoch-(\d+)/$")
 
 
 def _nav(active: str) -> str:
@@ -1007,12 +1052,22 @@ def _anchor_bars() -> str:
         + ("row" if len(bars) == 1 else "rows") + ")",
         ("method", "cost model", "cycles per step"),
         [(_esc(n), _esc(m), str(v)) for n, m, v in bars], num_cols=(2,))
+    # The caption used to call the fast/slow swap the cost model's own check. Under the
+    # pinned coefficient price table there is no swap, so the closing sentence is
+    # recomputed from the bars rather than typed: that is how the old one went stale, and
+    # a re-pin would stale a new hand-written claim the same way.
+    cheap_fast = min(vals, key=lambda v: v[1])[0]
+    cheap_slow = min(vals, key=lambda v: v[2])[0]
+    swap = ("Which of the two is cheaper swaps between the multiplier models."
+            if cheap_fast != cheap_slow else
+            f"{cheap_slow} is the cheaper of the two under both multiplier models.")
     return ("<figure><figcaption>Analytic cycles per step for rk4 and rk38 under the fast and "
             "slow multiplier cost models. Bar height is the per-step cost and the printed "
-            "number is the exact cycle count. Which of the two "
-            + _gloss("anchor-methods", "anchor methods") + " is cheaper swaps between the "
-            "multiplier models, and that swap is the cost model's main sanity "
-            "check.</figcaption>"
+            "number is the exact cycle count. The two "
+            + _gloss("anchor-methods", "anchor methods") + " share a stability polynomial, "
+            "so the whole difference between these bars is coefficient arithmetic, which "
+            "is what makes the pair the cost model's own check. " + _esc(swap)
+            + "</figcaption>"
             + _legend([("var(--s1)", "m0plus_fast (1-cycle multiplier)"), ("var(--s2)", "m0plus_slow (32-cycle multiplier)")])
             + svg + table + "</figure>")
 
@@ -1341,8 +1396,9 @@ def _coeff_rep_details(rec: Record) -> str:
         + _gloss("floor-rounding", "floors") + ". Zero entries are skipped. "
         "When exact is no, m/2^s only approximates the fraction and the largest such gap is "
         "the record's coeff_quant_error. " + _gloss("csd-weight", "CSD weight")
-        + " is the length of the shift-add chain the cost model may charge for the multiply "
-        "by m.</p>",
+        + " is the fewest signed power-of-two terms that write m; it prices the advisory "
+        "avr_approx model, and the two M0+ models price this coefficient from its entry "
+        "in the " + _gloss("coeff-table", "coefficient price table") + ".</p>",
         '<div class="scroll"><table><tr><th>entry</th><th>exact value</th><th class="num">m</th>'
         '<th class="num">s</th><th>m/2^s</th><th>exact</th><th class="num">csd weight</th></tr>',
     ]
@@ -1402,7 +1458,8 @@ def _stat_cards(arch: ArchiveState) -> str:
 
 
 # ----------------------------------------------------------------------------
-# epoch-status panel (the public progress loop, HANDOFF-era determinism kept)
+# epoch-status panel (the public progress loop and the epoch history, HANDOFF-era
+# determinism kept)
 # ----------------------------------------------------------------------------
 
 # Display names for saturation.scan_progress kinds. Progress is defined in
@@ -1423,15 +1480,114 @@ def _load_json_or_none(path: Path):
     return data if isinstance(data, dict) else None
 
 
-def epoch_status_data() -> dict:
-    """Progress-loop state, read from the files in work_dir().
+def _epoch_int(value, default: int = 1) -> int:
+    """An epoch number off a hand-written file: coerced, clamped, never trusted.
 
-    A pure function of the files on disk (events.jsonl, saturation_state.json,
-    EPOCH_STATUS.json, falsification.json presence): no wall clock is read, so pages
-    built from the same files are byte-identical. Also imported by the rk-overview
-    generator so both sites report the same state.
+    The same coercion, the same exception set and the same clamp as
+    saturation._epoch_number, so the two readers of EPOCH.json cannot disagree about
+    what the file says.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n >= 1 else default
+
+
+def _frozen_epochs(doc: dict) -> tuple[dict, ...]:
+    """The earlier epochs named by EPOCH.json, sorted by epoch number.
+
+    EPOCH.json is hand-written at an epoch boundary and nothing in the package writes or
+    validates it, so every field is read with .get and the live file carries only three
+    of these keys. A block whose epoch number is not usable is skipped rather than
+    sorted against None or relabeled as epoch 1. `frozen` is a JSON list, so its order
+    is whatever a hand edit left behind; sorting here is what keeps two builds of the
+    same file byte-identical.
+    """
+    blocks = doc.get("frozen")
+    if not isinstance(blocks, list):
+        return ()
+    out: list[dict] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        try:
+            number = int(block.get("epoch"))
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "epoch": number,
+            "site": block.get("site"),
+            "path": block.get("path"),
+            "tag": block.get("tag"),
+            "frozen_at": block.get("frozen_at"),
+            "verifier_hash": block.get("verifier_hash"),
+            "trace_hash": block.get("trace_hash"),
+        })
+    return tuple(sorted(out, key=lambda b: (b["epoch"], str(b.get("frozen_at") or ""))))
+
+
+def _latest_frozen_epoch() -> tuple[str, int]:
+    """(published directory, epoch number) of the newest frozen epoch, or ("", 0).
+
+    The one source for every prose pointer at an epoch boundary, so the panel row, the
+    stub set and a sentence in the validation page all name the same directory. The
+    epoch number is derived rather than typed, and a work directory naming no earlier
+    epoch returns ("", 0), which is what keeps every render that plants no pointer file
+    byte-identical to what it was. Read through _frozen_epoch_blocks rather than
+    epoch_status_data, because a render wants the epoch history and not a second walk of
+    events.jsonl.
+    """
+    blocks = [b for b in _frozen_epoch_blocks()
+              if isinstance(b.get("site"), str) and _EPOCH_SITE_RE.match(b["site"])]
+    if not blocks:
+        return "", 0
+    return blocks[-1]["site"], int(blocks[-1]["epoch"])
+
+
+def _open_epoch() -> int | None:
+    """The epoch rk-work/EPOCH.json says is open, or None when it names none.
+
+    The open epoch is what a root path means (DECISIONS D45), so a sentence about a
+    document read from a root path takes its number from here and not from
+    _latest_frozen_epoch, which answers the other question. None rather than 1 when the
+    file is absent or unreadable: a work directory that states no epoch leaves every
+    render that states one byte-identical to what it was before epochs existed.
+
+    A value that is present and unusable (missing key, null, non-numeric, or below 1)
+    states no epoch either, and says so here rather than borrowing the panel's fallback.
+    The panel prints 1 for those shapes because a published page cannot print "n/a" for
+    its own epoch, and 1 is the one number that collides with frozen epoch 1: read as
+    the open epoch it would rule the frozen epoch 1 site out of the stub set and let the
+    next build delete the cell URLs that site publishes. So the clamp is asked for its
+    fallback with default=0 and that answer is returned as None.
+    """
+    doc = _load_json_or_none(work_dir() / "EPOCH.json")
+    if doc is None:
+        return None
+    return _epoch_int(doc.get("epoch"), default=0) or None
+
+
+def epoch_status_data() -> dict:
+    """Progress-loop state and epoch history, read from the files in work_dir().
+
+    Five inputs, and which one decides what matters: EPOCH.json decides which epoch is
+    open and what the earlier epochs were, EPOCH_STATUS.json decides whether the open
+    epoch has been frozen and carries its freeze record, and events.jsonl,
+    saturation_state.json and the presence of falsification.json carry the progress
+    loop. No wall clock is read, so pages built from the same files are byte-identical.
+    Also imported by the rk-overview generator so both sites report the same state.
+
+    Precedence when the two epoch files disagree: a root EPOCH_STATUS.json naming an
+    epoch other than EPOCH.json's belongs to an epoch that was never relocated, so its
+    frozen_at and reason are dropped rather than printed under the open epoch's heading.
+    That reason string names the other epoch's scoring hash, and printing it here would
+    attach one epoch's provenance to another epoch's numbers. status_epoch is returned
+    beside the rest so a caller can tell an epoch-mismatched freeze record from an
+    absent one.
     """
     wd = work_dir()
+    epoch_doc = _load_json_or_none(wd / "EPOCH.json") or {}
     status = _load_json_or_none(wd / saturation.EPOCH_FILE)
     state = _load_json_or_none(wd / saturation.STATE_FILE) or {}
     prog = saturation.scan_progress()
@@ -1439,11 +1595,20 @@ def epoch_status_data() -> dict:
         consecutive = int(state.get("consecutive", 0))
     except (TypeError, ValueError):
         consecutive = 0
+    epoch = _epoch_int(epoch_doc.get("epoch", 1))
+    status_epoch = None
+    if status is not None:
+        named = status.get("epoch", epoch)
+        status_epoch = _epoch_int(named, default=epoch)
+        if status_epoch != epoch:
+            status = None
     return {
-        "epoch": int(status.get("epoch", 1)) if status else 1,
+        "epoch": epoch,
         "state": "frozen" if status else "active",
         "frozen_at": status.get("frozen_at") if status else None,
         "freeze_reason": status.get("reason") if status else None,
+        "status_epoch": status_epoch,
+        "frozen_epochs": _frozen_epochs(epoch_doc),
         "n_accepted": prog.get("n_accepted"),
         "last_progress_ts": prog.get("last_progress_ts"),
         "last_progress_kind": prog.get("last_progress_kind"),
@@ -1467,6 +1632,20 @@ def _epoch_panel(data: dict | None = None) -> str:
         rows.append(("frozen at", _esc(_ct(d.get("frozen_at")))))
         if d.get("freeze_reason"):
             rows.append(("reason", _esc(d.get("freeze_reason"))))
+    # One row per earlier epoch that still publishes its own pages. The .get default and
+    # the shape guard are both load-bearing: _epoch_panel is called with a hand-built
+    # dict by a test and by the rk-overview generator, and EPOCH.json is hand-written, so
+    # an unchecked site field would put an arbitrary href on every page of this site.
+    for block in d.get("frozen_epochs") or ():
+        site = block.get("site")
+        if not isinstance(site, str) or _EPOCH_SITE_RE.match(site) is None:
+            continue
+        number = _num(block.get("epoch"))
+        frozen_at = block.get("frozen_at")
+        rows.append((
+            f"epoch {number}",
+            f'<a href="{_esc(site)}">frozen copy of the epoch {number} site</a>'
+            + (f", frozen {_esc(_ct(frozen_at))}" if frozen_at else "")))
     kind = d.get("last_progress_kind")
     if d.get("last_progress_ts") and kind:
         label = _PROGRESS_KIND_LABEL.get(kind, str(kind))
@@ -1491,9 +1670,11 @@ def _epoch_panel(data: dict | None = None) -> str:
     note = ('<p class="note">Progress is a record in an empty cell, an improved elite or a '
             "heldout_verified acceptance. With no progress inside the saturation window and "
             "the falsification file written, a check counts as saturating, and enough in a "
-            "row reach the freeze threshold. Starting the next epoch, and re-pinning the "
-            "verifier for it, is a person's decision. Times are stored in UTC and shown "
-            "in US Central.</p>")
+            "row reach the freeze threshold. When the next epoch opens, the frozen "
+            "epoch's pages are copied to a directory of their own, and the copy keeps "
+            "the scoring hash they were built under. Starting the next epoch, and "
+            "re-pinning the verifier for it, is a person's decision. Times are stored "
+            "in UTC and shown in US Central.</p>")
     return '<div class="panel">' + head + dl + note + "</div>"
 
 
@@ -1766,7 +1947,12 @@ def _ledger_class_card(cls: str, sidetrack, blurb: str) -> tuple:
     if not points:
         return (cls, "not measured", "the ledger records no points for this class yet",
                 None, blurb)
-    return (cls, str(points), "measured ledger points", "the measurement ledger", blurb)
+    # The hub card carries a count off the ledger, so it carries the epoch that
+    # measured the ledger too when that is not this one.
+    measured_in = _relocated_epoch("sidetrack/ledger.jsonl")
+    caption = ("measured ledger points" if not measured_in
+               else f"measured ledger points, measured in epoch {measured_in}")
+    return (cls, str(points), caption, "the measurement ledger", blurb)
 
 
 def _arith_label(v) -> str:
@@ -2281,6 +2467,294 @@ def render_cell(order: int, stages: int, bucket: int, rec: Record) -> str:
                  page_name=_cell_file(order, stages, bucket))
 
 
+# The pages a frozen epoch publishes that are not cell pages. The map is the whole
+# allowed set, and an unmapped name is skipped rather than given a title made out of its
+# own file name: a raw file name as an <h1> would fail the sentence-case gate, and an
+# invented title would publish prose nobody wrote. validation.html is here because it is
+# in the epoch-1 snapshot, is not retired, matches no cell pattern, and an epoch with
+# none of the four evidence documents writes no page of its own at that name.
+_EPOCH_STUB_TITLES: dict[str, tuple[str, str]] = {
+    "validation.html": ("Validation", "the validation, benchmark and trace evidence"),
+}
+
+
+def render_epoch_stub(name: str, site: str, epoch: int) -> str:
+    """A page name a frozen epoch still publishes, kept at root as a pointer.
+
+    The root build would otherwise delete the name and leave a published URL at 404, or
+    leave the frozen epoch's own page live at root with none of its numbers labeled.
+    The stub carries no number except the grid coordinates read out of its own file
+    name: a score, a cycle count or a hash would be an epoch-1 number at root, and a
+    traced number would drag the whole D42 scope sentence onto a pointer page.
+
+    It must be built by _page, which is what satisfies the nav, head, title, sentence-
+    case and footer gates that run over every page of the site. It must not call
+    _gloss(): every methodology.html#anchor a root page emits has to resolve, and
+    methodology.html is not written on build()'s ImportError branch. The word "hover"
+    must not appear, because check_hover strips only the stylesheet before searching.
+    "first" is a banned word, so an earlier epoch is "epoch 1", never "the first epoch".
+    """
+    m = _CELL_NAME_RE.match(name)
+    if m:
+        order, stages, bucket = (int(g) for g in m.groups())
+        title = f"Cell p{order} s{stages} b{bucket}"
+        subtitle = f"grid order {order}, {_stages(stages)}, cycle bucket {bucket}"
+        active = "explicit.html"
+        lead = ("No record holds this grid cell under the current epoch's pin, so there "
+                "is no archive record to show here. The epoch " + _num(epoch)
+                + " record for the cell is on the frozen epoch " + _num(epoch)
+                + f' site, at <a href="{_esc(site + name)}">cell p{order} s{stages} '
+                f'b{bucket}, epoch {_num(epoch)}</a>, where it keeps the scoring hash '
+                "it was produced under.")
+        description = (f"Grid cell order {order}, {_stages(stages)}, cycle bucket "
+                       f"{bucket} holds no record under the current pin; the epoch "
+                       f"{epoch} record for it is on the frozen epoch {epoch} site.")
+    else:
+        title, blurb = _EPOCH_STUB_TITLES[name]
+        subtitle = ""
+        active = name if name in _CONDITIONAL else ""
+        lead = (f"This epoch has not produced {blurb} yet, so there is nothing to "
+                "compare here. The epoch " + _num(epoch) + " evidence is on the frozen "
+                "epoch " + _num(epoch) + f' site, at <a href="{_esc(site + name)}">'
+                f"{_esc(title)}, epoch {_num(epoch)}</a>, with the scoring hash it was "
+                "produced under.")
+        description = (f"This epoch has not produced {blurb} yet; the epoch {epoch} "
+                       f"evidence is on the frozen epoch {epoch} site, under the "
+                       "scoring hash it was produced under.")
+    return _page(title, f'<p class="lead">{lead}</p>', active=active, subtitle=subtitle,
+                 doc_title=_doc_title(title), description=description, page_name=name)
+
+
+def _frozen_epoch_blocks() -> tuple[dict, ...]:
+    """The frozen-epoch blocks of rk-work/EPOCH.json, without the progress loop.
+
+    epoch_status_data() returns the same tuple under "frozen_epochs", but it also walks
+    events.jsonl through saturation.scan_progress(). build() wants the epoch history and
+    nothing else, so it reads the one file the history lives in.
+    """
+    return _frozen_epochs(_load_json_or_none(work_dir() / "EPOCH.json") or {})
+
+
+def _epoch_stub_names(out_dir: Path, pages, blocks=(),
+                      open_epoch=None) -> list[tuple[str, int, str]]:
+    """(site, epoch, page name) for every page a frozen epoch publishes and this one does not.
+
+    The set comes from the published snapshot rather than from the root files _prune is
+    about to delete. The snapshot never changes, so the stub set and its bytes are
+    identical on every rebuild; it also covers a build into a docs/ that holds only the
+    snapshot, and keying off the root files would make the stub self-feeding. A name the
+    current archive re-occupies is a key of pages and gets its real page instead.
+
+    The directory comes from EPOCH.json's frozen[].site, so the panel row and the stub
+    set cannot name different things. A snapshot directory the hand-written file forgot
+    is picked up by its own name as a belt, which is also what keeps any epoch number
+    out of this module. OS iterdir order is sorted here because two builds on two
+    machines have to agree.
+
+    open_epoch is the epoch EPOCH.json says is open, and a directory whose number is
+    not below it is dropped. Phase E copies the current docs to docs/epoch-N/ before
+    the root is regenerated, so between that copy and the next boundary the output
+    directory holds a directory named for the epoch that is still open: without this
+    test the belt would read it as frozen and every root page would point the reader at
+    a "frozen epoch N site" that is this epoch's own unfrozen copy, while the panel
+    listed a different epoch. None means the work directory states no epoch, which
+    leaves the set what it was before EPOCH.json existed.
+
+    That test is the belt's alone. A frozen[] entry is the file stating that the epoch
+    is frozen and naming the directory it publishes under, so it outranks any reading of
+    the number beside it: a file whose two halves disagree keeps the pages of the epoch
+    its own frozen[] names, rather than deleting published URLs on the strength of a
+    number a hand edit could have left at anything. Nothing is invented either way, and
+    the directory still has to exist below.
+    """
+    if not out_dir.is_dir():
+        return []
+    sites: dict[str, int] = {}
+    for block in blocks:
+        site = block.get("site")
+        if isinstance(site, str) and _EPOCH_SITE_RE.match(site):
+            sites.setdefault(site, int(block["epoch"]))
+    belt: dict[str, int] = {}
+    for entry in sorted(out_dir.iterdir(), key=lambda q: q.name):
+        if not entry.is_dir():
+            continue
+        match = _EPOCH_SITE_RE.match(entry.name + "/")
+        if match and entry.name + "/" not in sites:
+            belt.setdefault(entry.name + "/", int(match.group(1)))
+    if open_epoch is not None:
+        belt = {site: ep for site, ep in belt.items() if ep < int(open_epoch)}
+    sites.update(belt)
+    found: list[tuple[str, int, str]] = []
+    for site in sorted(sites):
+        directory = out_dir / site.rstrip("/")
+        if not directory.is_dir():
+            continue
+        for name in sorted(q.name for q in directory.iterdir() if q.is_file()):
+            if name in pages:
+                continue
+            if _CELL_NAME_RE.match(name) or name in _EPOCH_STUB_TITLES:
+                found.append((site, sites[site], name))
+    return sorted(found, key=lambda t: (t[1], t[2]))
+
+
+def check_epoch_snapshot(out_dir: Path, pages, blocks=()) -> None:
+    """A build may not drop a frozen epoch's directory and prune the pages it names.
+
+    EPOCH.json names the directory each frozen epoch publishes under, and the stub set
+    is read from that directory: a stub is what keeps the frozen epoch's cell URLs and
+    its validation page reachable after the archive behind them was relocated. With the
+    directory gone the stub set comes out empty, _prune deletes those published URLs,
+    and a frozen page left at a root name stays there unlinked with its numbers
+    carrying no epoch. So the build fails instead, before it writes anything: runner.py
+    catches ClaimError into site_build_failed, and the pages already published stay
+    exactly as they are, which is the outcome that loses nothing.
+
+    What makes it a loss rather than a first build is the output itself. The pages this
+    build is about to write are already known here, so the test is whether the output
+    holds a page this build will not write: those are the URLs _prune is about to
+    delete or orphan. A fresh directory holds none, so a first publish and every
+    throwaway determinism or preflight build pass, and so does a rebuild into a
+    directory this build has already filled.
+    """
+    named = [b for b in blocks
+             if isinstance(b.get("site"), str) and _EPOCH_SITE_RE.match(b["site"])
+             and not (out_dir / b["site"].rstrip("/")).is_dir()]
+    if not named or not out_dir.is_dir():
+        return
+    orphans = sorted(q.name for q in out_dir.iterdir()
+                     if q.is_file() and q.name.endswith(".html")
+                     and q.name not in pages and q.name not in _RETIRED)
+    if not orphans:
+        return
+    block = named[0]
+    site = block["site"]
+    raise ClaimError(
+        f"EPOCH.json names {site} as the epoch {block.get('epoch')} site and "
+        f"{site.rstrip('/')} is not a directory of the output, so "
+        f"{len(orphans)} published pages ({orphans[0]} first) would be deleted or left "
+        f"at root with no epoch beside their numbers; restore the epoch "
+        f"{block.get('epoch')} directory before rebuilding")
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    """Whether two files hold the same bytes, size first and then a chunked read.
+
+    No digest, because nothing outside this comparison wants one, and no timestamps,
+    because a copy carries no clock of its own and this build reads none.
+    """
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                left, right = fa.read(65536), fb.read(65536)
+                if left != right:
+                    return False
+                if not left:
+                    return True
+    except OSError:
+        return False
+
+
+def _relocated_epoch(rel: str) -> int:
+    """The frozen epoch a document at a root path was measured in, or 0 for this one.
+
+    An epoch boundary relocates the closing epoch's run state to rk-work/epochs/<n>
+    (DECISIONS D45(d)), and the lanes that keep their documents at the root path across
+    that boundary leave the earlier epoch's numbers sitting under a path that means the
+    current epoch. A root document byte-identical to the relocated copy has not been
+    re-measured under the new pin, so the sections that read it say which epoch measured
+    it. The comparison is against the copy EPOCH.json's frozen[].path names, and the
+    newest matching epoch wins, so two builds of one work directory agree.
+    """
+    root = work_dir() / rel
+    if not root.is_file():
+        return 0
+    found = 0
+    for block in _frozen_epoch_blocks():
+        path = block.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        parts = Path(path).parts
+        if Path(path).is_absolute() or ".." in parts:
+            continue
+        if _same_bytes(root, work_dir() / path / rel):
+            found = max(found, int(block["epoch"]))
+    return found
+
+
+def _relocated_note(rel: str, what: str) -> str:
+    """The epoch label for a root document an earlier epoch measured, or "".
+
+    Empty on a work directory whose document is this epoch's, which is every work
+    directory with no frozen epoch beside it, so the sections that call this render
+    byte-identically to what they did before.
+    """
+    number = _relocated_epoch(rel)
+    if not number:
+        return ""
+    return ('<p class="note">' + _esc(
+        f"{what}, rk-work/{rel}, holds the same bytes as the copy relocated to "
+        f"rk-work/epochs/{number}, so every number read from it here was measured in "
+        f"epoch {number} and under that epoch's pin rather than this one's.") + "</p>")
+
+
+def _points_epoch_note(entries, where: str) -> str:
+    """The epoch label for the side-track points a section publishes, or "".
+
+    _relocated_note answers this question for one document, and the side-track ledger is
+    not the document these numbers come from: every chart and every folded per-point
+    table reads the artifact its ledger line names. The ledger is append-only
+    (sidetrack._append_ledger opens it with "a") and an artifact is rewritten only when
+    its own point is measured again, so the first point this epoch measures changes the
+    ledger's bytes, and a label keyed on the ledger alone would clear while every
+    artifact that point did not touch still publishes the earlier epoch's numbers. The
+    label is therefore keyed on the artifacts the section prints, one epoch per point,
+    and a job measured in part says how many of its points the earlier epoch measured.
+
+    `where` names the figure or the table, because the label goes beside the numbers it
+    is about rather than once at the top of a page: "next to it" is what the epoch
+    bullet asks for, and these pages run to tens of thousands of words.
+    """
+    rels = sorted({str(e.get("artifact", "")) for e in entries
+                   if isinstance(e, dict) and str(e.get("artifact", "")).strip()})
+    if not rels:
+        return ""
+    by_epoch: dict[int, int] = {}
+    for rel in rels:
+        number = _relocated_epoch(rel)
+        if number:
+            by_epoch[number] = by_epoch.get(number, 0) + 1
+    if not by_epoch:
+        return ""
+    total = len(rels)
+    labeled = sum(by_epoch.values())
+    epochs = sorted(by_epoch)
+    if labeled == total and len(epochs) == 1:
+        number = epochs[0]
+        body = ("its artifact holds the same bytes as the copy relocated to "
+                f"rk-work/epochs/{number}" if total == 1 else
+                f"each of the {total} artifacts holds the same bytes as the copy "
+                f"relocated to rk-work/epochs/{number}")
+        text = (f"Every point in {where} was measured in epoch {number}: {body}, so "
+                f"these numbers were measured under epoch {number}'s pin rather than "
+                "this one's.")
+    else:
+        clauses = [f"{by_epoch[number]} of the {total} artifacts "
+                   + ("holds" if by_epoch[number] == 1 else "hold")
+                   + " the bytes relocated to "
+                   f"rk-work/epochs/{number}, so those numbers were measured in epoch "
+                   f"{number} and under that epoch's pin" for number in epochs]
+        rest = total - labeled
+        tail = ("" if not rest else
+                f", and the other {rest} "
+                + ("point was" if rest == 1 else "points were")
+                + " measured again since that relocation, under this epoch's pin")
+        text = (f"The points in {where} do not come from one epoch: "
+                + "; ".join(clauses) + tail + ".")
+    return '<p class="note">' + _esc(text) + "</p>"
+
+
 # stability_imag is a bisection floor, not a measured extent, and a cell page printed it
 # as though it were one. The scorer samples the stability region at 4000 points and
 # bisects 200 times (evaluator._STABILITY_SAMPLES, _BISECTION_ITERS), so a method whose
@@ -2734,7 +3208,11 @@ def _costmodel_section() -> str:
     """The cost model, for the methodology page: anchor chart, tables, parameters."""
     classical = tableau_mod.classical()
     parts = [
-        "<p>Cycles per integration step, computed from instruction counts. The "
+        "<p>Cycles per integration step, computed from instruction counts: the stage "
+        "and b combinations a tableau's sparsity pattern implies, with each coefficient "
+        "application under the two M0+ models priced from the "
+        + _gloss("coeff-table", "coefficient price table") + ", which records "
+        + _pinned_rule_clause() + ". The "
         + _gloss("cycle-budget", "cycle budget") + " and "
         "the " + _gloss("cost-bucket", "cycle buckets") + " on the other tabs are built "
         "from these numbers.</p>",
@@ -2781,10 +3259,19 @@ def _costmodel_section() -> str:
                      f'<td class="num">{cy.get("load")}</td>'
                      f'<td class="num">{cy.get("store")}</td></tr>')
     parts.append("</table>")
-    parts.append('<p class="note">m0plus_fast and m0plus_slow differ only in the multiplier. '
-                 "Every archive cycle count is these five numbers applied to a tableau's "
-                 "instruction sequence, never a hardware measurement. The off-archive lanes "
-                 "add their own stated terms, named on the implicit and adaptive tabs.</p>")
+    # The gap is computed from the pinned model constants, never typed.
+    mul_gap = costmodel.M0PLUS_SLOW.cycles["mul"] - costmodel.M0PLUS_FAST.cycles["mul"]
+    parts.append('<p class="note">m0plus_fast and m0plus_slow differ only in the '
+                 "multiplier: both read the same op counts from one entry of the "
+                 + _gloss("coeff-table", "coefficient price table")
+                 + f", so the gap between them is {mul_gap} cycles per coefficient "
+                 "multiply per state. The per-coefficient op counts are "
+                 + _pinned_rule_clause() + ", counted by op class; the five numbers "
+                 "above turn those counts into cycles, and no number here is a hardware "
+                 "measurement. A coefficient whose multiplier is plus or minus 1 at "
+                 "shift 0 costs nothing, because the compiler emits a bare adds or subs "
+                 "that the combination add already prices. The off-archive lanes add "
+                 "their own stated terms, named on the implicit and adaptive tabs.</p>")
     return "\n".join(parts)
 
 
@@ -2869,6 +3356,17 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "polynomial, so they differ in cost only through coefficient arithmetic; the cost "
         "model section compares them.",
     )),
+    # The compiler and flag strings are the module constants, concatenated here rather
+    # than typed, so this entry cannot drift from the pin the cost model prices with.
+    ("coeff-table", "coefficient price table", (
+        "The pinned table " + COEFF_PIN_TABLE + ", which holds the instruction counts by "
+        "op class that " + COEFF_PIN_COMPILER + " emits for one coefficient term at "
+        + _CFLAGS_TEXT + ", keyed by the signed multiplier and by whether a shift is "
+        "present. Under the two M0+ models a coefficient application is priced from its "
+        "entry with the model's own per-class cycles, so the compiler enters the price "
+        "once, at pin time, and a multiplier outside the two keyed domains raises rather "
+        "than guessing.",
+    )),
     ("cohens-d", "Cohen's d", (
         "The effect size on a hypothesis verdict: the difference of two cell populations' "
         "means over their pooled standard deviation, with the 0.2 threshold of section 3.",
@@ -2880,8 +3378,9 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     )),
     ("csd-weight", "CSD weight", (
         "The fewest nonzero signed power-of-two terms that write an integer multiplier m. "
-        "The cost model charges a coefficient the cheaper of a shift-add chain of that "
-        "length and a hardware multiply.",
+        "It is recorded on every record as csd_weight_total and it prices the advisory "
+        "avr_approx model; the two M0+ models price a coefficient from the pinned "
+        "per-multiplier table instead.",
     )),
     ("cycle-budget", "cycle budget", (
         "The fixed allowance of every archive evaluation, 65536 cycles per problem per "
@@ -2996,10 +3495,13 @@ _GLOSSARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "those last two replaced. The grid ranks on held-out "
         "error alone, so the heldout_verified count can fall without anything going wrong.",
     )),
+    # The count is the length of verifier_hash.VERIFIER_FILES, so this entry and the
+    # footer state one number and neither can go stale at a re-pin.
     ("verifier-hash", "verifier hash", (
-        "A sha256 over the ten pinned scoring files, checked at container start and stored "
-        "on every record. Every score therefore carries the version of the code that "
-        "produced it, and a table holding more than one hash says so beneath it.",
+        f"A sha256 over the {_PIN_COUNT_WORD} pinned scoring files, checked at container "
+        "start and stored on every record. Every score therefore carries the version of "
+        "the code that produced it, and a table holding more than one hash says so "
+        "beneath it.",
     )),
     ("work-precision", "work-precision", (
         "A chart of achieved error against work spent, one line per method, for comparing "
@@ -4571,9 +5073,17 @@ def _trace_section(doc) -> list[str]:
     parts = [_TRACE_ANCHOR + "Compiled and traced against the cost model</h2>"]
     rows = _trace_rows(doc)
     if not rows:
-        parts.append('<p class="note">rk-work/trace/results.json has not been written in '
-                     "this work directory, so the cost model is not compared against a "
-                     "compiled instruction stream here.</p>")
+        # The only rendering of this section at an epoch-2 root, because the epoch-1
+        # trace document was relocated with the rest of that epoch's run state. With no
+        # pointer file the string is byte-identical to what it was.
+        site, ep = _latest_frozen_epoch()
+        note = ('<p class="note">rk-work/trace/results.json has not been written in '
+                "this work directory, so the cost model is not compared against a "
+                "compiled instruction stream here.")
+        if site:
+            note += (f' The epoch {ep} comparison is on <a href="{_esc(site)}'
+                     f'validation.html">the frozen epoch {ep} site</a>.')
+        parts.append(note + "</p>")
         return parts
     tool = doc.get("toolchain") if isinstance(doc.get("toolchain"), dict) else {}
     acc = doc.get("accuracy") if isinstance(doc.get("accuracy"), dict) else {}
@@ -4581,15 +5091,25 @@ def _trace_section(doc) -> list[str]:
     corr = doc.get("correlation") if isinstance(doc.get("correlation"), dict) else {}
     compiler = str(tool.get("compiler") or "arm-none-eabi-gcc")
     emulator = str(tool.get("emulator") or "an instruction-accurate emulator")
-    flags = [str(f) for f in (tool.get("flags") or []) if str(f).startswith("-mcpu")]
+    # Two sources, deliberately separate. The rule clause reads the pin, because that is
+    # what every score is priced with; the traced-run clause reads the document, because
+    # that is what one run's toolchain was (D42). They are not the same list, and the
+    # unit fixture renders fewer flags than production for that reason.
+    flags = [str(f) for f in (tool.get("flags") or [])]
+    mcpu = [f for f in flags if f.startswith("-mcpu")]
+    flags_text = " ".join(flags) if flags else "the flags the document records"
     parts.append(
         "<p>The " + _gloss("costmodel", "cost model") + " is analytic. It derives an "
         "instruction sequence from a tableau's sparsity pattern and each coefficient's "
-        "bit pattern and prices it, and no compiler is in that loop. This section is what "
-        "happened when the Q15 step it describes was compiled for "
-        + _esc(flags[0][6:] if flags else "cortex-m0plus") + " with " + _esc(compiler)
-        + " at -O2, executed under " + _esc(emulator) + ", and the executed instructions "
-        "were priced against the Cortex-M0+ technical reference manual's cycle table.</p>")
+        "bit pattern and prices it, and under the two M0+ models a coefficient's own "
+        "price is " + _pinned_rule_clause() + ", read from the "
+        + _gloss("coeff-table", "pinned price table") + ", so the compiler enters the "
+        "price once, at pin time: scoring runs no compiler and reads no hardware. This "
+        "section is what happened when the Q15 step it describes was compiled for "
+        + _esc(mcpu[0][6:] if mcpu else "cortex-m0plus") + " with " + _esc(compiler)
+        + " at " + _esc(flags_text) + ", executed under " + _esc(emulator)
+        + ", and the executed instructions were priced against the Cortex-M0+ technical "
+        "reference manual's cycle table.</p>")
     statement = acc.get("statement")
     if isinstance(statement, str) and statement.strip():
         parts.append(f"<p>{_esc(statement.strip())}</p>")
@@ -4719,15 +5239,43 @@ def _trace_section(doc) -> list[str]:
         if isinstance(widest, dict) and isinstance(widest.get("relative_gap"), (int, float)):
             tail = (f" The widest gap above is {_esc(str(widest.get('method')))} at "
                     f"{float(widest['relative_gap']):.3f}.")
+        # The trace count comes off the document, not the prose: the sentence used to
+        # say "nine traces" and the fixture prices three. The D42 scope sentence sits in
+        # this same block, because the widest-gap number tail appends is a traced number
+        # and the scope it is quoted at travels with it.
+        # The epoch label is the OPEN one. This branch renders only when
+        # rk-work/trace/results.json exists, which is a root path and therefore this
+        # epoch's document (DECISIONS D45), so labelling it with the newest frozen
+        # epoch would announce one epoch's numbers under another epoch's provenance.
+        # The frozen site is pointed at as the earlier comparison a reader can open,
+        # never as where these numbers were published.
+        open_ep = _open_epoch()
+        site, frozen_ep = _latest_frozen_epoch()
+        freight = (" quoted at the matched scope that prices only what the cost model "
+                   "prices, from an emulator that is instruction accurate rather than "
+                   "cycle accurate, with the derivative call and the h times k product "
+                   "out of scope")
+        if open_ep:
+            scope = f" Every number in this section is epoch {open_ep} evidence," + freight
+            if site and frozen_ep != open_ep:
+                scope += (f", and the epoch {frozen_ep} comparison, run under that "
+                          f"epoch's own pin, is on "
+                          f'<a href="{_esc(site)}validation.html">the frozen epoch '
+                          f"{frozen_ep} site</a>")
+        else:
+            scope = " Every number in this section is" + freight
         parts.append(
             "<p>Two results, and the load-bearing one is good news. Every MULS in every "
             "trace is the h times k product, one per stage, and not one of them applies a "
             "tableau coefficient: the compiler turned the coefficients, dyadic and "
-            "otherwise, into shifts and adds. The other result is the gap above. Because "
-            "the analytic model charges each coefficient the cheaper of a shift-add chain "
-            "and a hardware multiply, and a multiply costs one cycle on the fast "
-            "multiplier variant, it prices a multiply the compiler does not emit in these nine traces, so it "
-            "counts low for coefficient-heavy tableaus." + tail + "</p>")
+            "otherwise, into shifts and adds. That is what the pinned "
+            + _gloss("coeff-table", "coefficient price table") + " now charges for the "
+            f"{_num(len(rows))} methods traced here, no multiply anywhere a coefficient "
+            "is applied. The other result is the gap above, and the pinned table does "
+            "not close it: what is left is k-reloads in the state loop and the h times k "
+            "product itself, residual classes with n-dependent bounds that sit outside "
+            "the analytic scope rather than inside a coefficient's price (DECISIONS "
+            "D45)." + tail + scope + ".</p>")
     if len(champs) == 1:
         c = champs[0]
         parts.append(
@@ -4736,11 +5284,26 @@ def _trace_section(doc) -> list[str]:
             f"{_num(c.get('stages'))} stages, and {_num(c.get('muls_in_model_scope'))} of "
             "them apply a tableau coefficient. The dyadic-coefficient assumption behind "
             "its cost holds, and holds more strongly than it was stated.</p>")
+    # Present tense on the clause about what the correction does, past tense on the
+    # boundary it landed at. The boundary is named by its decision id rather than by a
+    # date, so no clock and no stored stamp enters the sentence.
+    # The closing clause used to say this section is the disagreement the earlier charge
+    # produced. It is not: this section renders from rk-work/trace/results.json, a root
+    # path and so the open epoch's document, and the paragraph above it explains its own
+    # residual gap as k-reloads and the h times k product under the corrected table. The
+    # earlier charge's disagreement is on the frozen site, which is what the pointer
+    # already links.
+    site, ep = _latest_frozen_epoch()
+    pointer = (f', and the disagreement that charge produced is on '
+               f'<a href="{_esc(site)}">the frozen epoch {ep} site</a>'
+               if site else "")
     parts.append(
-        "<p>Correcting the cost model would change every archived cycle count, so it "
+        "<p>Correcting the cost model changes every archived cycle count, so it "
         "moves VERIFIER_HASH and invalidates all scores in the archive. That is an epoch "
-        "decision for the run's owner, not a fix inside a cycle, and this page publishes "
-        "the disagreement in the meantime.</p>")
+        "decision for the run's owner rather than a fix inside a cycle, and the "
+        "correction landed at the epoch-2 boundary (DECISIONS D45): the scores produced "
+        "under the earlier charge keep their meaning under the pin they were scored "
+        "with" + pointer + ".</p>")
 
     # State dimension, read off the ladder rather than fitted. Both readings below stay
     # inside the traced column: a whole-step count divided by cycles_analytic would
@@ -4928,6 +5491,50 @@ def check_claims(name: str, html_text: str) -> None:
                 f"the first {_CHIP} mention on {name} has neither "
                 + " nor ".join(_CHIP_QUALIFIERS) + f" within {_CHIP_WORDS} words")
         return
+
+
+_EPOCH_LABEL_WORDS = 25
+# A record's own provenance field is exempt from the epoch-label gate. Every cell page
+# prints the full verifier_hash of the record it shows inside <span class="hash">, and a
+# table holding more than one hash lists them the same way, so a gate that matched the
+# whole page would fire on a record's own provenance. runner.py catches ClaimError into
+# site_build_failed, so that gate would silently freeze the site at the previous build's
+# pages rather than fail loudly. Provenance beside the record it belongs to is labeled
+# by the record; prose is not, which is what this gate is for.
+_HASH_CELL_RE = re.compile('<(?:span|td)[^>]*class="hash"[^>]*>[^<]*</(?:span|td)>', re.S)
+
+
+def check_epoch_label(name: str, html_text: str, frozen=()) -> None:
+    """A frozen epoch's scoring hash may not appear at root without its epoch beside it.
+
+    The epoch-1 pages were scored under one hash and the live pin is another string. A
+    frozen epoch's hash printed in prose with no epoch near it attaches one epoch's
+    provenance to another epoch's numbers, which is the exact failure an epoch boundary
+    exists to prevent. The eight-character prefix is the form every page on this site
+    prints a hash in, so that is what is searched for; the window is the same kind of
+    proximity window check_claims runs for the chip qualifier.
+
+    frozen is epoch_status_data()["frozen_epochs"], so the gate is inert on a work
+    directory that names no earlier epoch, which is every test that plants no EPOCH.json.
+    """
+    words = re.sub(r"<[^>]+>", " ", _HASH_CELL_RE.sub(" ", html_text)).split()
+    low = [w.lower() for w in words]
+    for block in frozen:
+        digest = block.get("verifier_hash")
+        if not isinstance(digest, str) or len(digest) < 8:
+            continue
+        short = digest[:8].lower()
+        label = f"epoch {block.get('epoch')}".lower()
+        for i, word in enumerate(low):
+            if short not in word:
+                continue
+            near = " ".join(low[max(0, i - _EPOCH_LABEL_WORDS):
+                                i + _EPOCH_LABEL_WORDS + 1])
+            if label not in near:
+                raise ClaimError(
+                    f"{name} prints the epoch {block.get('epoch')} scoring hash "
+                    f"{short} with no \"{label}\" within {_EPOCH_LABEL_WORDS} words; "
+                    "a frozen epoch's provenance needs its epoch beside it")
 
 
 # The claim the trace section is not allowed to make on its own. It was written when the
@@ -5378,6 +5985,12 @@ def _job_tables(entries, artifacts) -> list[str]:
         note = _art_text(doc, "construction", "question", "note")
         if note:
             parts.append(f'<p class="note">{note}</p>')
+        # The epoch label for this job's own artifacts, above this job's own rows: the
+        # rows below print the artifacts' numbers, and the fold sits thousands of words
+        # away from the ledger note at the top of the page.
+        measured = _points_epoch_note(rows_in, "this table")
+        if measured:
+            parts.append(measured)
         # Counts lead, then everything else alphabetically. Both halves are a total
         # order, so the column list is a function of the data and nothing else.
         seen = {k for e in rows_in
@@ -5642,11 +6255,42 @@ def _names_only_these_rows(benchmark, text: str, rows) -> bool:
                    for name in sorted(every - own))
 
 
-_MATCHED_ABSENT = (
+# Two absences, and they are not the same absence. One document with older tables in it
+# is the state a work directory sits in until rk_harness.benchmark is re-run; no document
+# at all is the state a root is in after an epoch boundary relocates the closing epoch's
+# run state to rk-work/epochs/<n> (DECISIONS D45(d)). The first note was printed for both,
+# which told a reader the file was there and old when it was not there at all.
+_MATCHED_STALE = (
     "The benchmark document in this work directory predates the three-class tables, so "
     "the matched-accuracy comparison is not stated here. It appears once "
     "rk_harness.benchmark has been run against the current code; nothing is inferred "
     "from the older tables in its place.")
+
+_MATCHED_ABSENT = (
+    "rk-work/benchmark/results.json has not been written in this work directory, so the "
+    "matched-accuracy comparison is not stated here. It appears once "
+    "rk_harness.benchmark has been run against the current code; nothing is inferred in "
+    "its place.")
+
+
+def _matched_absent_note(benchmark, cls: str) -> str:
+    """The note that stands where the matched-accuracy comparison would be.
+
+    The stale-document wording is for a document that is there, so it is keyed on the
+    loaded value rather than on a second read of the path: _load_benchmark returns None
+    only when rk-work/benchmark/results.json is missing or unreadable. The pointer is the
+    one the trace section plants, from the same _latest_frozen_epoch, and the frozen site
+    carries this class's own page.
+    """
+    if isinstance(benchmark, dict):
+        return _esc(_MATCHED_STALE)
+    note = _esc(_MATCHED_ABSENT)
+    site, ep = _latest_frozen_epoch()
+    if site:
+        note += (f' The epoch {ep} comparison, run under that epoch\'s own pin, is on '
+                 f'<a href="{_esc(site)}{_esc(cls)}.html">the frozen epoch {ep} '
+                 "site</a>.")
+    return note
 
 
 # ----------------------------------------------------------------------------
@@ -5855,6 +6499,20 @@ def _key_legend(items) -> str:
 def _chart_block(html: str) -> str:
     """A figure goes in a panel; a one-line absence note stands on its own."""
     return f'<div class="panel">{html}</div>' if html.startswith("<figure") else html
+
+
+def _chart_block_of(chart: str, docs) -> list[str]:
+    """A side-track figure and, under it, the epoch that measured the points it draws.
+
+    One call site per chart, so a figure cannot be added without the label: the points
+    come from the artifacts in `docs`, and _points_epoch_note reads those rather than
+    the ledger line that names them.
+    """
+    out = [_chart_block(chart)]
+    note = _points_epoch_note([e for e, _d in docs], "this figure")
+    if note:
+        out.append(note)
+    return out
 
 
 def _round_end_bar(x: float, y: float, w: float, h: float, fill: str, tip: str,
@@ -6139,7 +6797,7 @@ def _matched_section(benchmark, cls: str, extra_keys=()) -> list[str]:
     rows = _matched_rows(benchmark, cls)
     parts = ["<h2>Measured against real counterparts, at matched accuracy</h2>"]
     if not rows:
-        parts.append(f'<p class="note">{_esc(_MATCHED_ABSENT)}</p>')
+        parts.append(f'<p class="note">{_matched_absent_note(benchmark, cls)}</p>')
         return parts
     parts.append(f"<p>{_matched_sentence(benchmark, rows, cls)}</p>")
     parts.append(_chart_block(_matched_chart(rows, cls)))
@@ -6804,6 +7462,16 @@ def _lane_elites_section(cls: str, benchmark=None) -> list[str]:
                         f"cycle {_num(gen_cycle)}, {_esc(_ct(gen_ts))}"))
     elif gen_cycle is not None:
         dl_rows.append(("document written", f"cycle {_num(gen_cycle)}"))
+    # The lane keeps its document at the root path across an epoch boundary, so the
+    # numbers below can be the earlier epoch's measurements under a path that means the
+    # current epoch. The row says which epoch measured them, beside the rest of the
+    # document's provenance and above every number it holds.
+    measured_in = _relocated_epoch(f"{cls}_archive/elites.json")
+    if measured_in:
+        dl_rows.append(("measured in", _esc(
+            f"epoch {measured_in}: this document holds the same bytes as the copy "
+            f"relocated to rk-work/epochs/{measured_in}, so nothing in it was "
+            "re-measured under the current pin")))
 
     if view["rule"]:
         rule = view["rule"]
@@ -7087,6 +7755,11 @@ def render_implicit(sidetrack: dict | None = None, validation: dict | None = Non
                           ("none at any " if window == 0 else "most at one ") + job
                           + " point" + _job_arith(entries, artifacts, job)))
         parts.append(_ledger_cards(entries, extra))
+        # "" on a work directory whose ledger is this epoch's, and an empty part would
+        # put a blank line in the page, so it is tested rather than appended blind.
+        ledger_epoch = _relocated_note("sidetrack/ledger.jsonl", "The side-track ledger")
+        if ledger_epoch:
+            parts.append(ledger_epoch)
     else:
         parts.append(f"<p>{_esc(_NO_POINTS)}</p>")
         if gap_card:
@@ -7097,13 +7770,13 @@ def render_implicit(sidetrack: dict | None = None, validation: dict | None = Non
 
     if entries:
         parts.append("<h2>Stability of each diagonal value</h2>")
-        parts.append(_chart_block(_stability_chart(
-            _job_docs(entries, artifacts, "sdirk.gamma_dyadic_scan"))))
+        docs = _job_docs(entries, artifacts, "sdirk.gamma_dyadic_scan")
+        parts.extend(_chart_block_of(_stability_chart(docs), docs))
     parts.extend(_implicit_budget_table(benchmark))
     if entries:
         parts.append("<h2>Where one step's cycles go</h2>")
-        parts.append(_chart_block(_jacobian_chart(
-            _job_docs(entries, artifacts, "sdirk.jacobian_cost"))))
+        docs = _job_docs(entries, artifacts, "sdirk.jacobian_cost")
+        parts.extend(_chart_block_of(_jacobian_chart(docs), docs))
     parts.extend(_matched_section(benchmark, "implicit", ("stiff",)))
     parts.extend(_lane_elites_section("implicit", benchmark))
     parts.append(_not_these_numbers())
@@ -7665,16 +8338,21 @@ def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None
                           f"largest over the {job} points"
                           + _job_arith(entries, artifacts, job)))
         parts.append(_ledger_cards(entries, extra))
+        # "" on a work directory whose ledger is this epoch's, and an empty part would
+        # put a blank line in the page, so it is tested rather than appended blind.
+        ledger_epoch = _relocated_note("sidetrack/ledger.jsonl", "The side-track ledger")
+        if ledger_epoch:
+            parts.append(ledger_epoch)
     else:
         parts.append(f"<p>{_esc(_NO_POINTS)}</p>")
 
     if entries:
         parts.append("<h2>Work against accuracy across the tolerance sweep</h2>")
-        parts.append(_chart_block(_sweep_multiples(
-            _job_docs(entries, artifacts, "adaptive.suite_sweep"))))
+        docs = _job_docs(entries, artifacts, "adaptive.suite_sweep")
+        parts.extend(_chart_block_of(_sweep_multiples(docs), docs))
         parts.append("<h2>Controller gains and rejected steps</h2>")
-        parts.append(_chart_block(_gain_map(
-            _job_docs(entries, artifacts, "adaptive.controller_gains"))))
+        docs = _job_docs(entries, artifacts, "adaptive.controller_gains")
+        parts.extend(_chart_block_of(_gain_map(docs), docs))
     if isinstance(benchmark, dict):
         parts.append("<h2>What one Q15 attempt costs</h2>")
         parts.append(_chart_block(_attempt_cost_chart(benchmark)))
@@ -7685,8 +8363,8 @@ def render_adaptive(sidetrack: dict | None = None, benchmark: dict | None = None
             parts.append(_fold("How this compares with SciPy RK23", pair))
     if entries:
         parts.append("<h2>Embedded pairs on the dyadic lattice</h2>")
-        parts.append(_chart_block(_census_chart(
-            _job_docs(entries, artifacts, "adaptive.pair_census"))))
+        docs = _job_docs(entries, artifacts, "adaptive.pair_census")
+        parts.extend(_chart_block_of(_census_chart(docs), docs))
     parts.extend(_matched_section(benchmark, "adaptive"))
     parts.extend(_lane_elites_section("adaptive", benchmark))
     parts.append(_not_these_numbers())
@@ -7753,6 +8431,9 @@ def _ledger_section(data) -> str:
             text += (' The newest measurement ran under code hash <span class="hash">'
                      f"{_soft(newest[:12])}</span>.")
         parts.append(text + "</p>")
+        note = _relocated_note("sidetrack/ledger.jsonl", "The ledger")
+        if note:
+            parts.append(note)
     parts.append("<h3>The code-hash rule</h3>")
     parts.append("<p>Every artifact is a pure function of the code and the point's "
                  "parameters, so measuring a point again reproduces it byte for byte. A "
@@ -7841,9 +8522,14 @@ def render_methodology(sidetrack=None, merged: int | None = None) -> str:
 def _prune(out_dir: Path, pages: dict[str, str]) -> None:
     """Delete the retired pages and the cell pages of cells the archive no longer holds.
 
-    Nothing else in out_dir is touched: not the README, not CNAME, not a file whose
-    name merely looks like a page. Runs only after every page has passed the banned
-    word check and been written, so a failed build deletes nothing either.
+    A cell page name the frozen epoch-1 site still publishes is a key of pages by the
+    time this runs, because build() gives it a stub, so this leaves it rather than
+    deleting a published URL.
+
+    Nothing else in out_dir is touched: not the README, not CNAME, not a subdirectory,
+    and not a file whose name merely looks like a page. Runs only after every page has
+    passed the banned word check and been written, so a failed build deletes nothing
+    either.
     """
     for name in _RETIRED:
         path = out_dir / name
@@ -7873,7 +8559,16 @@ def build(arch: ArchiveState, out_dir: Path, commit_shas=None) -> None:
     trace = _load_trace()
     merged_tier = _merged_tier_count()
     evidence = any(x is not None for x in (validation, benchmark, falsification, trace))
-    _PRESENT = frozenset({"validation.html"}) if evidence else frozenset()
+    # The epoch history, read once from rk-work/EPOCH.json. A conditional page that a
+    # frozen epoch publishes keeps its nav tab, because the stub written at that name
+    # below is a pointer the reader has to be able to reach from the nav rather than by
+    # typing the URL.
+    frozen_blocks = _frozen_epoch_blocks()
+    open_epoch = _open_epoch()
+    snapshot = {n for _site, _ep, n in
+                _epoch_stub_names(out_dir, (), frozen_blocks, open_epoch)}
+    _PRESENT = (frozenset({"validation.html"})
+                if (evidence or "validation.html" in snapshot) else frozenset())
     try:
         pages: dict[str, str] = {}
         pages["index.html"] = render_index(arch, benchmark=benchmark,
@@ -7905,6 +8600,16 @@ def build(arch: ArchiveState, out_dir: Path, commit_shas=None) -> None:
             pass
         else:
             pages["methodology.html"] = render_methodology(sidetrack, merged_tier)
+        # A stub is a key of pages, so it passes every gate below, is written by the
+        # sorted write loop, and _prune's `path.name not in pages` test leaves it.
+        # Writing it inside _prune instead would put it after every gate and falsify
+        # BANNER's own published sentence about the banned-word check.
+        for site, stub_epoch, stub in _epoch_stub_names(out_dir, pages, frozen_blocks,
+                                                        open_epoch):
+            pages[stub] = render_epoch_stub(stub, site, stub_epoch)
+        # The page set is complete here and nothing is written yet, which is where a
+        # build that would delete a frozen epoch's published URLs has to stop.
+        check_epoch_snapshot(out_dir, pages, frozen_blocks)
         for name in sorted(pages.keys()):
             check_banned(pages[name])
             check_claims(name, pages[name])
@@ -7913,6 +8618,7 @@ def build(arch: ArchiveState, out_dir: Path, commit_shas=None) -> None:
             check_tallies(name, pages[name])
             check_trace_claim(name, pages[name], trace)
             check_ratio_claim(name, pages[name], trace)
+            check_epoch_label(name, pages[name], frozen_blocks)
         out_dir.mkdir(parents=True, exist_ok=True)
         for name in sorted(pages.keys()):
             with open(out_dir / name, "wb") as fh:

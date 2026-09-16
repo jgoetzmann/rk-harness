@@ -59,6 +59,44 @@ def _live_work_dir() -> Path:
     return Path(_AMBIENT_WORK or "rk-work")
 
 
+def _live_document(rel: str) -> Path | None:
+    """The live run's copy of one document, at the root path or in a relocated epoch.
+
+    An epoch boundary moves the closing epoch's run state to rk-work/epochs/<n>
+    (DECISIONS D45(d)), so a document the open epoch has not written again is under the
+    frozen epoch's path rather than at the root. Root first, then the frozen paths
+    EPOCH.json names, newest epoch first, which is the order sitegen._relocated_epoch
+    walks. None rather than a guess when no candidate carries the document, so the
+    caller can fail naming what it tried.
+    """
+    work = _live_work_dir()
+    cands = [work / rel]
+    try:
+        doc = json.loads((work / "EPOCH.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        doc = None
+    blocks = doc.get("frozen") if isinstance(doc, dict) else None
+
+    def _epoch_of(block) -> int:
+        try:
+            return int(block.get("epoch"))
+        except (TypeError, ValueError):
+            return 0
+
+    for block in sorted((b for b in (blocks or []) if isinstance(b, dict)),
+                        key=_epoch_of, reverse=True):
+        path = block.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            continue
+        cands.append(work / path / rel)
+    for cand in cands:
+        if cand.is_file():
+            return cand
+    return None
+
+
 # --------------------------------------------------------------------------------------
 # fixtures
 # --------------------------------------------------------------------------------------
@@ -437,7 +475,11 @@ def test_class_pages_survive_when_only_some_sources_exist(monkeypatch, tmp_path)
     build(_empty_arch(), out1)
     imp = (out1 / "implicit.html").read_text(encoding="utf-8")
     assert "sdirk.stiff_suite" in imp
-    assert "predates the three-class tables" in imp      # no benchmark file yet
+    # no benchmark file at all, which is not the same absence as a document with older
+    # tables in it: the note names the path and says it has not been written
+    assert ("rk-work/benchmark/results.json has not been written in this work directory"
+            in imp)
+    assert "predates the three-class tables" not in imp
     assert "Library implicit integrators" not in imp     # the retired section stays gone
     check_banned(imp)
 
@@ -1174,15 +1216,29 @@ def test_the_implicit_budget_table_is_implicit_only(monkeypatch, tmp_path):
 def test_an_older_benchmark_document_says_so_rather_than_showing_nothing(
         monkeypatch, tmp_path):
     """The state every work directory is in until rk_harness.benchmark is re-run. An
-    empty section would read as "we compared and found nothing"."""
+    empty section would read as "we compared and found nothing".
+
+    Two absences, and the note distinguishes them. A document with older tables in it is
+    there and old; no document is not there at all, which is the state a root is in after
+    an epoch boundary relocates the closing epoch's run state. Printing "the benchmark
+    document in this work directory predates the three-class tables" for the second case
+    tells a reader the file is present when it is not.
+    """
     _env(monkeypatch, tmp_path)
     for html in (render_explicit(_stocked_arch(), benchmark={"adaptive_results": []}),
-                 render_implicit(benchmark={"adaptive_results": []}),
-                 render_adaptive(benchmark=None)):
+                 render_implicit(benchmark={"adaptive_results": []})):
         assert "Measured against real counterparts, at matched accuracy" in html
         assert "predates the three-class tables" in html
+        assert "has not been written in this work directory, so the matched" not in html
         assert "<td>ours</td>" not in html
         check_banned(html)
+    absent = render_adaptive(benchmark=None)
+    assert "Measured against real counterparts, at matched accuracy" in absent
+    assert ("rk-work/benchmark/results.json has not been written in this work directory"
+            in absent)
+    assert "predates the three-class tables" not in absent
+    assert "<td>ours</td>" not in absent
+    check_banned(absent)
 
 
 def test_the_matched_helpers_tolerate_rubbish(monkeypatch, tmp_path):
@@ -2881,12 +2937,20 @@ def test_the_live_flag_sets_are_pinned_to_the_documents_that_produce_them(monkey
 
     This is one of the tests conftest means when it says a test may set RK_WORK_DIR
     itself: a pin on the live flag sets cannot read a throwaway work directory.
+
+    The validation document is taken through _live_document, so the pin follows it
+    across an epoch boundary: after D45 relocated epoch 1's run state, the run the flags
+    were measured on is rk-work/epochs/1/validation/results.json and the root path holds
+    nothing until epoch 2 runs the suite again. Reading the root path alone pinned the
+    flags to a file the boundary had moved.
     """
     monkeypatch.setenv("RK_WORK_DIR", str(_live_work_dir()))
-    val = work_dir() / "validation" / "results.json"
-    assert val.is_file(), (
-        f"{val} is missing; point RK_WORK_DIR at a work directory carrying a validation "
-        "run, because this pin reads the live document rather than a fixture")
+    val = _live_document("validation/results.json")
+    assert val is not None, (
+        f"{_live_work_dir()} carries validation/results.json neither at the root path "
+        "nor under any epoch EPOCH.json names as frozen; point RK_WORK_DIR at a work "
+        "directory carrying a validation run, because this pin reads the live document "
+        "rather than a fixture")
     doc = json.loads(val.read_text(encoding="utf-8"))
     rows_by: dict = {}
     for r in doc["results"]:

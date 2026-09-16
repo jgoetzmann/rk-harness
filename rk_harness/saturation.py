@@ -261,8 +261,8 @@ def _epoch_number() -> int:
     """The epoch this freeze record belongs to.
 
     Read from EPOCH.json at the work root, defaulting to 1 when the run predates
-    epochs: epoch 1 never wrote one, and the findings panel reads the status with
-    int(status.get("epoch", 1)). A missing, corrupt or non-numeric value falls
+    epochs: epoch 1 never wrote one, and the findings panel reads this same file
+    through sitegen.epoch_status_data. A missing, corrupt or non-numeric value falls
     back rather than raising, because a freeze record that cannot be written is
     worse than one stamped with the default.
     """

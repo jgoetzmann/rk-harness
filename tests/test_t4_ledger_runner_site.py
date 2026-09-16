@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import re
+import shutil
 import time
 from html.parser import HTMLParser
 from pathlib import Path
@@ -39,6 +40,7 @@ from rk_harness.directive import fallback_directive
 from rk_harness.verifier_hash import compute_verifier_hash
 from rk_harness import methodology as methodology_mod
 from rk_harness import sitegen as sg
+from rk_harness import tracecheck as tracecheck_mod
 from rk_harness.sitegen import (
     BANNED_WORDS, BANNER, AVR_NOTE, OVERVIEW_URL, BannedWordError, build, render_index,
     render_cell, render_hypotheses, render_validation,
@@ -1413,7 +1415,10 @@ def test_B61_folds_kept_only_where_depth_remains(monkeypatch, tmp_path):
     assert "down-left is better" in expl           # scatter fold merged into its caption
     assert "overfitting to the visible search set" in expl    # table fold became a note
     cm = (out / "methodology.html").read_text(encoding="utf-8")
-    assert "swaps between the multiplier models" in cm        # anchor fold merged
+    # the caption's claim moved with DECISIONS D45: under the pinned coefficient price
+    # table the cheaper anchor no longer swaps between the multiplier models, so the
+    # load-bearing sentence is the one that holds in either branch
+    assert "the whole difference between these bars is coefficient arithmetic" in cm
     cell = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
     assert "held-out set" in cell                  # per-problem fold merged into caption
 
@@ -1963,6 +1968,81 @@ def _write_epoch_state(work: Path, *, consecutive=4, last_check="2026-09-21T09:3
         "last_verdict": last_verdict}), encoding="utf-8")
 
 
+# The epoch-1 values as they stand on disk in rk-work/EPOCH.json and in
+# rk-work/epochs/1/EPOCH_STATUS.json. The hashes are truncated to their published
+# eight-character prefix plus filler, because a test never needs the rest and the
+# prefix is the form every page prints a hash in.
+EPOCH1_FROZEN_AT = "2026-09-15T04:33:44.899417+00:00"
+EPOCH1_VH = "de5bec22" + "0" * 56
+EPOCH1_TH = "61f3a1bc" + "0" * 56
+EPOCH2_VH = "2db0816c" + "0" * 56
+
+# The eighteen cell pages rk-findings/docs/epoch-1/ publishes, listed so a test can
+# plant the real set without copying the real pages.
+SNAPSHOT_CELLS = (
+    "cell-p1-s1-b0.html", "cell-p2-s2-b0.html", "cell-p2-s2-b1.html",
+    "cell-p2-s3-b1.html", "cell-p2-s4-b1.html", "cell-p2-s4-b2.html",
+    "cell-p2-s5-b2.html", "cell-p2-s5-b3.html", "cell-p2-s6-b3.html",
+    "cell-p3-s3-b1.html", "cell-p3-s4-b2.html", "cell-p3-s5-b2.html",
+    "cell-p3-s5-b3.html", "cell-p3-s6-b2.html", "cell-p3-s6-b3.html",
+    "cell-p4-s4-b2.html", "cell-p4-s6-b2.html", "cell-p4-s6-b3.html",
+)
+
+
+def _write_epoch_file(work: Path, *, epoch=2, frozen=None, full=False, raw=None) -> None:
+    """Write rk-work/EPOCH.json, the pointer file the epoch panel reads its number from.
+
+    Two shapes, because both are live. full=False writes the thin block that was on disk
+    at the boundary (epoch, frozen_at and verifier_hash only), and full=True writes the
+    fuller block docs/handoffs/all-epochs-site.md specifies, so both degradation paths
+    are covered. frozen overrides the list outright: pass [] for an epoch with no
+    history, or an out-of-order list for the sort. raw writes bytes verbatim, for the
+    fallback cases that are not documents of this shape at all.
+    """
+    path = work / "EPOCH.json"
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8")
+        return
+    block = {"epoch": 1, "frozen_at": EPOCH1_FROZEN_AT, "verifier_hash": EPOCH1_VH}
+    if full:
+        block.update({
+            "site": "epoch-1/", "path": "epochs/1", "tag": "epoch-1-final",
+            "trace_hash": EPOCH1_TH, "decision": "D45",
+            "records": {"archive_records": 141364, "archive_days": 13,
+                        "occupied_cells": 18, "accepted_events": 141356},
+            "manifest": "epochs/1/MANIFEST.json", "manifest_sha256": "e9" * 32,
+            "archive_manifest": "epochs/1/epochs1_archive.sha256",
+            "archive_manifest_sha256": "2a" * 32,
+        })
+    doc = {"epoch": epoch, "frozen": [block] if frozen is None else list(frozen)}
+    if full:
+        doc.update({"opened_at": EPOCH1_FROZEN_AT, "decision": "D45",
+                    "verifier_hash": EPOCH2_VH, "trace_hash": EPOCH1_TH})
+    path.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
+
+
+def _plant_epoch_snapshot(out: Path, names) -> None:
+    """A stand-in for rk-findings/docs/epoch-1/, written as real pages.
+
+    The real twenty-five-page snapshot is never copied into a build directory. _snapshot
+    rglobs, and five whole-site loops rglob as well, so the frozen pages would enter
+    every determinism comparison and start being gated the moment a test pointed one of
+    those loops at a build output that held them. The plant is built by sg._page for the
+    same reason: a plain-text file would fail the doctype, BANNER and provenance gates.
+    """
+    snap = out / "epoch-1"
+    snap.mkdir(parents=True, exist_ok=True)
+    (snap / ".nojekyll").write_text("", encoding="utf-8")
+    # index.html is always published, because the panel's row links the directory root
+    for name in sorted(set(names) | {"index.html"}):
+        snap.joinpath(name).write_text(
+            sg._page(f"Epoch 1 {name}", "<p>frozen</p>", active="explicit.html",
+                     page_name=name, doc_title=sg._doc_title("Epoch 1 page"),
+                     description="A frozen page of the epoch 1 findings site, kept "
+                                 "here for reference only."),
+            encoding="utf-8")
+
+
 def _write_progress_events(work: Path) -> None:
     events = [
         {"ts": "2026-09-19T08:00:00Z", "kind": "accepted", "order": 2, "stages": 2,
@@ -1980,6 +2060,9 @@ def test_B65_index_epoch_panel_shows_active_state_counter_and_progress(monkeypat
     monkeypatch.setenv("RK_SAT_CONSECUTIVE", "6")
     _write_progress_events(work)
     _write_epoch_state(work)
+    # the number now comes from rk-work/EPOCH.json rather than from the freeze record,
+    # so this test plants the pointer file at the epoch it asserts
+    _write_epoch_file(work, epoch=1, frozen=[])
     (work / "falsification.json").write_text(json.dumps({"verdict": "mixed"}), encoding="utf-8")
     out = tmp_path / "docs"
     build(arch, out)
@@ -2010,6 +2093,9 @@ def test_B65_epoch_panel_is_deterministic_given_the_same_state_files(monkeypatch
 def test_B65_epoch_panel_frozen_state_from_epoch_status_json(monkeypatch, tmp_path):
     work, arch = _site_archive(monkeypatch, tmp_path)
     _write_progress_events(work)
+    # the badge, the frozen-at row and the reason come from EPOCH_STATUS.json; the epoch
+    # number no longer does, so with no EPOCH.json on disk it falls back to 1 and the
+    # freeze record's own epoch matches it
     (work / "EPOCH_STATUS.json").write_text(json.dumps({
         "epoch": 1, "frozen_at": "2026-09-21T12:00:00Z",
         "reason": "saturation threshold reached"}), encoding="utf-8")
@@ -2801,8 +2887,21 @@ def test_D41_no_page_links_a_retired_url(monkeypatch, tmp_path):
         for href in re.findall(r'href="([^"]+)"', html):
             target = href.split("#", 1)[0]
             assert target not in RETIRED, (page.name, href)
-            if target and "://" not in target:             # every local link resolves
-                assert target in names, (page.name, href)
+            if not target or "://" in target:
+                continue
+            if target.startswith("epoch-"):
+                # A frozen epoch's pages are committed under rk-findings/docs and a
+                # tmp_path build never creates them, so there is nothing at the root of
+                # this build to resolve the prefix against. The shape is checked here,
+                # and the href is resolved against a planted snapshot by
+                # test_every_epoch_prefixed_link_resolves_against_the_planted_snapshot.
+                prefix, _slash, rest = target.partition("/")
+                assert re.match(r"^epoch-\d+$", prefix), (page.name, href)
+                snap = out / prefix
+                if snap.is_dir():
+                    assert (snap / (rest or "index.html")).is_file(), (page.name, href)
+                continue
+            assert target in names, (page.name, href)     # every local link resolves
 
 
 def test_D41_the_verdict_chart_renders_deterministically_and_degrades_to_a_note():
@@ -3154,10 +3253,14 @@ def test_A2_the_hub_leads_with_the_classes_and_closes_with_the_epoch_panel(
     work, arch = _site_archive(monkeypatch, tmp_path)
     _write_progress_events(work)
     _write_epoch_state(work)
+    # the panel reads its number from the pointer file, and the frozen-epoch row lands
+    # inside the panel's own definition list, below the head
+    _write_epoch_file(work, full=True)
     body = render_index(arch).split("</header>", 1)[1]
     marks = [body.index('<p class="lead">'), body.index("<h2>The three classes</h2>"),
              body.index("<h2>The three classes side by side</h2>"),
-             body.index("<h2>Epoch status</h2>"), body.index("<strong>Epoch 1</strong>")]
+             body.index("<h2>Epoch status</h2>"), body.index("<strong>Epoch 2</strong>"),
+             body.index("frozen copy of the epoch 1 site")]
     assert marks == sorted(marks)
     # the notes that described the page are gone; one no-comparison sentence stays
     assert "Each card carries one number" not in body
@@ -3526,8 +3629,12 @@ def test_the_trace_section_keeps_the_two_scopes_apart_and_publishes_the_failed_b
     # the champion's MULS count and the dyadic assumption behind its cost
     assert "the trace contains 3 MULS per step" in sec
     assert "0 of them apply a tableau coefficient" in sec
-    # the multiply the model prices is scoped to these traces, not a general compiler claim
-    assert "prices a multiply the compiler does not emit in these nine traces" in sec
+    # the pinned table (DECISIONS D45) charges no coefficient multiply on the methods
+    # traced here, and the count of them is read off the document rather than typed: the
+    # retired sentence said "these nine traces" while this fixture prices three
+    assert "now charges for the 3 methods traced here" in sec
+    assert "no multiply anywhere a coefficient is applied" in sec
+    assert "k-reloads in the state loop" in sec and "residual classes" in sec
     # the correction is an epoch decision, said in those terms
     assert "moves VERIFIER_HASH" in sec and "epoch decision" in sec
     # the whole-step numbers exist but sit in a fold that says what they include
@@ -4194,3 +4301,913 @@ def test_an_overflowed_member_still_passes_the_gate_and_reads_n_a_in_the_share_c
     html = render_cell(4, 4, 2, rec)
     assert "n/a" in html
     check_banned(html)
+
+
+# ======================================================================================
+# EPOCH-2 (2026-09-15): the epoch panel's number, the frozen-epoch stubs, the D45
+# pricing rule and the epoch label at root
+# ======================================================================================
+
+def test_the_panel_reads_its_number_from_the_epoch_file_and_not_from_the_freeze_record(
+        monkeypatch, tmp_path):
+    """The published root said "Epoch 1, frozen" after the boundary, because the number
+    and the frozen state both came from EPOCH_STATUS.json and that file had been
+    relocated into rk-work/epochs/1. The number belongs to rk-work/EPOCH.json, which is
+    the file that says which epoch is open."""
+    work = _setup_env(monkeypatch, tmp_path)
+    _write_epoch_file(work, epoch=2)
+    d = epoch_status_data()
+    assert d["epoch"] == 2 and d["state"] == "active"
+    assert d["frozen_at"] is None and d["freeze_reason"] is None
+    assert len(d["frozen_epochs"]) == 1
+    assert d["frozen_epochs"][0]["epoch"] == 1
+    assert d["frozen_epochs"][0]["verifier_hash"] == EPOCH1_VH
+    assert "<strong>Epoch 2</strong>" in sg._epoch_panel()
+    # the read that tied the number to the freeze record is gone from the source
+    src = Path(sg.__file__).read_text(encoding="utf-8")
+    assert 'int(status.get("epoch"' not in src
+
+
+@pytest.mark.parametrize("raw", [None, "not json", "[]", '"2"', "{}",
+                                 '{"epoch": "two"}', '{"epoch": 0}',
+                                 '{"epoch": null}'])
+def test_the_panel_falls_back_to_epoch_one_on_a_work_dir_with_no_usable_epoch_file(
+        monkeypatch, tmp_path, raw):
+    """EPOCH.json is hand-written at a boundary and nothing validates it, so every
+    on-disk shape a hand edit can leave behind has to land on epoch 1 rather than on a
+    traceback or on "n/a" in the published panel. The same clamp and the same exception
+    set as saturation._epoch_number."""
+    work = _setup_env(monkeypatch, tmp_path)
+    if raw is not None:
+        _write_epoch_file(work, raw=raw)
+    d = epoch_status_data()
+    assert d["epoch"] == 1 and d["state"] == "active"
+    assert d["frozen_epochs"] == ()
+    assert "<strong>Epoch 1</strong>" in sg._epoch_panel(d)
+
+
+@pytest.mark.parametrize("raw", ["{}", '{"epoch": "two"}', '{"epoch": 0}',
+                                 '{"epoch": null}'])
+def test_an_epoch_value_a_hand_edit_left_unusable_prunes_no_published_page(
+        monkeypatch, tmp_path, raw):
+    """The panel number falls back to 1 on these four shapes, and epoch 1 is the one
+    value that collides with the frozen epoch: the stub filter dropped every site below
+    the open epoch, the stub set came out empty with the snapshot sitting right there,
+    and the next build deleted eighteen published cell URLs and the validation pointer
+    with them. A pointer file that states no usable epoch leaves the stub set what it is
+    with no pointer file at all."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, raw=raw)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    build(arch, out)
+    assert sg._open_epoch() is None                   # states no epoch, not epoch 1
+    real = {"cell-p4-s4-b2.html", "cell-p3-s3-b1.html", "cell-p2-s2-b0.html"}
+    for name in sorted(set(SNAPSHOT_CELLS) - real):
+        page = out / name
+        assert page.is_file(), name
+        assert f'href="epoch-1/{name}"' in page.read_text(encoding="utf-8"), name
+    validation = (out / "validation.html").read_text(encoding="utf-8")
+    assert 'href="epoch-1/validation.html"' in validation
+
+
+def test_a_frozen_block_keeps_its_stubs_against_an_epoch_number_that_denies_it(
+        monkeypatch, tmp_path):
+    """A frozen[] entry is the file stating that the epoch is frozen, so the open-epoch
+    test belongs to the directory-name belt and not to it. Without that split a file
+    whose two halves disagree, or whose epoch number a hand edit left unusable, deletes
+    the published pages of the epoch its own frozen[] names."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, epoch=1, full=True)       # frozen[] names epoch 1 as well
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS)
+    build(arch, out)
+    blocks = sg._frozen_epoch_blocks()
+    assert [b["site"] for b in blocks] == ["epoch-1/"]
+    assert sg._epoch_stub_names(out, {}, blocks, 1) != []
+    html = (out / "cell-p2-s4-b1.html").read_text(encoding="utf-8")
+    assert 'href="epoch-1/cell-p2-s4-b1.html"' in html
+
+
+def test_a_freeze_record_naming_another_epoch_lends_this_epoch_nothing(
+        monkeypatch, tmp_path):
+    """A root EPOCH_STATUS.json naming an epoch other than EPOCH.json's belongs to an
+    epoch that was never relocated. Its reason string names that epoch's scoring hash,
+    so printing it under the open epoch's heading would attach one epoch's provenance to
+    another epoch's numbers."""
+    work = _setup_env(monkeypatch, tmp_path)
+    _write_epoch_file(work, epoch=2)
+    (work / "EPOCH_STATUS.json").write_text(json.dumps({
+        "epoch": 1, "frozen_at": "2026-09-15T04:33:44.899417+00:00",
+        "reason": "scored under verifier hash de5bec22"}), encoding="utf-8")
+    d = epoch_status_data()
+    assert d["epoch"] == 2 and d["state"] == "active"
+    assert d["frozen_at"] is None and d["freeze_reason"] is None
+    assert d["status_epoch"] == 1          # the caller can tell mismatched from absent
+    panel = sg._epoch_panel(d)
+    assert "de5bec22" not in panel and "<dt>reason</dt>" not in panel
+
+
+def test_the_frozen_blocks_render_in_epoch_order_whatever_order_the_file_holds(
+        monkeypatch, tmp_path):
+    """`frozen` is a JSON list, so its order is whatever a hand edit left behind. Two
+    edits of the same history must not give two different builds, and a block with no
+    usable epoch number is skipped rather than sorted against None or relabeled."""
+    work = _setup_env(monkeypatch, tmp_path)
+    _write_epoch_file(work, epoch=3, frozen=[
+        {"epoch": 2, "frozen_at": "2026-10-01T00:00:00+00:00", "site": "epoch-2/",
+         "verifier_hash": "2db0816c" + "0" * 56},
+        {"epoch": "junk", "site": "epoch-9/"},
+        {"epoch": 1, "frozen_at": EPOCH1_FROZEN_AT, "site": "epoch-1/",
+         "verifier_hash": EPOCH1_VH},
+    ])
+    blocks = epoch_status_data()["frozen_epochs"]
+    assert [b["epoch"] for b in blocks] == [1, 2]
+    panel = sg._epoch_panel()
+    assert panel.index("epoch-1/") < panel.index("epoch-2/")
+    assert "epoch-9/" not in panel
+
+
+def test_the_panel_links_the_frozen_epoch_site_and_says_what_it_is(monkeypatch, tmp_path):
+    """The frozen snapshot declares the root canonical URL and must not be rewritten to
+    carry a banner of its own, so the panel's link text is what carries the meaning."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    build(arch, out)
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "<strong>Epoch 2</strong>" in html
+    assert 'href="epoch-1/"' in html
+    assert "frozen copy of the epoch 1 site" in html
+    assert "the first epoch" not in html
+    # The snapshot declares the root canonical URL because that is where those pages were
+    # published; the boundary copied them into epoch-1/ and rebuilt root under the new
+    # pin. The panel says a copy was made rather than that the pages stayed put.
+    assert ("When the next epoch opens, the frozen epoch's pages are copied to a "
+            "directory of their own") in html
+    assert "stay where they were published" not in html
+    check_banned(html)
+
+
+def test_the_panel_degrades_on_the_thin_epoch_file_that_is_on_disk(monkeypatch, tmp_path):
+    """The live EPOCH.json carried epoch plus frozen[{epoch, frozen_at, verifier_hash}]
+    and nothing else. Every read is a .get, and a block with no site publishes no row
+    rather than an "n/a" link into nowhere."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=False)
+    out = tmp_path / "docs"
+    build(arch, out)
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "<strong>Epoch 2</strong>" in html
+    assert "epoch-1/" not in html
+    assert "frozen copy of the epoch" not in html
+    assert "<dd>n/a</dd>" not in html
+    check_banned(html)
+
+
+def test_the_two_readers_of_the_epoch_file_agree(monkeypatch, tmp_path):
+    """sitegen keeps its own reader rather than importing saturation's, so that a
+    pin-adjacent module does not become a site-build dependency. The price of two
+    readers is that they have to agree, which is what this arbitrates."""
+    from rk_harness import saturation as sat
+    work = _setup_env(monkeypatch, tmp_path)
+    _write_epoch_file(work, epoch=2)
+    assert epoch_status_data()["epoch"] == sat._epoch_number() == 2
+    (work / "EPOCH.json").unlink()
+    assert epoch_status_data()["epoch"] == sat._epoch_number() == 1
+
+
+def test_the_epoch_status_dict_keeps_the_keys_the_overview_generator_reads(
+        monkeypatch, tmp_path):
+    """epoch_status_data is a cross-repo contract: rk-overview/tools/generate.py builds
+    its freeze banner from state, frozen_at and epoch. Renaming or dropping one of them
+    breaks the other site's build, which no test in this repository would catch."""
+    work = _setup_env(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    d = epoch_status_data()
+    for key in ("epoch", "state", "frozen_at", "freeze_reason", "status_epoch",
+                "frozen_epochs", "n_accepted", "last_progress_ts", "last_progress_kind",
+                "consecutive", "consecutive_needed", "last_check_ts", "last_verdict",
+                "falsification_present"):
+        assert key in d, key
+    assert set(d) == {
+        "epoch", "state", "frozen_at", "freeze_reason", "status_epoch", "frozen_epochs",
+        "n_accepted", "last_progress_ts", "last_progress_kind", "consecutive",
+        "consecutive_needed", "last_check_ts", "last_verdict", "falsification_present"}
+
+
+def test_a_cell_page_the_frozen_site_publishes_keeps_a_stub_instead_of_being_deleted(
+        monkeypatch, tmp_path):
+    """The epoch-1 archive was relocated, so the epoch-2 root renders no cell pages and
+    _prune's delete branch would fire on all eighteen names the frozen site publishes,
+    leaving eighteen live URLs at 404."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS)
+    build(arch, out)
+    real = {"cell-p4-s4-b2.html", "cell-p3-s3-b1.html", "cell-p2-s2-b0.html"}
+    stubs = [n for n in SNAPSHOT_CELLS if n not in real]
+    assert len(stubs) == 15
+    for name in stubs:
+        page = out / name
+        assert page.is_file(), name
+        html = page.read_text(encoding="utf-8")
+        assert f'href="epoch-1/{name}"' in html, name
+        assert "no archive record to show here" in html, name
+    assert (out / "epoch-1").is_dir()
+
+
+def test_a_cell_name_the_archive_re_occupies_gets_its_page_and_no_stub(
+        monkeypatch, tmp_path):
+    """A snapshot name the current archive holds is a key of pages, so the real record
+    page wins. Without the `not in pages` filter the stub would overwrite a live cell."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS)
+    build(arch, out)
+    html = (out / "cell-p4-s4-b2.html").read_text(encoding="utf-8")
+    assert rk4_cell_is_page(html)
+    assert "no archive record to show here" not in html
+    assert 'href="epoch-1/cell-p4-s4-b2.html"' not in html
+
+
+def test_no_snapshot_means_no_stub_and_the_page_set_is_unchanged(monkeypatch, tmp_path):
+    """Every determinism test and the exact-page-set tests build into a tmp directory
+    with no snapshot in it, so the stub set has to be empty there. The pointer file on
+    its own is not enough: the directory has to exist."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    build(arch, out)
+    names = {p.name for p in out.iterdir() if p.name.endswith(".html")}
+    assert names == {"index.html", "explicit.html", "implicit.html", "adaptive.html",
+                     "hypotheses.html", "methodology.html", "cell-p4-s4-b2.html",
+                     "cell-p3-s3-b1.html", "cell-p2-s2-b0.html"}
+    assert sg._epoch_stub_names(tmp_path / "nothing-here", {}) == []
+
+
+def test_the_stubs_are_byte_identical_across_two_builds(monkeypatch, tmp_path):
+    """The stub set comes from the snapshot rather than from the files _prune is about to
+    delete, which is what makes it idempotent. Two builds from the same state are
+    byte-identical, snapshot and stubs included."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    d1, d2 = tmp_path / "e1", tmp_path / "e2"
+    for d in (d1, d2):
+        _plant_epoch_snapshot(d, SNAPSHOT_CELLS)
+    build(arch, d1)
+    build(arch, d2)
+    assert _snapshot(d1) == _snapshot(d2)
+    # and a rebuild into the same directory changes nothing
+    before = _snapshot(d1)
+    build(arch, d1)
+    assert _snapshot(d1) == before
+
+
+def test_a_build_never_rewrites_a_file_inside_the_frozen_snapshot(monkeypatch, tmp_path):
+    """rk-findings/docs/epoch-1/ is sha256-identical to the closing build file by file.
+    _prune's is_file() guard is what already leaves the directory alone, and the stubs
+    must not turn that into a write."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    before = _snapshot(out / "epoch-1")
+    planted = set(SNAPSHOT_CELLS) | {"validation.html", "index.html"}
+    assert len(before) == len(planted) + 1             # the pages plus .nojekyll
+    build(arch, out)
+    assert _snapshot(out / "epoch-1") == before
+
+
+def test_every_stub_is_a_full_page_and_carries_no_javascript(monkeypatch, tmp_path):
+    """A stub has to be built by _page or five whole-site loops fail on it: the nav row,
+    the doctype and provenance footer, the document title and description, the
+    sentence-case heading and the Q15-free footer. The findings site stays
+    JavaScript-free."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, ("cell-p2-s4-b1.html",))
+    build(arch, out)
+    html = (out / "cell-p2-s4-b1.html").read_text(encoding="utf-8")
+    assert html.lower().lstrip().startswith("<!doctype html>")
+    assert BANNER in html and '<p class="prov">' in html
+    assert "<title>Cell p2 s4 b1 | rk-harness findings</title>" in html
+    assert '<meta property="og:title"' in html and '<link rel="canonical"' in html
+    desc = html.split('<meta name="description" content="', 1)[1].split('"', 1)[0]
+    assert len(desc.split()) >= 8, desc
+    h1 = html.split("<h1>", 1)[1].split("</h1>", 1)[0]
+    assert h1 == "Cell p2 s4 b1" and h1[0].isupper()
+    assert "<script" not in html and "javascript:" not in html
+    assert "hover" not in sg._STYLE_RE.sub("", html).lower()
+    assert "methodology.html#" not in html
+    check_banned(html)
+    sg.check_head("cell-p2-s4-b1.html", html)
+    sg.check_hover("cell-p2-s4-b1.html", html)
+    sg.check_tallies("cell-p2-s4-b1.html", html)
+    sg.check_claims("cell-p2-s4-b1.html", html)
+    sg.check_epoch_label("cell-p2-s4-b1.html", html, sg._frozen_epoch_blocks())
+
+
+def test_a_stub_carries_no_number_but_its_own_grid_coordinates(monkeypatch, tmp_path):
+    """A score, a cycle count, a tableau hash or a verifier hash on a stub would be an
+    epoch-1 number at root, and a traced number would drag the whole D42 scope sentence
+    onto a pointer page. The grid coordinates are read out of the file name."""
+    _setup_env(monkeypatch, tmp_path)
+    html = sg.render_epoch_stub("cell-p1-s1-b0.html", "epoch-1/", 1)
+    assert "grid order 1, 1 stage, cycle bucket 0" in html   # not "1 stages"
+    assert 'href="epoch-1/cell-p1-s1-b0.html"' in html
+    for token in ("de5bec22", "141,364", "11e898cb", "cycles", "heldout_error",
+                  "VERIFIER_HASH"):
+        assert token not in html, token
+    body = html.split("</header>", 1)[1].split("<footer>", 1)[0]
+    assert not re.search(r"\d", body.replace("p1", "").replace("s1", "")
+                         .replace("b0", "").replace("epoch-1", "").replace("epoch 1", "")
+                         .replace("order 1", "").replace("1 stage", "")
+                         .replace("bucket 0", "")), body
+    assert html == sg.render_epoch_stub("cell-p1-s1-b0.html", "epoch-1/", 1)
+
+
+def test_every_epoch_prefixed_link_resolves_against_the_planted_snapshot(
+        monkeypatch, tmp_path):
+    """The site-wide link resolver resolves a root href against the root page set, and
+    an epoch-prefixed href has to resolve against the frozen directory instead. This is
+    the strict half of that: the directory has to exist and the file has to be in it.
+
+    The plant carries the pages the real snapshot carries and the prose points at: the
+    cell stubs, validation.html for the trace pointer, and the three class pages for the
+    matched-accuracy pointer each of them plants when this work directory has no
+    benchmark document.
+    """
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html", "explicit.html",
+                                                 "implicit.html", "adaptive.html"))
+    build(arch, out)
+    seen = 0
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        for href in re.findall(r'href="([^"]+)"', html):
+            target = href.split("#", 1)[0]
+            if not target.startswith("epoch-"):
+                continue
+            prefix, _slash, rest = target.partition("/")
+            snap = out / prefix
+            assert snap.is_dir(), (page.name, href)
+            assert (snap / (rest or "index.html")).is_file(), (page.name, href)
+            seen += 1
+    assert seen >= 16          # the panel row, fifteen cell stubs and the tab pointer
+
+
+def test_the_validation_tab_becomes_a_pointer_when_this_epoch_has_no_documents(
+        monkeypatch, tmp_path):
+    """validation.html is in the snapshot, is not retired and matches no cell pattern,
+    so without a stub the epoch-1 page stayed live at root, unlinked once the nav
+    dropped a tab, with its record count and its scoring hash unlabeled."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, ("validation.html",))
+    build(arch, out)
+    html = (out / "validation.html").read_text(encoding="utf-8")
+    assert 'href="epoch-1/validation.html"' in html
+    assert "nothing to compare here" in html
+    for token in ("de5bec22", "141,364", "11e898cb"):
+        assert token not in html, token
+    # the pointer is reachable from the nav rather than only by typing the URL
+    assert '<a href="validation.html"' in (out / "index.html").read_text(encoding="utf-8")
+    check_banned(html)
+    sg.check_head("validation.html", html)
+
+
+def test_the_real_validation_page_wins_over_the_pointer_when_the_documents_exist(
+        monkeypatch, tmp_path):
+    """The stub is a pointer for an epoch that has produced nothing at that name. An
+    epoch with its own documents gets its own page."""
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _full_work(work)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, ("validation.html",))
+    build(replay(), out)
+    html = (out / "validation.html").read_text(encoding="utf-8")
+    assert "nothing to compare here" not in html
+    assert 'href="epoch-1/validation.html"' not in html
+    assert '<h2 id="falsification">' in html
+
+
+def test_a_build_that_fails_a_gate_writes_no_stub(monkeypatch, tmp_path):
+    """The stub is a key of pages, so it is written by the gated write loop and not by
+    _prune. A build that raises must leave the snapshot and the previous root alone."""
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS)
+    before = _snapshot(out)
+    append_hypothesis(_hyp(id="H-010", statement="a novel method"))
+    with pytest.raises(BannedWordError):
+        build(replay(), out)
+    assert _snapshot(out) == before
+    assert not (out / "cell-p2-s4-b1.html").exists()
+
+
+def test_the_cost_model_section_states_the_pinned_pricing_rule():
+    """The trace section does not render at an epoch-2 root, because the trace document
+    was relocated with the rest of epoch 1's run state. The cost-model section, the
+    glossary and methodology.py are where the pricing rule is visible at root."""
+    sec = sg._costmodel_section()
+    assert " ".join(tracecheck_mod.CFLAGS) in sec
+    assert "-O2" in sec and "arm-none-eabi-gcc 13.2.1" in sec
+    assert "m0plus_fast and m0plus_slow differ only in the multiplier" in sec
+    assert "cheaper of a shift-add" not in sec and "HANDOFF" not in sec
+    assert sec == sg._costmodel_section()
+    check_banned(sec)
+
+
+def test_the_pin_constants_match_the_fixture_and_the_tracer():
+    """The compiler and flag strings stand in sitegen as constants so the site build
+    neither parses the 1 MB pinned fixture nor imports the tracer. The price of that is
+    this test: the constants are the pin's own strings or they are wrong."""
+    doc = json.loads((PACKAGE_DIR.parent / "fixtures" / "m0plus_coeff_ops.json")
+                     .read_text(encoding="utf-8"))
+    meta = doc["_meta"]
+    assert tuple(meta["cflags"]) == sg.COEFF_PIN_CFLAGS
+    assert tuple(tracecheck_mod.CFLAGS) == sg.COEFF_PIN_CFLAGS
+    assert meta["compiler"] == "arm-none-eabi-gcc (15:13.2.rel1-2) 13.2.1 20231009"
+    assert sg.COEFF_PIN_COMPILER == "arm-none-eabi-gcc 13.2.1"
+    assert sg.COEFF_PIN_TABLE == "fixtures/m0plus_coeff_ops.json"
+    assert meta["decision"] == "D45"
+    # the flags are published in the pin's own order, never sorted: a sorted command
+    # line was never run
+    assert sg._CFLAGS_TEXT == " ".join(meta["cflags"])
+    assert sg._CFLAGS_TEXT != " ".join(sorted(meta["cflags"]))
+
+
+def test_the_two_multiplier_models_differ_only_in_the_multiplier():
+    """Both M0+ models read the same op counts from one entry of the pinned table, so
+    the sentence stays true and becomes exact. The gap is computed from the pinned model
+    constants rather than typed."""
+    from rk_harness import costmodel
+    gap = costmodel.M0PLUS_SLOW.cycles["mul"] - costmodel.M0PLUS_FAST.cycles["mul"]
+    sec = sg._costmodel_section()
+    assert f"the gap between them is {gap} cycles per coefficient multiply per state" in sec
+    for key in ("add", "shift", "load", "store"):
+        assert costmodel.M0PLUS_SLOW.cycles[key] == costmodel.M0PLUS_FAST.cycles[key]
+
+
+def test_the_glossary_defines_the_coefficient_price_table_and_keeps_csd_weight():
+    """CSD weight keeps its definition and stops pricing M0+ coefficients; the price
+    table gets an entry of its own. Every _gloss link on the site has to resolve to
+    methodology.html#<anchor>, so the anchor ids are the contract."""
+    g = sg._glossary_section()
+    assert 'id="coeff-table"' in g and 'id="csd-weight"' in g
+    assert "fixtures/m0plus_coeff_ops.json" in g
+    assert "arm-none-eabi-gcc 13.2.1" in g and "-O2" in g
+    assert "keyed by the signed multiplier" in g
+    assert "it prices the advisory avr_approx model" in g
+    assert "ten pinned" not in g
+    assert f"the {sg._PIN_COUNT_WORD} pinned scoring files" in g
+    for entry in sg._GLOSSARY:
+        for para in entry[2]:
+            assert "\u2014" not in para and " - " not in para, entry[0]
+    check_banned(g)
+
+
+def test_the_anchor_caption_recomputes_its_own_claim(monkeypatch, tmp_path):
+    """The caption called the fast/slow swap the cost model's main sanity check. Under
+    the pinned table rk38 is cheaper than rk4 under both models, so there is no swap; a
+    caption that recomputes cannot go stale at the next re-pin."""
+    _setup_env(monkeypatch, tmp_path)
+    cap = sg._anchor_bars().split("<figcaption>", 1)[1].split("</figcaption>", 1)[0]
+    assert "the whole difference between these bars is coefficient arithmetic" in cap
+    assert "the cost model's main sanity check" not in cap
+    assert "rk38 is the cheaper of the two under both multiplier models." in cap
+    check_banned(cap)
+
+
+def test_the_trace_lead_names_the_traced_flags_from_the_document_and_the_rule_from_the_pin(
+        monkeypatch, tmp_path):
+    """Two sources, deliberately separate. Facts about the traced run come from the
+    document (D42); the pricing rule comes from the pin. That is why the fixture renders
+    three flags and production renders six, which is correct rather than a drift."""
+    _setup_env(monkeypatch, tmp_path)
+    doc = _trace_fixture()
+    html = render_validation(None, trace=doc)
+    sec = html.split('<h2 id="trace">', 1)[1].split('<h2 id="falsification">', 1)[0]
+    assert "-mcpu=cortex-m0plus -mthumb -O2" in sec          # the document's own flags
+    assert "the compiler enters the price once, at pin time" in sec
+    assert sg._pinned_rule_clause() in sec                   # the rule, from the pin
+    assert "no compiler is in that loop" not in sec
+    for mod in (sg, methodology_mod):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "no compiler is in that loop" not in src, mod.__name__
+    assert render_validation(None, trace=doc) == html
+
+
+def test_the_two_results_paragraph_carries_the_d42_freight_with_its_number(
+        monkeypatch, tmp_path):
+    """Every traced number carries the scope it is quoted at, in the same block. The
+    widest-gap number is appended to this paragraph, so the D42 sentence sits here."""
+    work = _setup_env(monkeypatch, tmp_path)
+    doc = _trace_fixture()
+    html = render_validation(None, trace=doc)
+    sec = html.split('<h2 id="trace">', 1)[1].split('<h2 id="falsification">', 1)[0]
+    block = [b for b in re.findall(r"<p>(.*?)</p>", sec, re.S)
+             if "widest gap above" in b]
+    assert len(block) == 1
+    block = block[0]
+    assert "matched scope" in block
+    assert "instruction accurate rather than cycle accurate" in block
+    assert "derivative call" in block and "h times k product" in block
+    assert "k-reloads in the state loop" in block and "residual classes" in block
+    assert "now charges for the 3 methods traced here" in block   # off the document
+    assert "epoch-1/" not in sec                                  # no pointer file yet
+    _write_epoch_file(work, full=True)
+    with_pointer = render_validation(None, trace=doc)
+    sec2 = with_pointer.split('<h2 id="trace">', 1)[1].split('<h2 id="falsification">',
+                                                             1)[0]
+    # The document is at a root path, so it is the open epoch's evidence and not the
+    # frozen one's. The frozen site is pointed at as the earlier comparison, which is
+    # what it is; saying these numbers were published there would attach epoch 1's
+    # provenance to epoch 2's numbers.
+    assert "epoch 2 evidence" in sec2 and "epoch 1 evidence" not in sec2
+    assert 'href="epoch-1/validation.html">the frozen epoch 1 site' in sec2
+    assert "the pages it was published on" not in sec2
+    assert with_pointer == render_validation(None, trace=doc)
+    check_banned(with_pointer)
+    sg.check_trace_claim("validation.html", with_pointer, doc)
+    sg.check_ratio_claim("validation.html", with_pointer, doc)
+
+
+def test_the_validation_sentence_says_the_correction_landed_and_keeps_its_two_phrases(
+        monkeypatch, tmp_path):
+    """The correction already landed, so a paragraph describing the pre-correction rule
+    as current sat under a sentence saying it had not. The present-tense clause about
+    what the correction does stays, because that is what the gate above it reads."""
+    work = _setup_env(monkeypatch, tmp_path)
+    doc = _trace_fixture()
+    html = render_validation(None, trace=doc)
+    sec = html.split('<h2 id="trace">', 1)[1].split('<h2 id="falsification">', 1)[0]
+    assert "moves VERIFIER_HASH" in sec and "epoch decision" in sec
+    assert "landed at the epoch-2 boundary" in sec and "D45" in sec
+    assert "not a fix inside a cycle" not in sec        # no negative parallelism
+    assert "would change every archived cycle count" not in sec
+    _write_epoch_file(work, full=True)
+    sec2 = render_validation(None, trace=doc).split('<h2 id="trace">', 1)[1]
+    assert 'href="epoch-1/"' in sec2
+    # The section reads rk-work/trace/results.json, a root path and so the open epoch's
+    # document, and the paragraph above accounts for its own residual gap under the
+    # corrected table. So the earlier charge's disagreement is named where it is, on the
+    # frozen site, rather than claimed as what this section shows.
+    assert "this section is the disagreement" not in sec2
+    assert ("the disagreement that charge produced is on "
+            '<a href="epoch-1/">the frozen epoch 1 site</a>') in sec2
+    full = render_validation(None, trace=doc)
+    assert full == render_validation(None, trace=doc)
+    check_banned(full)
+    sg.check_hover("validation.html", full)
+    sg.check_tallies("validation.html", full)
+    sg.check_trace_claim("validation.html", full, doc)
+
+
+def test_the_absent_trace_note_points_at_the_frozen_epoch_when_there_is_one(
+        monkeypatch, tmp_path):
+    """The absent-document branch is the only rendering of this section at an epoch-2
+    root, so the pointer belongs there too. With no pointer file it is byte-identical to
+    what it was, and it still prints no traced number."""
+    work = _setup_env(monkeypatch, tmp_path)
+    plain = render_validation(None, trace={})
+    assert "rk-work/trace/results.json has not been written" in plain
+    assert "epoch-1/" not in plain and "cycles_traced" not in plain
+    _write_epoch_file(work, full=True)
+    pointed = render_validation(None, trace={})
+    assert 'href="epoch-1/validation.html"' in pointed
+    assert "The epoch 1 comparison is on" in pointed
+    assert "cycles_traced" not in pointed
+    check_banned(pointed)
+
+
+def test_check_epoch_label_needs_an_epoch_beside_a_frozen_hash():
+    """A frozen epoch's scoring hash in prose with no epoch near it attaches one epoch's
+    provenance to another epoch's numbers. A record's own provenance field is exempt:
+    every cell page prints the record's full verifier_hash in a hash span, and a gate
+    that matched those would fire on correct provenance and, because runner.py swallows
+    ClaimError into site_build_failed, would silently freeze the whole site. The token
+    list is built from EPOCH.json's frozen blocks, so the gate is inert wherever no
+    pointer file is planted, and a tableau hash such as 11e898cb is never a token: it is
+    a record field, not provenance, and it appears in fixtures that build pages."""
+    block = {"epoch": 1, "verifier_hash": EPOCH1_VH}
+    with pytest.raises(sg.ClaimError):
+        sg.check_epoch_label("index.html",
+                             "<p>scored under de5bec22 and priced again</p>", (block,))
+    sg.check_epoch_label("index.html",
+                         "<p>epoch 1 scored these under de5bec22</p>", (block,))
+    sg.check_epoch_label("index.html", "<p>de5bec22 with no label</p>", ())
+    sg.check_epoch_label("index.html", "<p>de5bec22</p>",
+                         ({"epoch": 1, "verifier_hash": "de5b"},))
+    sg.check_epoch_label("index.html", "<p>de5bec22</p>",
+                         ({"epoch": 1, "verifier_hash": None},))
+    # a record's own provenance span is exempt
+    sg.check_epoch_label("cell-p1-s1-b0.html",
+                         '<dd><span class="hash">' + EPOCH1_VH + "</span></dd>",
+                         (block,))
+    assert issubclass(sg.ClaimError, BannedWordError)
+
+
+def _relocate_copy(work, rel: str, epoch: int = 1) -> None:
+    """The state relocation leaves a document in when its lane keeps measuring.
+
+    An epoch boundary moves the closing epoch's run state to rk-work/epochs/<n>
+    (DECISIONS D45(d)). The lanes and the side-track ledger keep their documents at the
+    root path as well, so the same bytes sit under both paths and the root path, which
+    means the current epoch, holds the earlier epoch's measurements.
+    """
+    dst = work / "epochs" / str(epoch) / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes((work / rel).read_bytes())
+
+
+def _empty_lane_doc(lane: str) -> dict:
+    """A lane elites document that ranks nothing, carrying the provenance block.
+
+    The entries are beside the point here: what these tests arbitrate is the epoch label
+    the page puts above whatever numbers the document holds.
+    """
+    return {"_meta": {"lane": lane, "schema": "lane-elites/1", "elite_cap": 32,
+                      "generated_cycle": 3928, "generated_ts": "2026-09-10T14:51:48Z",
+                      "lanesearch_code_hash": "6a5be0d8f26639ea"},
+            "elites": [],
+            "rule": "lowest median cycles at the elite target"}
+
+
+def _plant_relocated_lane_state(work) -> None:
+    """Every off-archive document a root page reads, in its post-boundary state."""
+    _write_sidetrack(work, _sidetrack_fixture())
+    _relocate_copy(work, "sidetrack/ledger.jsonl")
+    for lane in ("implicit", "adaptive"):
+        path = work / f"{lane}_archive" / "elites.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_empty_lane_doc(lane), sort_keys=True),
+                        encoding="utf-8")
+        _relocate_copy(work, f"{lane}_archive/elites.json")
+
+
+def test_no_page_at_root_carries_an_epoch_one_number_without_its_label(
+        monkeypatch, tmp_path):
+    """The bullet this arbitrates: no epoch-1 number appears at root without its epoch
+    label. The build runs the gate over every page it writes, so this re-reads what was
+    written and checks the two published epoch-1 figures are not loose at root.
+
+    The scored archive was relocated, so what is left publishing an earlier epoch's
+    numbers at root is the off-archive lanes: they keep their documents at the root path
+    across a boundary, and a count off one of them is an epoch-1 number under a path
+    that means epoch 2. A hash-prefix gate cannot see those, because neither document
+    carries a verifier hash, so the label is asserted where the numbers are.
+    """
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    _plant_relocated_lane_state(work)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    build(arch, out)
+    blocks = sg._frozen_epoch_blocks()
+    assert blocks and blocks[0]["verifier_hash"] == EPOCH1_VH
+    pages = sorted(out.glob("*.html"))
+    assert len(pages) >= 10
+    for page in pages:
+        html = page.read_text(encoding="utf-8")
+        sg.check_epoch_label(page.name, html, blocks)
+        assert "141,364" not in html, page.name
+        assert "de5bec22" not in html, page.name
+    # the ledger count on the hub card, and the same count on each class page
+    hub = (out / "index.html").read_text(encoding="utf-8")
+    assert "measured ledger points, measured in epoch 1" in hub
+    for name in ("implicit.html", "adaptive.html", "methodology.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert ("rk-work/sidetrack/ledger.jsonl, holds the same bytes as the copy "
+                "relocated to rk-work/epochs/1") in html, name
+        assert "measured in epoch 1" in html, name
+    # the lane elites document, labelled in its own provenance list
+    for name in ("implicit.html", "adaptive.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert "<dt>measured in</dt>" in html, name
+        assert ("epoch 1: this document holds the same bytes as the copy relocated to "
+                "rk-work/epochs/1") in html, name
+
+
+def test_a_document_this_epoch_measured_carries_no_earlier_epoch_label(
+        monkeypatch, tmp_path):
+    """The other side of that label: a root document the current epoch wrote is not the
+    relocated one, so nothing on the page claims an earlier epoch measured it. The
+    comparison is over bytes, so one re-measured point is enough to clear the label."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    _plant_relocated_lane_state(work)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    build(arch, out)
+    assert "measured in epoch 1" in (out / "adaptive.html").read_text(encoding="utf-8")
+    # this epoch measures one more point into the same ledger, and the adaptive lane
+    # writes its document again
+    _write_sidetrack(work, [{"track": "adaptive", "job": "adaptive.suite_sweep",
+                             "key": "boost_converter",
+                             "summary": {"points": 6, "finished": 6,
+                                         "fevals_max": 4001}}])
+    doc = _empty_lane_doc("adaptive")
+    doc["_meta"]["generated_cycle"] = 4102
+    (work / "adaptive_archive" / "elites.json").write_text(
+        json.dumps(doc, sort_keys=True), encoding="utf-8")
+    assert sg._relocated_epoch("sidetrack/ledger.jsonl") == 0
+    assert sg._relocated_epoch("adaptive_archive/elites.json") == 0
+    assert sg._relocated_epoch("implicit_archive/elites.json") == 1
+    build(arch, out)
+    fresh = (out / "adaptive.html").read_text(encoding="utf-8")
+    assert "measured in epoch 1" not in fresh
+    assert "holds the same bytes as the copy relocated" not in fresh
+    # the implicit lane did not re-measure, so its own label stays
+    assert ("epoch 1: this document holds the same bytes"
+            in (out / "implicit.html").read_text(encoding="utf-8"))
+    build(arch, out)
+    assert fresh == (out / "adaptive.html").read_text(encoding="utf-8")
+
+
+def test_side_track_points_keep_their_label_when_the_ledger_moves_on(
+        monkeypatch, tmp_path):
+    """The label belongs on the document the number was read from. A chart and a folded
+    table publish the per-point artifacts, not the ledger line that names them, and the
+    ledger is append-only (sidetrack._append_ledger opens it with "a") while an artifact
+    is rewritten only when its own point is measured again. So one point measured this
+    epoch clears the ledger's label, and every artifact that point did not touch is
+    still publishing epoch 1's numbers under an epoch 2 pin. The label is keyed on the
+    artifacts, one epoch per point, and it sits in the figure and in the table rather
+    than once at the top of a page thousands of words long.
+    """
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    _write_sidetrack(work, _sidetrack_fixture())
+    _relocate_copy(work, "sidetrack/ledger.jsonl")
+    for point in _sidetrack_fixture():
+        _relocate_copy(work, f"sidetrack/{point['job']}/{point['key']}.json")
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    build(arch, out)
+    adp = (out / "adaptive.html").read_text(encoding="utf-8")
+    for where in ("this figure", "this table"):
+        assert (f"Every point in {where} was measured in epoch 1: its artifact holds "
+                "the same bytes as the copy relocated to rk-work/epochs/1") in adp, where
+    # the label is beside the numbers: under the figure it labels, and inside the fold
+    assert (adp.index("Every point in this figure")
+            < adp.index("What these numbers are not"))
+    assert adp.index("Every point in this table") > adp.index("Every measured point")
+    check_banned(adp)
+
+    # one point measured this epoch, appended to the same ledger and the same job
+    _write_sidetrack(work, [{"track": "adaptive", "job": "adaptive.suite_sweep",
+                             "key": "boost_converter",
+                             "summary": {"points": 6, "finished": 6,
+                                         "fevals_max": 4001}}])
+    assert sg._relocated_epoch("sidetrack/ledger.jsonl") == 0
+    build(arch, out)
+    moved = (out / "adaptive.html").read_text(encoding="utf-8")
+    assert "rk-work/sidetrack/ledger.jsonl, holds the same bytes" not in moved
+    for where in ("this figure", "this table"):
+        assert (f"The points in {where} do not come from one epoch: 1 of the 2 "
+                "artifacts holds the bytes relocated to rk-work/epochs/1, so those "
+                "numbers were measured in epoch 1 and under that epoch") in moved, where
+    assert ("and the other 1 point was measured again since that relocation, under this "
+            "epoch") in moved
+    check_banned(moved)
+    build(arch, out)
+    assert moved == (out / "adaptive.html").read_text(encoding="utf-8")
+
+
+def test_a_directory_named_for_the_open_epoch_is_not_read_as_a_frozen_site(
+        monkeypatch, tmp_path):
+    """Phase E copies the current docs to docs/epoch-N/ before the root is regenerated,
+    so between that copy and the next boundary the output holds a directory named for
+    the epoch that is still open. Read as frozen, root pages would send the reader to a
+    frozen epoch 2 site that is this epoch's own copy while the panel named epoch 1."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, epoch=2, frozen=[])
+    out = tmp_path / "docs"
+    (out / "epoch-2").mkdir(parents=True)
+    for name in ("index.html", "validation.html", "cell-p1-s1-b0.html"):
+        (out / "epoch-2" / name).write_text(
+            sg._page(f"Epoch 2 {name}", "<p>a copy</p>", page_name=name,
+                     doc_title=sg._doc_title("A copy"),
+                     description="A copy of this epoch's own page."),
+            encoding="utf-8")
+    blocks = sg._frozen_epoch_blocks()
+    assert blocks == ()
+    # the belt finds the directory by its name; the open epoch is what rules it out
+    assert sg._epoch_stub_names(out, {}, blocks) != []
+    assert sg._epoch_stub_names(out, {}, blocks, 2) == []
+    build(arch, out)
+    assert not (out / "cell-p1-s1-b0.html").exists()
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        assert "frozen epoch 2" not in html, page.name
+        assert 'href="epoch-2/' not in html, page.name
+
+
+def test_a_build_over_the_published_site_fails_closed_without_the_frozen_directory(
+        monkeypatch, tmp_path):
+    """EPOCH.json names the directory the frozen epoch publishes under, and the stubs
+    that keep its URLs reachable are read from it. Gone, the stub set comes out empty,
+    the published cell URLs are pruned, and a frozen page left at a root name stays
+    there with no epoch beside its numbers. This fails instead: runner.py catches
+    ClaimError into site_build_failed, so the published pages stay as they were."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    build(arch, out)
+    assert (out / "cell-p2-s4-b1.html").is_file()          # a stub for a snapshot cell
+    published = _snapshot(out)
+    shutil.rmtree(out / "epoch-1")
+    with pytest.raises(sg.ClaimError) as err:
+        build(arch, out)
+    assert "epoch-1/" in str(err.value) and "epoch 1" in str(err.value)
+    assert "cell-p1-s1-b0.html" in str(err.value)      # the pages it would have taken
+    kept = {n: d for n, d in _snapshot(out).items() if "epoch-1" not in n}
+    assert kept == {n: d for n, d in published.items() if "epoch-1" not in n}
+    assert (out / "cell-p2-s4-b1.html").is_file()
+    # a first publish into a fresh directory deletes nothing, so it is not gated
+    fresh = tmp_path / "fresh"
+    build(arch, fresh)
+    assert (fresh / "index.html").is_file()
+    assert not (fresh / "cell-p2-s4-b1.html").exists()
+    # and neither is a rebuild into a directory this build filled itself, which is what
+    # the determinism and preflight builds do against the live work directory
+    build(arch, fresh)
+    assert (fresh / "index.html").is_file()
+
+
+def test_the_methodology_page_states_the_pinned_pricing_rule(monkeypatch, tmp_path):
+    """The page publishes analytic cycle counts, so it cannot leave the charge behind
+    them undescribed. The flag string is written out here and pinned against the
+    fixture's own list by this test, which is what keeps it from drifting."""
+    _setup_env(monkeypatch, tmp_path)
+    html = sg.render_methodology(None, None)
+    assert " ".join(tracecheck_mod.CFLAGS) in html
+    assert "arm-none-eabi-gcc 13.2.1" in html
+    assert "fixtures/m0plus_coeff_ops.json" in html
+    assert "avr_approx keeps the earlier charge" in html
+    assert "keyed by the signed multiplier" in html
+    assert "landed at the epoch-2 boundary (DECISIONS D45)" in html
+    assert "with no compiler in the loop" not in html
+    assert "compiled probes at fixed flags" in html
+    from rk_harness import verifier_hash as vh_mod
+    assert f"sha256 over {len(vh_mod.VERIFIER_FILES)} files" in html
+    assert "sha256 over ten files" not in html
+    check_banned(html)
+
+
+def test_the_footer_pin_count_comes_from_the_verifier_file_list(monkeypatch, tmp_path):
+    """BANNER is republished in the footer of every page, and it said ten while the pin
+    covers fourteen files. A published number that no longer traces is a published
+    number that is wrong, so the count is read off verifier_hash.VERIFIER_FILES.
+
+    The grep is on "ten" beside either word the site uses for the file set, not on one
+    spelling of the phrase: the footer said "ten pinned scoring files" and section 4 of
+    the methodology page said "ten scoring files", so a guard on the first spelling let
+    the second through. methodology.py reads the same list, since it never imports
+    sitegen and so keeps its own count.
+    """
+    from rk_harness import verifier_hash as vh_mod
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    assert sg._PIN_COUNT == len(vh_mod.VERIFIER_FILES)
+    assert methodology_mod._PIN_COUNT == len(vh_mod.VERIFIER_FILES)
+    assert sg._PIN_COUNT_WORD == methodology_mod._PIN_COUNT_WORD
+    assert f"the {sg._PIN_COUNT_WORD} pinned scoring files" in BANNER
+    out = tmp_path / "docs"
+    build(arch, out)
+    stale = re.compile(r"\bten (pinned|scoring|files)\b")
+    for page in sorted(out.glob("*.html")):
+        assert not stale.search(page.read_text(encoding="utf-8")), page.name
+    # the three places the count is published, each off the same list
+    meth = " ".join((out / "methodology.html").read_text(encoding="utf-8").split())
+    assert f"a sha256 over the {sg._PIN_COUNT_WORD} scoring files" in meth
+    assert f"sha256 over {sg._PIN_COUNT} files" in meth
+    assert f"the {sg._PIN_COUNT_WORD} pinned scoring files" in meth
+
+
+def test_the_source_no_longer_states_the_retired_rule():
+    """The retired sentences, greppped at the source rather than at one rendered page,
+    because each of them rendered on a page some test does not build."""
+    src = Path(sg.__file__).read_text(encoding="utf-8")
+    meth = Path(methodology_mod.__file__).read_text(encoding="utf-8")
+    for dead in ('int(status.get("epoch"', "no compiler is in that loop", "ten pinned",
+                 "ten scoring", "these nine traces"):
+        assert dead not in src, dead
+        assert dead not in meth, dead
+    # the retired charge survives in exactly one place in each module, beside the
+    # advisory model it still describes
+    for text, name in ((src, "sitegen"), (meth, "methodology")):
+        for line_no, line in enumerate(text.split("\n"), 1):
+            if "cheaper of a shift-add" in line:
+                window = " ".join(text.split("\n")[max(0, line_no - 4):line_no + 3])
+                assert "avr_approx" in window, (name, line_no)

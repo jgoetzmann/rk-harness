@@ -1271,6 +1271,12 @@ prune and retired-link tests); `scripts/preflight.py` H1 (`explicit.html`), H4
 **Epoch impact.** None. No pinned file changes, no record is read or written differently, and
 every archived score keeps its meaning.
 
+**Amended 2026-09-15: the 404 above is narrowed.** From the epoch-2 boundary
+(D45) `_prune` leaves a JavaScript-free stub at every root cell URL the frozen
+snapshot still publishes, each linking its `epoch-1/` copy. Those URLs no
+longer 404. The rule this record states is unchanged for pages no snapshot
+carries, which still go.
+
 ---
 
 ## D29 - A status file states its own expiry, and can be asked its age without being rewritten (2026-09-08)
@@ -1928,7 +1934,7 @@ The tier backfill this entry prepares for is the owner's to apply and is not par
 
 ---
 
-## D45 - Epoch 1 freezes, and epoch 2 prices each coefficient by the instructions GCC 13.2.1 emits for it (2026-09-14, decided, not landed)
+## D45 - Epoch 1 freezes, and epoch 2 prices each coefficient by the instructions GCC 13.2.1 emits for it (2026-09-14, decided; landed 2026-09-15)
 
 **Decision.**
 (a) The rule in the epoch plan section 2, with one corner the validation
@@ -1997,5 +2003,15 @@ findings halves that sit with the sitegen lane, or the person check.
 **Epoch impact.** Decided, not landed: no verifier-pinned file is edited
 and `VERIFIER_HASH` still reads de5bec22 until the boundary commit
 re-pins last.
+
+**Amended 2026-09-15: landed.** The boundary commit re-pinned last, so
+`VERIFIER_HASH` reads 2db0816c over fourteen files where it read de5bec22 over
+ten. Epoch 1's run state sits at `rk-work/epochs/1` under a sha256 manifest
+that re-verifies at the new path, `rk-work/EPOCH.json` opens epoch 2 and names
+the frozen block, and `epoch-1-final` is an annotated tag in all five
+repositories. The findings generator now takes the epoch number from
+`EPOCH.json` rather than a hard-coded read. Two parts stay open: the image is
+not rebuilt, so the container still runs the previous pin, and `run.site` is
+false until publish 3.
 
 ---

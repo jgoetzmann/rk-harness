@@ -328,6 +328,16 @@ def test_the_page_stays_under_its_word_budget(monkeypatch):
     ships at 4,365. The budget is unchanged at 4,400 and is not raised to make room,
     so the real headroom is 35 words rather than the 87 the old measurement implied.
     Two of the three injected sections read run data, so this needs a work directory.
+
+    It was raised a fourth time, to 4,900, when the page started stating the pricing rule
+    it publishes scores under (DECISIONS D45). The rule is the compiler and flag string,
+    the keying by signed multiplier, the plus-or-minus-1-at-shift-0 corner, and what the
+    pinned table does not establish; the injected cost-model section and the glossary
+    entry for the price table render into this page and carry part of it. A page that
+    publishes analytic cycle counts cannot leave the charge behind them undescribed, and
+    the retired one-sentence version was false against the code. Measured at 4,857 after
+    the rewrite, rounded up to the next 50. The rule is unchanged: the raise is paid for
+    once and drift still fails here.
     """
     monkeypatch.setenv("RK_WORK_DIR", str(_live_work_dir()))
     sidetrack = sitegen._load_sidetrack()
@@ -344,7 +354,7 @@ def test_the_page_stays_under_its_word_budget(monkeypatch):
     tables = re.findall(_CHART_TABLE_RE, body, re.S)
     prose = re.sub(_CHART_TABLE_RE, " ", body, flags=re.S)
     words = re.sub(r"<[^>]+>", " ", prose).split()
-    assert len(words) < 4400, len(words)
+    assert len(words) < 4900, len(words)
     table_words = sum(len(re.sub(r"<[^>]+>", " ", t).split()) for t in tables)
     assert len(tables) == 1, len(tables)
     assert table_words < 100, table_words
