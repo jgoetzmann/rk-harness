@@ -865,3 +865,78 @@ def test_C40_the_runner_guard_refuses_a_mixed_or_foreign_hash_archive_and_accept
     old.unlink()
     (archive_dir() / "2020-01-02.jsonl").write_text("", encoding="utf-8")
     assert runner.archive_epoch_mismatches() == []
+
+
+# ------------------------------------------------------------------------------------ C41
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def test_C41_every_frozen_epoch_re_verifies_against_its_own_manifests():
+    """A frozen epoch is only frozen if its bytes still are.
+
+    `docs/handoffs/all-epochs-site.md` asks that `rk-work/epochs/1/` plus its manifest
+    re-verify at every later gate, and until this test nothing did: no script, no gate
+    and no other test recomputed either digest, so the relocation's promise that the
+    archive moved unchanged rested on one hand check on the day it moved. The published
+    numbers all trace back to those files, so a silent edit under a frozen path would
+    leave every page quoting an archive that no longer exists.
+
+    Invariants rather than pinned values, so a later boundary that freezes epoch 2 is
+    covered by the same test: every frozen block that names a manifest is checked
+    against its recorded sha256, and every line of an archive manifest is checked
+    against the file it names. Skips where a work tree has no frozen epoch, which is
+    what keeps a fresh checkout and epoch 1's own run green.
+    """
+    doc_path = WORKSPACE / "rk-work" / "EPOCH.json"
+    if not doc_path.is_file():
+        pytest.skip("no EPOCH.json: this work tree has frozen no epoch")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    blocks = [b for b in doc.get("frozen", []) if isinstance(b, dict) and b.get("path")]
+    if not blocks:
+        pytest.skip("EPOCH.json names no frozen epoch with a path")
+
+    checked = 0
+    for block in blocks:
+        root = WORKSPACE / "rk-work" / block["path"]
+        assert root.is_dir(), f"frozen epoch {block.get('epoch')} names a missing {root}"
+
+        for key in ("manifest", "archive_manifest"):
+            named = block.get(key)
+            if not named:
+                continue
+            manifest = WORKSPACE / "rk-work" / named
+            assert manifest.is_file(), f"{key} names a missing {manifest}"
+            recorded = block.get(f"{key}_sha256")
+            if recorded:
+                assert _sha256_file(manifest) == recorded, (
+                    f"epoch {block.get('epoch')} {key} no longer matches the sha256 "
+                    f"EPOCH.json records for it")
+                checked += 1
+
+        archive_manifest = block.get("archive_manifest")
+        if archive_manifest:
+            manifest = WORKSPACE / "rk-work" / archive_manifest
+            for line in manifest.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                want, _, name = line.partition("  ")
+                # sha256sum records the names as they were passed to it, which for the
+                # archive manifest was from inside archive/. Resolve beside the manifest
+                # first so a manifest written from its own directory also verifies.
+                candidates = (manifest.parent / name.strip(),
+                              manifest.parent / "archive" / name.strip())
+                target = next((q for q in candidates if q.is_file()), None)
+                assert target is not None, (
+                    f"{manifest.name} names {name.strip()!r}, found at neither "
+                    f"{candidates[0]} nor {candidates[1]}")
+                assert _sha256_file(target) == want.strip(), (
+                    f"{target.name} no longer matches the digest frozen for it")
+                checked += 1
+
+    assert checked, "a frozen epoch is recorded but nothing about it was verifiable"

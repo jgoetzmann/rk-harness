@@ -1523,6 +1523,7 @@ def _frozen_epochs(doc: dict) -> tuple[dict, ...]:
             "frozen_at": block.get("frozen_at"),
             "verifier_hash": block.get("verifier_hash"),
             "trace_hash": block.get("trace_hash"),
+            "site_pages": block.get("site_pages"),
         })
     return tuple(sorted(out, key=lambda b: (b["epoch"], str(b.get("frozen_at") or ""))))
 
@@ -2535,15 +2536,43 @@ def _frozen_epoch_blocks() -> tuple[dict, ...]:
     return _frozen_epochs(_load_json_or_none(work_dir() / "EPOCH.json") or {})
 
 
+def _recorded_site_pages(blocks) -> dict[str, tuple[str, ...]]:
+    """site -> the page names EPOCH.json records that epoch's snapshot as publishing.
+
+    A frozen snapshot never changes, so the pages it publishes are a fact of the
+    boundary that froze it and belong in the file that records the boundary. Reading
+    them here rather than off the output directory is what makes the page set a
+    function of this build's inputs: a build into an empty directory and a build into
+    the published root produce the same set, which is what all-epochs-site.md asks for
+    when it says two fresh builds are byte-identical to each other and to the published
+    root.
+
+    A block recording no list, or a malformed one, returns nothing for that site and
+    leaves the directory scan to answer, which keeps a hand-written file that predates
+    this key working exactly as it did.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for block in blocks:
+        site, names = block.get("site"), block.get("site_pages")
+        if not (isinstance(site, str) and _EPOCH_SITE_RE.match(site)):
+            continue
+        if isinstance(names, list) and names and all(isinstance(n, str) for n in names):
+            out[site] = tuple(sorted(names))
+    return out
+
+
 def _epoch_stub_names(out_dir: Path, pages, blocks=(),
                       open_epoch=None) -> list[tuple[str, int, str]]:
     """(site, epoch, page name) for every page a frozen epoch publishes and this one does not.
 
-    The set comes from the published snapshot rather than from the root files _prune is
-    about to delete. The snapshot never changes, so the stub set and its bytes are
-    identical on every rebuild; it also covers a build into a docs/ that holds only the
-    snapshot, and keying off the root files would make the stub self-feeding. A name the
-    current archive re-occupies is a key of pages and gets its real page instead.
+    The set comes from EPOCH.json's frozen[].site_pages, not from the root files _prune
+    is about to delete and not from the snapshot directory itself. Reading the output
+    directory made the page set a function of the output: a build into the published
+    root wrote nineteen stubs and a build into an empty directory wrote none, so no
+    fresh build could be byte-identical to the published root. A block recording no list
+    still falls back to scanning its directory. Keying off the root files would make the
+    stub self-feeding either way. A name the current archive re-occupies is a key of
+    pages and gets its real page instead.
 
     The directory comes from EPOCH.json's frozen[].site, so the panel row and the stub
     set cannot name different things. A snapshot directory the hand-written file forgot
@@ -2584,12 +2613,16 @@ def _epoch_stub_names(out_dir: Path, pages, blocks=(),
     if open_epoch is not None:
         belt = {site: ep for site, ep in belt.items() if ep < int(open_epoch)}
     sites.update(belt)
+    recorded = _recorded_site_pages(blocks)
     found: list[tuple[str, int, str]] = []
     for site in sorted(sites):
-        directory = out_dir / site.rstrip("/")
-        if not directory.is_dir():
-            continue
-        for name in sorted(q.name for q in directory.iterdir() if q.is_file()):
+        names = recorded.get(site)
+        if names is None:
+            directory = out_dir / site.rstrip("/")
+            if not directory.is_dir():
+                continue
+            names = sorted(q.name for q in directory.iterdir() if q.is_file())
+        for name in names:
             if name in pages:
                 continue
             if _CELL_NAME_RE.match(name) or name in _EPOCH_STUB_TITLES:

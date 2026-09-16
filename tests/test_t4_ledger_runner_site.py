@@ -1989,7 +1989,8 @@ SNAPSHOT_CELLS = (
 )
 
 
-def _write_epoch_file(work: Path, *, epoch=2, frozen=None, full=False, raw=None) -> None:
+def _write_epoch_file(work: Path, *, epoch=2, frozen=None, full=False, raw=None,
+                      site_pages=None) -> None:
     """Write rk-work/EPOCH.json, the pointer file the epoch panel reads its number from.
 
     Two shapes, because both are live. full=False writes the thin block that was on disk
@@ -2014,6 +2015,8 @@ def _write_epoch_file(work: Path, *, epoch=2, frozen=None, full=False, raw=None)
             "archive_manifest": "epochs/1/epochs1_archive.sha256",
             "archive_manifest_sha256": "2a" * 32,
         })
+    if site_pages is not None:
+        block["site_pages"] = list(site_pages)
     doc = {"epoch": epoch, "frozen": [block] if frozen is None else list(frozen)}
     if full:
         doc.update({"opened_at": EPOCH1_FROZEN_AT, "decision": "D45",
@@ -5144,6 +5147,48 @@ def test_a_build_over_the_published_site_fails_closed_without_the_frozen_directo
     # the determinism and preflight builds do against the live work directory
     build(arch, fresh)
     assert (fresh / "index.html").is_file()
+
+
+def test_the_stub_set_is_a_function_of_the_inputs_not_the_output_directory(
+        monkeypatch, tmp_path):
+    """all-epochs-site.md asks that two fresh builds be byte-identical to each other and
+    to the published root. Reading the stub set off the output directory broke the
+    second half: building over the published docs/ found epoch-1/ and wrote nineteen
+    stubs, and building into an empty directory found nothing and wrote none, so the
+    page set depended on what was already in the output. EPOCH.json records the pages
+    the frozen snapshot publishes, so both builds now agree."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    planted = SNAPSHOT_CELLS + ("validation.html",)
+    _write_epoch_file(work, full=True, site_pages=sorted(planted + ("index.html",)))
+    blocks = sg._frozen_epoch_blocks()
+
+    published = tmp_path / "docs"
+    _plant_epoch_snapshot(published, planted)
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+
+    assert sg._epoch_stub_names(published, {}, blocks, 2) ==         sg._epoch_stub_names(fresh, {}, blocks, 2)
+
+    build(arch, published)
+    build(arch, fresh)
+    assert sorted(q.name for q in fresh.glob("*.html")) ==         sorted(q.name for q in published.glob("*.html"))
+    assert (fresh / "cell-p2-s4-b1.html").is_file()
+    # and the stub bytes do not depend on the directory either
+    assert (fresh / "cell-p2-s4-b1.html").read_text(encoding="utf-8") ==         (published / "cell-p2-s4-b1.html").read_text(encoding="utf-8")
+
+
+def test_a_block_recording_no_pages_still_reads_its_directory(monkeypatch, tmp_path):
+    """site_pages is an addition, so a hand-written file that predates it has to keep
+    working: the directory scan answers for any block that records no list."""
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    blocks = sg._frozen_epoch_blocks()
+    assert blocks[0].get("site_pages") is None
+    assert [n for _, _, n in sg._epoch_stub_names(out, {}, blocks, 2)]
+    build(arch, out)
+    assert (out / "cell-p2-s4-b1.html").is_file()
 
 
 def test_the_methodology_page_states_the_pinned_pricing_rule(monkeypatch, tmp_path):
