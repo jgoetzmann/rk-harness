@@ -32,12 +32,14 @@ of rk-work (`/work`) and rk-findings (`/findings`), so the process being scored 
 edit its scorer.
 
 `entrypoint.sh` writes a heartbeat, exits if `/harness` is writable (canary K4), checks the
-verifier hash (K3), and runs the golden tests G1 to G20 and canaries K1 and K2. Only then does
+verifier hash (K3), and runs the golden tests G1 to G22 and G28 and canaries K1 and K2 (91
+cases, listed in `tests/golden_gate.txt`). Only then does
 it start `python -m rk_harness.runner`.
 
 ### The verifier hash
 
-Ten files decide every score:
+Fourteen files decide every score (the last four joined the pin at the epoch-2 boundary,
+DECISIONS D45):
 
 ```
 rk_harness/coeffrep.py        rk_harness/orderconditions.py
@@ -45,6 +47,8 @@ rk_harness/verifier.py        rk_harness/costmodel.py
 rk_harness/evaluator.py       rk_harness/problems.py
 fixtures/classical.json       fixtures/problems.json
 fixtures/q15.json             fixtures/known_sequence.s
+rk_harness/tableau.py         rk_harness/simulate.py
+rk_harness/fixedpoint.py      fixtures/m0plus_coeff_ops.json
 ```
 
 `VERIFIER_FILES.txt` lists them and `VERIFIER_HASH` holds their sha256. Every archived record
@@ -119,7 +123,7 @@ tests/                   pytest suite, conftest.py, golden_gate.txt
 scripts/                 container wrapper, host watchdog, checks, workspace copies
 docs/                    design records and the decision register
 Dockerfile, entrypoint.sh
-VERIFIER_FILES.txt       the ten pinned files
+VERIFIER_FILES.txt       the fourteen pinned files
 VERIFIER_HASH            their sha256
 pyproject.toml           dependency pins (the Dockerfile pins the same versions)
 .env.example             credential keys; copy to .env, which is gitignored
@@ -200,7 +204,7 @@ instead.
 
 # the container's own gate, in the order entrypoint.sh runs it
 .venv\Scripts\python.exe -m rk_harness.verifier_hash --check
-.venv\Scripts\python.exe -m pytest tests -rN -k "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or G20_ or K1_ or K2_"
+.venv\Scripts\python.exe -m pytest tests -rN -k "G1_ or G2_ or G3_ or G4_ or G5_ or G6_ or G7_ or G8_ or G9_ or G10_ or G11_ or G12_ or G13_ or G14_ or G15_ or G16_ or G17_ or G18_ or G19_ or G20_ or G21_ or G22_ or G28_ or K1_ or K2_"
 
 # checkout hygiene: every rule the repo states about itself
 .venv\Scripts\python.exe scripts\hygiene.py --all

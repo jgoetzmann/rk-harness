@@ -2693,17 +2693,24 @@ def _relocated_epoch(rel: str) -> int:
     """The frozen epoch a document at a root path was measured in, or 0 for this one.
 
     An epoch boundary relocates the closing epoch's run state to rk-work/epochs/<n>
-    (DECISIONS D45(d)), and the lanes that keep their documents at the root path across
-    that boundary leave the earlier epoch's numbers sitting under a path that means the
-    current epoch. A root document byte-identical to the relocated copy has not been
-    re-measured under the new pin, so the sections that read it say which epoch measured
-    it. The comparison is against the copy EPOCH.json's frozen[].path names, and the
-    newest matching epoch wins, so two builds of one work directory agree.
+    (DECISIONS D45(d)), and root paths then mean the open epoch. A root copy left in
+    place across a boundary, as the epoch-1 relocation once did (D45, amended
+    2026-09-17), would publish the earlier epoch's numbers under such a path, so a root
+    document byte-identical to a relocated copy is labeled with that epoch. Bytes alone
+    cannot tell a copy left in place from a re-measurement that reproduced them, which
+    is why _points_epoch_note also reads the ledger line's time. The comparison is
+    against the copy EPOCH.json's frozen[].path names, and the newest matching epoch
+    wins, so two builds of one work directory agree.
     """
+    return max(_relocated_epochs(rel), default=0)
+
+
+def _relocated_epochs(rel: str) -> frozenset[int]:
+    """Every frozen epoch whose relocated copy of a root document holds its bytes."""
     root = work_dir() / rel
     if not root.is_file():
-        return 0
-    found = 0
+        return frozenset()
+    found: set[int] = set()
     for block in _frozen_epoch_blocks():
         path = block.get("path")
         if not isinstance(path, str) or not path.strip():
@@ -2712,8 +2719,43 @@ def _relocated_epoch(rel: str) -> int:
         if Path(path).is_absolute() or ".." in parts:
             continue
         if _same_bytes(root, work_dir() / path / rel):
-            found = max(found, int(block["epoch"]))
-    return found
+            found.add(int(block["epoch"]))
+    return frozenset(found)
+
+
+def _instant(value) -> float | None:
+    """A stored time as POSIX seconds, or None when it cannot be read.
+
+    Comparisons go through the instant. timefmt.to_ct returns Central datetimes that
+    share one tzinfo, and Python compares those on their wall-clock fields, so two
+    instants in the hour the clocks fall back would compare in the wrong order. The
+    conversion is of stored data only; nothing here reads the clock.
+    """
+    when = timefmt.to_ct(value)
+    return None if when is None else when.timestamp()
+
+
+def _epoch_of_ts(value, blocks=None) -> int | None:
+    """The frozen epoch a stored time falls in, 0 for the open one, None when unknown.
+
+    An epoch runs until its block's frozen_at, so a time at or before the earliest
+    frozen_at it does not pass belongs to that block's epoch. The blocks come sorted by
+    epoch from _frozen_epochs, which is what makes the earliest freeze win. 0 only when
+    every frozen_at reads and the time is later than all of them. None when the time
+    cannot be read, or when it passes every readable freeze before a block whose
+    frozen_at cannot be read, because the time may belong to that block's epoch: the
+    callers leave a label they cannot place off rather than print a wrong one.
+    """
+    when = _instant(value)
+    if when is None:
+        return None
+    for block in (_frozen_epoch_blocks() if blocks is None else blocks):
+        cut = _instant(block.get("frozen_at"))
+        if cut is None:
+            return None
+        if when <= cut:
+            return int(block["epoch"])
+    return 0
 
 
 def _relocated_note(rel: str, what: str) -> str:
@@ -2748,14 +2790,39 @@ def _points_epoch_note(entries, where: str) -> str:
     `where` names the figure or the table, because the label goes beside the numbers it
     is about rather than once at the top of a page: "next to it" is what the epoch
     bullet asks for, and these pages run to tens of thousands of words.
+
+    Byte identity alone does not say an earlier epoch measured an artifact. An artifact
+    holds only the numbers, with no code hash and no time, and most side-track jobs do
+    not depend on the pin, so a point this epoch measures again can write exactly the
+    bytes the relocated copy holds. The newest ledger line that names it says when it
+    was written, so the label is the epoch that line falls in, provided that epoch's
+    relocated copy holds the same bytes. A line later than every freeze is this epoch's
+    measurement and carries no label. An artifact no readable line dates, or whose line
+    no freeze can place, keeps the newest matching epoch, as before.
     """
     rels = sorted({str(e.get("artifact", "")) for e in entries
                    if isinstance(e, dict) and str(e.get("artifact", "")).strip()})
     if not rels:
         return ""
+    newest: dict = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        rel = str(e.get("artifact", ""))
+        when = _instant(e.get("ts"))
+        if rel in rels and when is not None and (rel not in newest or when > newest[rel]):
+            newest[rel] = when
+    blocks = _frozen_epoch_blocks()
     by_epoch: dict[int, int] = {}
     for rel in rels:
-        number = _relocated_epoch(rel)
+        matches = _relocated_epochs(rel)
+        number = max(matches, default=0)
+        if matches and rel in newest:
+            written = _epoch_of_ts(newest[rel], blocks)
+            if written == 0:
+                number = 0
+            elif written in matches:
+                number = written
         if number:
             by_epoch[number] = by_epoch.get(number, 0) + 1
     if not by_epoch:
@@ -3125,12 +3192,33 @@ def _literature_section(digests: list[dict]) -> list[str]:
     if not digests:
         parts.append("<p>no literature digests yet</p>")
         return parts
+    # Cycle numbers restart at an epoch boundary, and the digest log is not relocated
+    # with the run state because the model reads it back as context. So once an epoch
+    # has frozen, each cycle number names the epoch it counts in: a bare "cycle 2608"
+    # beside a "cycle 8" would be an earlier epoch's number at root with no label.
+    blocks = _frozen_epoch_blocks()
+    open_epoch = _open_epoch() if blocks else None
     newest = list(reversed(digests))
+    stamps = []
     for d in newest[:_LIT_SHOWN]:
+        cycle = f"cycle {int(d.get('cycle', 0))}"
+        number = _epoch_of_ts(d.get("ts"), blocks) if blocks else None
+        if number == 0:
+            number = open_epoch
+        stamps.append(f"epoch {number}, {cycle}" if number else cycle)
+    if blocks:
+        every = all(s.startswith("epoch ") for s in stamps)
+        parts.append("<p>Cycle numbers restart at each epoch, so "
+                     + ("every entry names the epoch its cycle counts in."
+                        if every else
+                        "an entry names the epoch its cycle counts in wherever its "
+                        "collection time places it.")
+                     + "</p>")
+    for d, cycle in zip(newest[:_LIT_SHOWN], stamps):
         entry = ['<details class="fold entry">']
         entry.append(f"<summary><strong>{_esc(d.get('topic', ''))}</strong> "
                      f'<span class="when">collected {_esc(_ct(d.get("ts")))}, '
-                     f'cycle {int(d.get("cycle", 0))}</span></summary>')
+                     f'{_esc(cycle)}</span></summary>')
         entry.append("<div>")
         for para in str(d.get("summary", "")).split("\n\n"):
             if para.strip():

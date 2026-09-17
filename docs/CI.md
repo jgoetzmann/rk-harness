@@ -25,7 +25,7 @@ to know before the gate has finished.
 
 | Job | What it proves | Rough time |
 | --- | --- | --- |
-| `gate` | The verifier hash matches its pin (K3), then the golden and canary tests G1-G20, K1-K2. This is `entrypoint.sh`'s check, run in the same order. | 32 s |
+| `gate` | The verifier hash matches its pin (K3), then the golden and canary tests G1-G22, G28, K1-K2. This is `entrypoint.sh`'s check, run in the same order. | 32 s |
 | `suite` | Tiers t1 to t13, sharded five ways by test file. t14, t15, the three t16 files, t17 and t18 are not in the matrix and do not run here. `--durations=10` in every shard so the log carries its own balance data. | 25-87 s per shard, in parallel |
 | `determinism` | Both prototype curves and every side-track artifact the catalogue declares reproduce byte for byte across two independent runs, and no scored file is created. The expected count is read from the catalogue in the job rather than written here. Invariants I5 and D5 in `SIDETRACK-AUTOMATION.md`. | 130 s |
 | `image` | The Dockerfile still builds, the entrypoint gate passes **inside the image on Python 3.12**, and the harness mount is read-only (K4). | 156 s cold, less once cached |

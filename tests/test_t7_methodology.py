@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import os
 import re
 from pathlib import Path
@@ -59,6 +60,40 @@ def _live_work_dir() -> Path:
         if cand and Path(cand).is_dir():
             return Path(cand)
     return Path(_AMBIENT_WORK or "rk-work")
+
+
+def _ledger_work_dir(work: Path) -> Path:
+    """The work directory whose side-track ledger the word budget weighs.
+
+    The root one when it exists. The epoch-2 boundary moved root sidetrack/ aside
+    (DECISIONS D45, amended 2026-09-17), so until the open epoch's side tracks fire the
+    only full ledger is a frozen epoch's, and the budget is about the page with a full
+    ledger section. The newest frozen epoch EPOCH.json names that carries one stands in,
+    and the root directory is returned unchanged when none does, so the caller's own
+    assertion still names what is missing.
+    """
+    if (work / "sidetrack" / "ledger.jsonl").is_file():
+        return work
+    try:
+        doc = json.loads((work / "EPOCH.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return work
+    blocks = doc.get("frozen") if isinstance(doc, dict) else None
+
+    def _epoch_of(block) -> int:
+        try:
+            return int(block.get("epoch"))
+        except (TypeError, ValueError):
+            return 0
+
+    for block in sorted((b for b in (blocks or []) if isinstance(b, dict)),
+                        key=_epoch_of, reverse=True):
+        path = block.get("path")
+        if (isinstance(path, str) and path.strip() and not Path(path).is_absolute()
+                and ".." not in Path(path).parts
+                and (work / path / "sidetrack" / "ledger.jsonl").is_file()):
+            return work / path
+    return work
 
 
 def _fake_page(title: str, body: str, active: str = "", subtitle: str = "") -> str:
@@ -338,9 +373,15 @@ def test_the_page_stays_under_its_word_budget(monkeypatch):
     the retired one-sentence version was false against the code. Measured at 4,857 after
     the rewrite, rounded up to the next 50. The rule is unchanged: the raise is paid for
     once and drift still fails here.
+
+    The ledger is read from _ledger_work_dir, which falls back to the newest frozen
+    epoch's copy while the open epoch has written none. The merged tier count and the
+    render still read the live directory, because that is the page a build publishes.
     """
-    monkeypatch.setenv("RK_WORK_DIR", str(_live_work_dir()))
+    work = _live_work_dir()
+    monkeypatch.setenv("RK_WORK_DIR", str(_ledger_work_dir(work)))
     sidetrack = sitegen._load_sidetrack()
+    monkeypatch.setenv("RK_WORK_DIR", str(work))
     merged = sitegen._merged_tier_count()
     assert sidetrack is not None, (
         "this guard has to weigh the page the build publishes, and the measurement "

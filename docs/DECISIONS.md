@@ -2014,4 +2014,50 @@ repositories. The findings generator now takes the epoch number from
 not rebuilt, so the container still runs the previous pin, and `run.site` is
 false until publish 3.
 
+**Amended 2026-09-17: the root copies go, and one sentence above is wrong.**
+
+(a) *Root paths mean the open epoch, without exception.* The relocation left
+byte-identical copies of `adaptive_archive/`, `implicit_archive/`,
+`sidetrack/` and `LAST_DIRECTIVE.json` at the root, although
+`epochs/1/MANIFEST.json` lists all 113 of those files among the 210 it
+records as moved, and it never moved `schedule/`. The rk-work commit that kept them called them "the live
+tree the running harness writes to". That reason rested on a root
+`RUNSTATE.json` showing cycle 3930 starting on 2026-09-15. A test run wrote
+that file; epoch 1's real cycle 3930 had finished on 2026-09-10, and no
+runner has run since. Nothing in the runtime needs the copies. Kept, they would have taken epoch 2's appends to epoch 1's ledgers,
+mixed epoch-1 rows into the 200-row `schedule/shares.json` window, and let a
+phase-2 cycle reuse the epoch-1 directive D-3929A. All 113 files were
+re-hashed against `epochs/1` and matched, `schedule/` matched the
+`epoch-1-final` tree, and the lot was moved rather than deleted, to
+`D:\Programming-projects\rk-backups\epoch1-root-copies-2026-09-17`, together
+with a stray `epochs/1/HEARTBEAT` the manifest does not list. The tracked
+copies leave the rk-work index. `epochs/1` and the tag hold every byte.
+`literature/` and `prototypes/` stay: the model reads the digest log back as
+context, and nothing reads the prototype curves.
+
+(b) *Labels follow the ledger line, not only the bytes.* A side-track artifact
+holds only numbers, with no code hash and no time, and only two of the ten
+jobs (`sdirk.stiff_suite` and `sdirk.stiff_suite_budget`) call
+`costmodel.cycle_count`. So a point epoch 2 measures again can write the
+exact bytes `epochs/1` holds, and a label keyed on bytes alone would call it
+epoch 1's. `sitegen._points_epoch_note` now labels an artifact with the epoch
+its newest ledger line falls in, and only where that epoch's copy holds the
+same bytes. A line later than every freeze carries no label. Once an epoch
+has frozen, the research log names the epoch beside every literature cycle
+number, because cycle numbers restart at a boundary.
+
+(c) *Correction.* "The container still runs the previous pin" is false. The
+pin check runs the mounted `verifier_hash` module, so an image built before
+the boundary already checked 2db0816c over fourteen files. What it lacked was
+`G21_`, `G22_` and `G28_` in the entrypoint's gate selector. That, not the
+pin, is why the rebuild was required.
+
+(d) *Open.* `lanesearch.code_hash` does not fold in the pin the way
+`sidetrack.code_hash` does. Relocation per (a) is what keeps a boundary from
+carrying lane elites across: an `elites.json` left at the root through a
+boundary that edits no lane file would be merged into the new epoch's
+ranking, and the adaptive lane's elites are priced by the pinned cost model.
+Here the lane hash had moved as well (0c67fece in the epoch-1 elites,
+229c1559 now), so even the copies left at the root would have dropped out.
+
 ---

@@ -2392,8 +2392,12 @@ def test_B67_benchmark_build_is_deterministic_and_flag_resets(monkeypatch, tmp_p
     assert 'href="validation.html"' not in html and 'href="benchmark.html"' not in html
 
 
-def _write_sidetrack(work: Path, points: list[dict]) -> None:
-    """A side-track ledger and its artifacts, in the layout rk_harness.sidetrack writes."""
+def _write_sidetrack(work: Path, points: list[dict],
+                     ts: str = "2026-09-04T00:00:00Z") -> None:
+    """A side-track ledger and its artifacts, in the layout rk_harness.sidetrack writes.
+
+    ts is the time on every ledger line written. The default sits inside epoch 1, before
+    EPOCH1_FROZEN_AT, so a relocated copy of these points reads as epoch 1's."""
     base = work / "sidetrack"
     for p in points:
         rel = f"sidetrack/{p['job']}/{p['key']}.json"
@@ -2403,7 +2407,7 @@ def _write_sidetrack(work: Path, points: list[dict]) -> None:
             {"job": p["job"], "key": p["key"], "closes": p.get("closes", "a question"),
              "summary": p["summary"]}, sort_keys=True), encoding="utf-8")
         with open(base / "ledger.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": "2026-09-04T00:00:00Z", "cycle": 20,
+            fh.write(json.dumps({"ts": ts, "cycle": 20,
                                  "track": p["track"], "job": p["job"], "key": p["key"],
                                  "code_hash": "0123456789abcdef", "status": "ok",
                                  "duration_s": 0.5, "artifact": rel,
@@ -4921,12 +4925,14 @@ def test_check_epoch_label_needs_an_epoch_beside_a_frozen_hash():
 
 
 def _relocate_copy(work, rel: str, epoch: int = 1) -> None:
-    """The state relocation leaves a document in when its lane keeps measuring.
+    """A document relocated to rk-work/epochs/<n> with a copy left at its root path.
 
     An epoch boundary moves the closing epoch's run state to rk-work/epochs/<n>
-    (DECISIONS D45(d)). The lanes and the side-track ledger keep their documents at the
-    root path as well, so the same bytes sit under both paths and the root path, which
-    means the current epoch, holds the earlier epoch's measurements.
+    (DECISIONS D45(d)), and root paths then mean the open epoch. The epoch-1 relocation
+    left copies of the lane and side-track documents at the root path until they were
+    moved aside (D45, amended 2026-09-17). This plants that state, the same bytes under
+    both paths, which the labels exist to catch; a caller that deletes the root copy
+    plants the state a boundary is meant to leave.
     """
     dst = work / "epochs" / str(epoch) / rel
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -4964,11 +4970,12 @@ def test_no_page_at_root_carries_an_epoch_one_number_without_its_label(
     label. The build runs the gate over every page it writes, so this re-reads what was
     written and checks the two published epoch-1 figures are not loose at root.
 
-    The scored archive was relocated, so what is left publishing an earlier epoch's
-    numbers at root is the off-archive lanes: they keep their documents at the root path
-    across a boundary, and a count off one of them is an epoch-1 number under a path
-    that means epoch 2. A hash-prefix gate cannot see those, because neither document
-    carries a verifier hash, so the label is asserted where the numbers are.
+    The scored archive was relocated, so what could still publish an earlier epoch's
+    numbers at root is an off-archive lane document left at its root path across a
+    boundary, as the epoch-1 relocation once left them: a count off one of them is an
+    epoch-1 number under a path that means epoch 2. A hash-prefix gate cannot see
+    those, because neither document carries a verifier hash, so the label is asserted
+    where the numbers are.
     """
     work, arch = _site_archive(monkeypatch, tmp_path)
     _write_epoch_file(work, full=True)
@@ -5085,6 +5092,151 @@ def test_side_track_points_keep_their_label_when_the_ledger_moves_on(
     check_banned(moved)
     build(arch, out)
     assert moved == (out / "adaptive.html").read_text(encoding="utf-8")
+
+
+def test_a_point_measured_again_after_the_freeze_is_not_labeled_with_the_earlier_epoch(
+        monkeypatch, tmp_path):
+    """An artifact holds only numbers, and most side-track jobs do not depend on the pin,
+    so a point this epoch measures again can write exactly the bytes the relocated copy
+    holds. At the epoch-2 boundary the root side-track state was moved aside rather than
+    kept as a live tree (DECISIONS D45, amended 2026-09-17), so every root artifact from
+    then on is this epoch's. Keyed on bytes alone, the label would still have called a
+    re-measured point epoch 1's; the newest ledger line that names an artifact says when
+    it was written, and a line after the freeze clears the label.
+    """
+    work, arch = _site_archive(monkeypatch, tmp_path)
+    _write_epoch_file(work, full=True)
+    # epoch 1's ledger and artifacts, relocated, with nothing left at the root path
+    _write_sidetrack(work, _sidetrack_fixture())
+    _relocate_copy(work, "sidetrack/ledger.jsonl")
+    for point in _sidetrack_fixture():
+        _relocate_copy(work, f"sidetrack/{point['job']}/{point['key']}.json")
+    shutil.rmtree(work / "sidetrack")
+    # this epoch measures both points again, after the freeze, to the same bytes
+    _write_sidetrack(work, _sidetrack_fixture(), ts="2026-09-18T00:00:00Z")
+    for point in _sidetrack_fixture():
+        assert sg._relocated_epoch(f"sidetrack/{point['job']}/{point['key']}.json") == 1
+    assert sg._relocated_epoch("sidetrack/ledger.jsonl") == 0
+    out = tmp_path / "docs"
+    _plant_epoch_snapshot(out, SNAPSHOT_CELLS + ("validation.html",))
+    build(arch, out)
+    for name in ("adaptive.html", "implicit.html", "methodology.html"):
+        html = (out / name).read_text(encoding="utf-8")
+        assert "measured in epoch 1" not in html, name
+        assert "relocated to rk-work/epochs/1" not in html, name
+        check_banned(html)
+
+
+def test_the_points_label_names_the_epoch_the_newest_ledger_line_was_written_in(
+        monkeypatch, tmp_path):
+    """Two boundaries can leave one artifact's bytes under both frozen paths. The label
+    is the epoch its newest ledger line falls in, so a point epoch 1 measured and nobody
+    measured since is not called epoch 2's because epoch 2 relocated the same bytes. A
+    line later than every freeze is this epoch's, and an artifact no readable line dates
+    keeps the newest matching copy, which is what the label said before lines were read.
+    """
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    frozen = [{"epoch": 1, "frozen_at": EPOCH1_FROZEN_AT, "verifier_hash": EPOCH1_VH,
+               "path": "epochs/1"},
+              {"epoch": 2, "frozen_at": "2026-12-01T00:00:00Z", "verifier_hash": EPOCH2_VH,
+               "path": "epochs/2"}]
+    _write_epoch_file(work, epoch=3, frozen=frozen)
+    rel = "sidetrack/adaptive.suite_sweep/buck_converter.json"
+    _write_sidetrack(work, _sidetrack_fixture()[:1])
+    _relocate_copy(work, rel, epoch=1)
+    _relocate_copy(work, rel, epoch=2)
+    assert sg._relocated_epochs(rel) == frozenset({1, 2})
+
+    def note(*lines):
+        return sg._points_epoch_note([dict(line, artifact=rel) for line in lines],
+                                     "this table")
+
+    assert "measured in epoch 1:" in note({"ts": "2026-09-04T00:00:00Z"})
+    assert "measured in epoch 2:" in note({"ts": "2026-10-01T00:00:00Z"})
+    # the newest line decides, in the order the append-only ledger writes lines and in
+    # the reverse
+    assert "measured in epoch 2:" in note({"ts": "2026-09-04T00:00:00Z"},
+                                          {"ts": "2026-10-01T00:00:00Z"})
+    assert "measured in epoch 2:" in note({"ts": "2026-10-01T00:00:00Z"},
+                                          {"ts": "2026-09-04T00:00:00Z"})
+    assert note({"ts": "2026-12-02T00:00:00Z"}) == ""
+    assert note({"ts": "2026-09-04T00:00:00Z"}, {"ts": "2026-12-02T00:00:00Z"}) == ""
+    assert "measured in epoch 2:" in note({"ts": "not a time"})
+    assert "measured in epoch 2:" in note({})
+    # a numeric time that reads is compared as a time, next to a string one
+    assert note({"ts": 1796212800}, {"ts": "2026-09-04T00:00:00Z"}) == ""
+    # a line dated in epoch 1 whose bytes epoch 1's copy does not hold: the newest match
+    (work / "epochs" / "1" / rel).write_text("{}", encoding="utf-8")
+    assert "measured in epoch 2:" in note({"ts": "2026-09-04T00:00:00Z"})
+
+
+def test_a_time_no_freeze_can_place_leaves_the_label_as_the_bytes_say(
+        monkeypatch, tmp_path):
+    """EPOCH.json is hand-written, and a block without a readable frozen_at cannot say
+    where its epoch ended. A time after every readable freeze may still belong to that
+    epoch, so it is not read as the open epoch's: a point keeps the label its bytes give
+    it and a digest prints no epoch, rather than the wrong one. Instants are compared as
+    instants, so the hour the clocks fall back does not reorder them.
+    """
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    frozen = [{"epoch": 1, "verifier_hash": EPOCH1_VH, "path": "epochs/1"}]
+    _write_epoch_file(work, epoch=2, frozen=frozen)
+    blocks = sg._frozen_epoch_blocks()
+    assert sg._epoch_of_ts("2026-09-04T00:00:00Z", blocks) is None
+    rel = "sidetrack/adaptive.suite_sweep/buck_converter.json"
+    _write_sidetrack(work, _sidetrack_fixture()[:1])
+    _relocate_copy(work, rel, epoch=1)
+    assert "measured in epoch 1:" in sg._points_epoch_note(
+        [{"artifact": rel, "ts": "2026-09-04T00:00:00Z"}], "this table")
+    digests = [{"ts": "2026-09-09T11:00:00Z", "cycle": 2608, "topic": "older reading",
+                "summary": "s."}]
+    lit = render_hypotheses([], digests=digests).split('<h2 id="literature">', 1)[1]
+    assert "collected 2026-09-09 06:00 CT, cycle 2608</span>" in lit
+    assert "epoch 2, cycle 2608" not in lit
+    assert "wherever its collection time places it" in lit
+
+    # a freeze at 01:50 CDT, and a line twenty minutes later, at 01:10 CST
+    fall_back = [{"epoch": 1, "frozen_at": "2026-11-01T06:50:00Z",
+                  "verifier_hash": EPOCH1_VH, "path": "epochs/1"}]
+    _write_epoch_file(work, epoch=2, frozen=fall_back)
+    blocks = sg._frozen_epoch_blocks()
+    assert sg._epoch_of_ts("2026-11-01T07:10:00Z", blocks) == 0
+    assert sg._epoch_of_ts("2026-11-01T06:40:00Z", blocks) == 1
+    assert sg._points_epoch_note(
+        [{"artifact": rel, "ts": "2026-11-01T07:10:00Z"}], "this table") == ""
+
+
+def test_literature_cycles_name_their_epoch_once_an_epoch_has_frozen(monkeypatch, tmp_path):
+    """Cycle numbers restart at a boundary and the digest log stays at the root path,
+    because the model reads it back as context. Without a label the research log would
+    print epoch 1's "cycle 2608" beside epoch 2's "cycle 8" at root, an earlier epoch's
+    number with nothing next to it saying so, which is the bullet the epoch label
+    exists for. A work directory with no frozen epoch renders as it always did.
+    """
+    work, _arch = _site_archive(monkeypatch, tmp_path)
+    digests = [{"ts": "2026-09-09T11:00:00Z", "cycle": 2608, "topic": "older reading",
+                "summary": "s."},
+               {"ts": "2026-09-18T11:00:00Z", "cycle": 8, "topic": "newer reading",
+                "summary": "s."},
+               {"ts": "", "cycle": 9, "topic": "undated reading", "summary": "s."}]
+    bare = render_hypotheses([], digests=digests).split('<h2 id="literature">', 1)[1]
+    assert "cycle 2608</span>" in bare and "cycle 8</span>" in bare
+    assert "epoch" not in bare.lower()
+    _write_epoch_file(work, full=True)
+    html = render_hypotheses([], digests=digests)
+    lit = html.split('<h2 id="literature">', 1)[1]
+    assert "Cycle numbers restart at each epoch" in lit
+    assert "epoch 1, cycle 2608</span>" in lit
+    assert "epoch 2, cycle 8</span>" in lit
+    # a digest whose time cannot be read is not placed in an epoch by guesswork, and
+    # the sentence above the list says only what the list does
+    assert "collected n/a, cycle 9</span>" in lit
+    assert "wherever its collection time places it" in lit
+    dated = render_hypotheses([], digests=digests[:2]).split('<h2 id="literature">', 1)[1]
+    assert "so every entry names the epoch its cycle counts in" in dated
+    sg.check_epoch_label("hypotheses.html", html, sg._frozen_epoch_blocks())
+    check_banned(html)
+    assert html == render_hypotheses([], digests=digests)
 
 
 def test_a_directory_named_for_the_open_epoch_is_not_read_as_a_frozen_site(
